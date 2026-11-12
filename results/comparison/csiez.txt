@@ -1,0 +1,6 @@
+case=csiez
+status=PASS
+max_abs_error=  1.7763568394002505E-15
+max_rel_error=  4.2188474935755767E-15
+abs_tolerance=  1.0000000000000001E-09
+rel_tolerance=  1.0000000000000001E-09

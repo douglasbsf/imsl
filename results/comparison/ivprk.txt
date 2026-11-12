@@ -1,0 +1,6 @@
+case=ivprk
+status=PASS
+max_abs_error=  5.3277382505712012E-12
+max_rel_error=  1.4482294073097625E-11
+abs_tolerance=  1.0000000000000001E-09
+rel_tolerance=  1.0000000000000001E-09

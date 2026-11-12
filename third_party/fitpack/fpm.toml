@@ -1,0 +1,61 @@
+name        = "fitpack"
+version     = "2.0.0"
+author      = "Federico Perini"
+copyright   = "Copyright (c) 2022-2024, Federico Perini" 
+license     = "BSD-3-Clause"
+description = "Modern Fortran FITPACK"
+homepage    = "https://github.com/perazz/fitpack"
+keywords    = ["curve fitting","spline","interpolation","smoothing","splines","surface fitting"]
+
+[build]
+auto-executables = false
+auto-examples    = false
+auto-tests       = true
+module-naming    = "fitpack"
+
+[library]
+source-dir  = "src"
+include-dir = "include"
+
+[install]
+library = true
+
+[[example]]
+name = "example_curve"
+source-dir = "examples"
+main = "example_curve.f90"
+
+[[example]]
+name = "example_periodic_curve"
+source-dir = "examples"
+main = "example_periodic_curve.f90"
+
+[[example]]
+name = "example_parametric_curves"
+source-dir = "examples"
+main = "example_parametric_curves.f90"
+
+[[example]]
+name = "example_convex_curve"
+source-dir = "examples"
+main = "example_convex_curve.f90"
+
+[[example]]
+name = "example_surface"
+source-dir = "examples"
+main = "example_surface.f90"
+
+[[example]]
+name = "example_grid_surface"
+source-dir = "examples"
+main = "example_grid_surface.f90"
+
+[[example]]
+name = "example_polar"
+source-dir = "examples"
+main = "example_polar.f90"
+
+[[example]]
+name = "example_sphere"
+source-dir = "examples"
+main = "example_sphere.f90"

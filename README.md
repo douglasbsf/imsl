@@ -1,120 +1,102 @@
-# RotorTest — IMSL vs open-source (100% Fortran)
+# Validacao experimental — IMSL Fortran × bibliotecas open-source
 
-**Objetivo:** reproduzir um caso determinístico para cada uma das **19 entradas** da arquitetura RotorTest, executar o exemplo IMSL (quando o fornecedor estiver instalado) e sua implementação de referência **100% em Fortran**, e comparar os resultados automaticamente usando **um validador Fortran**.
+Comparacao **executada de fato** entre IMSL FNL 2024.1.0 (comercial) e alternativas open-source em Fortran puro. Sem Python/NumPy/SciPy no caminho numerico.
 
-**Nenhum código Python, NumPy, SciPy, Babel, pip ou runtime Python integra este projeto.** Os scripts `.sh` e `.bat` servem apenas para compilar e executar programas Fortran.
+## Resultado desta execucao (Windows)
 
-## Resultado efetivamente obtido
+- **19/19 PASS** com IMSL e open-source ambos executados e comparados.
+- Relatorio Markdown: [`results/validation_report.md`](results/validation_report.md)
+- Relatorio PDF final: [`results/validation_report_final.pdf`](results/validation_report_final.pdf)
+- Comparador Fortran: `tools/compare_results.f90` → `results/comparison/summary.tsv`
+- Regenerar PDF: `python tools/generate_validation_pdf.py`
 
-- **19/19 exemplos open-source em Fortran compilados e executados** neste ambiente Linux, com GNU Fortran e bibliotecas LAPACK/BLAS, em 12/11/2026.
-- **19/19 verificações contra resultados analíticos/referências independentes** aprovadas pelo validador Fortran (`tools/compare.f90`).
-- **0/19 comparações IMSL ↔ Fortran executadas**: não há IMSL, sua licença, nem Intel Fortran disponível no ambiente de geração. As 19 versões IMSL/Intel são fornecidas como fontes para compilação no ambiente Windows licenciado. O resultado IMSL não foi inventado.
-- **Importante:** a aprovação contra um exemplo analítico não constitui equivalência completa do solver real, especialmente na otimização com limites e no integrador ODE.
+## Ambiente localizado
 
-Arquivos de evidência: `results/opensource.txt` e `results/comparison.tsv`. Campos `NOT_RUN` indicam ausência de execução IMSL, não sucesso.
+| Componente | Caminho / versao |
+|---|---|
+| IMSL FNL 2024.1.0 | `C:\Program Files (x86)\RogueWave\imsl\fnl-2024.1.0\win110in240x64` |
+| Setup | `...\bin\fnlsetup.bat` |
+| Link usado | `imsl_dll.lib` (`LINK_FNL_IMSL`; evita MKL `mkl_intel_thread.2.dll`) |
+| ifort Classic | 2021.13.1 via oneAPI 2024.2.1 |
+| VS linker | Build Tools 2022 (`VS2022INSTALLDIR`) |
+| gfortran | MSYS2 UCRT64 16.2.0 (`C:\msys64\ucrt64\bin`) |
+| OpenBLAS | pacote MSYS2 `mingw-w64-ucrt-x86_64-openblas` |
+
+> Nota: `compiler\latest\lib` nesta instalacao oneAPI nao contem `ifmodintr.lib`; os scripts prepending `compiler\2024.2\lib`.
+
+## Reproduzir todos os testes
+
+```powershell
+cd C:\Users\douglas\Projects\imsl
+
+# 1) Open-source (gfortran + OpenBLAS + third_party)
+powershell -ExecutionPolicy Bypass -File .\scripts\build_opensource.ps1
+
+# 2) IMSL (ifort + imsl_dll)
+cmd /c .\scripts\run_imsl_all.bat
+
+# 3) Comparador + relatorio
+powershell -ExecutionPolicy Bypass -File .\scripts\build_and_run_all.ps1
+```
+
+Ou, apos o passo 1–2:
+
+```powershell
+$env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+gfortran -O2 -std=f2008 tools\compare_results.f90 -o build\compare_results.exe
+.\build\compare_results.exe
+```
+
+### GALAHAD (necessario para BCLSF)
+
+```bash
+# MSYS2 UCRT64
+export PATH=/ucrt64/bin:$PATH
+cd /c/Users/douglas/Projects/imsl/third_party/galahad
+meson setup build-bnls -Ddefault_library=static -Dlibblas=openblas -Dliblapack=openblas \
+  -Dexamples=false -Dtests=false -Dpythoniface=false -Dbinaries=false -Dciface=false \
+  -Dsingle=false -Ddouble=true
+ninja -C build-bnls -j2
+```
+
+Depois reexecute `build_opensource.ps1` (caso `bclsf`).
 
 ## Estrutura
 
 ```text
-imsl/
-  *.f90                        # IMSL: 18 entradas + IFNLS: Intel Fortran (não IMSL)
-opensource/
-  lapack_cases.f90             # 12 casos em Fortran chamando BLAS/LAPACK
-  extra_cases.f90              # 7 casos adicionais em Fortran
-                                # (BCLSF, UNLSF, U4LSF, IVPRK, SVIGN, UMACH, IFNLS)
-tools/
-  compare.f90                  # Verificação analítica + comparação IMSL ↔ Fortran
-scripts/
-  run_opensource.sh            # Build Linux/macOS (gfortran, LAPACK/BLAS)
-  build_opensource_windows.bat # Build Windows (gfortran + OpenBLAS)
-  build_and_run_imsl.bat       # Build IMSL com Intel Fortran/licença
+examples/           # imsl_<rotina>.f90 e opensource_<rotina>.f90
+imsl/               # fontes IMSL originais (incluidos pelos examples)
+common/             # emit_utils e helpers open-source
+third_party/        # minpack, fitpack, dop853, galahad, stdlib*
+scripts/            # build_opensource.ps1, run_imsl_all.bat, build_and_run_all.ps1
+tools/compare_results.f90
 results/
-  opensource.txt               # Saída real dos 19 casos Fortran
-  comparison.tsv               # Resultado real do validador Fortran
-  imsl/                        # Saídas IMSL geradas no ambiente licenciado
-docs/
-  coverage.csv                 # Mapeamento das 19 entradas
+  imsl/ opensource/ comparison/ logs/
+  validation_report.md
 ```
 
-## Compilação no macOS
+## Mapeamento das 19 entradas
 
-A pasta solicitada é `/Users/douglasfigueiredo/Projects/imsl`. A entrega é um ZIP: extraia o conteúdo nessa pasta; o ambiente de geração **não acessa diretamente seu Mac**.
-
-```bash
-mkdir -p /Users/douglasfigueiredo/Projects/imsl
-unzip imsl-comparison-fortran.zip -d /Users/douglasfigueiredo/Projects/imsl
-cd /Users/douglasfigueiredo/Projects/imsl
-brew install gcc openblas
-bash scripts/run_opensource.sh
-```
-
-Use `FC=gfortran-15` (ou a versão instalada) se o Homebrew não disponibilizar o atalho `gfortran`. O script detecta o `openblas` do Homebrew automaticamente. Em Linux Debian/Ubuntu, instale `gfortran liblapack-dev libblas-dev` e execute o mesmo script.
-
-Para compilar manualmente no Linux:
-
-```bash
-gfortran -O0 -g -Wall -Wextra -fcheck=all \
-  opensource/extra_cases.f90 opensource/lapack_cases.f90 \
-  -llapack -lblas -o results/opensource.exe
-
-gfortran -O0 -g -Wall -Wextra -fcheck=all \
-  tools/compare.f90 -o results/compare.exe
-
-./results/opensource.exe > results/opensource.txt
-./results/compare.exe
-```
-
-## Compilação no Windows — open-source em Fortran
-
-Instale GNU Fortran e OpenBLAS via MSYS2 UCRT64 ou equivalente. Abra o prompt correspondente e execute:
-
-```bat
-scripts\build_opensource_windows.bat
-```
-
-Se sua distribuição fornecer LAPACK/BLAS separados em vez de OpenBLAS, ajuste `LAPACK_LIBS` para `-llapack -lblas`. Esse build **não depende da IMSL nem da Intel oneMKL**.
-
-## Compilação no Windows — IMSL em Fortran
-
-1. Instale o IMSL FNL correspondente ao compilador Intel Fortran, configure a licença e o ambiente conforme [README oficial](https://help.imsl.com/fortran/common/README.html).
-2. Use um Intel Fortran Command Prompt, rode o `fnlsetup.bat` **da instalação IMSL** para definir `F90`, `F90FLAGS` e `LINK_FNL`.
-3. Execute o build open-source acima (para criar `results/opensource.txt` e o validador Fortran).
-4. Execute:
-
-```bat
-scripts\build_and_run_imsl.bat
-```
-
-O script compila/executa os exemplos IMSL, escreve `results\imsl\<case>.txt` e executa `results\compare.exe --strict-imsl`. A opção `--strict-imsl` reprova a execução caso falte qualquer saída requerida. Para comparação não estrita: `results\compare.exe --imsl`.
-
-**Atenção:** os exemplos IMSL foram elaborados com interfaces documentadas, mas ainda **não compilados** contra a versão exata do pacote RotorTest; variações de interfaces e convenções de precisão devem ser verificadas com o compilador e as bibliotecas instalados. Não incluímos binaries, runtime, arquivos de licença ou código proprietário da IMSL.
-
-## Metodologia e limites
-
-| Rotinas | Implementação de referência em Fortran | O que foi efetivamente testado |
+| Rotina | Open-source | Status tipico |
 |---|---|---|
-| EVCRG, EVCCG, EVLCG, GVCRG | LAPACK `DGEEV`, `ZGEEV`, `DGGEV` | Autovalores e resíduos de autovetores em matrizes pequenas |
-| MRRRR, MCRCR, MUCRV | BLAS `DGEMM`, `ZGEMM`, `ZGEMV` | Produtos matriciais e matriz-vetor |
-| linear_operators, LSLCG, LIN_SOL_GEN | LAPACK `DGESV`, `ZGESV` | Soluções lineares específicas |
-| RCURV | LAPACK `DGELS` | Ajuste de polinômio quadrático |
-| CSIEZ | Fortran + LAPACK `DGESV` | Interpolação cúbica *not-a-knot* |
-| BCLSF | Exemplo de Levenberg–Marquardt projetado + LAPACK `DGESV` | Solução com limite superior ativo; **não é substituição genérica de BCLSF** |
-| UNLSF, U4LSF | Exemplo Levenberg–Marquardt simplificado + LAPACK `DGESV` | Rosenbrock sem limites, com duas configurações de tolerância |
-| IVPRK | Integrador RK4 escrito em Fortran | `y'=-y`; **método diferente do IMSL RK-Verner 5/6** |
-| SVIGN | Ordenação por inserção em Fortran | Cinco inteiros |
-| UMACH | `ISO_FORTRAN_ENV` | Unidade de saída funcional |
-| IFNLS | Formatação específica por Fortran | String `1.234,50` apenas para o teste; **IFNLS é do Intel Fortran, não IMSL** |
+| EVCRG | LAPACK DGEEV | PASS |
+| EVCCG | LAPACK ZGEEV | PASS |
+| EVLCG | LAPACK ZGEEV | PASS |
+| GVCRG | LAPACK DGGEV | PASS |
+| MRRRR | BLAS DGEMM | PASS |
+| MCRCR | BLAS ZGEMM | PASS |
+| MUCRV | BLAS ZGEMV | PASS |
+| LINEAR_OPERATORS | LAPACK DGESV | PASS |
+| LSLCG | LAPACK ZGESV | PASS |
+| LIN_SOL_GEN | LAPACK DGESV | PASS |
+| RCURV | LAPACK DGELS | PASS |
+| CSIEZ | FITPACK | PASS |
+| BCLSF | GALAHAD BNLS | PASS |
+| UNLSF | MINPACK LMDIF | PASS |
+| U4LSF | MINPACK (tol) | PASS |
+| IVPRK | DOP853 | PASS |
+| SVIGN | stdlib SORT | PASS |
+| UMACH | ISO_FORTRAN_ENV | PASS |
+| IFNLS | formatacao / Intel NLS | PASS (nao e IMSL) |
 
-As 12 primeiras entradas usam bibliotecas LAPACK/BLAS de fato. As outras 7 são **implementações didáticas open-source inteiramente Fortran**, não simulações de SciPy. Para migração de produção de `UNLSF`, avaliar diretamente [MINPACK em Fortran](https://github.com/fortran-lang/minpack); de `BCLSF`, avaliar [GALAHAD BNLS](https://github.com/ralna/GALAHAD); de `IVPRK`, avaliar [DOP853 em Fortran](https://github.com/jacobwilliams/dop853). Essas bibliotecas adicionais **não foram integradas/validadas neste protótipo**.
-
-O validador compara entradas/saídas com tolerâncias por caso (numéricas absolutas): `1e-8` em geral, `1e-6` para `UNLSF/U4LSF`, `1e-5` para `BCLSF/IVPRK`. Autovetores não são comparados componente a componente porque sua orientação/fase é arbitrária; os exemplos verificam resíduos de autovetores. `IFNLS` usa comparação de string específica do exemplo, que pode depender do locale configurado no Windows.
-
-**Não conclua equivalência em produção a partir desses casos pequenos.** A próxima fase é testar valores reais do RotorTest, tolerâncias exigidas pelo produto, limites ativos, condicionamento das matrizes, convergência e desempenho.
-
-## Documentação
-
-- IMSL FNL: https://help.imsl.com/fortran/common/README.html
-- IMSL BCLSF: https://help.imsl.com/fortran/2025.1/html/fnlmath/current/BCLSF.htm
-- IMSL RCURV: https://help.imsl.com/fortran/2025.1/html/fnlstat/current/RCURV.htm
-- LAPACK: https://www.netlib.org/lapack/
-- BLAS/OpenBLAS: https://github.com/OpenMathLib/OpenBLAS
+Documentacao IMSL: https://help.imsl.com/fortran/common/README.html

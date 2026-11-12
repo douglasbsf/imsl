@@ -1,0 +1,6 @@
+case=rcurv
+status=PASS
+max_abs_error=  4.4408920985006262E-16
+max_rel_error=  4.4408920985006262E-16
+abs_tolerance=  1.0000000000000000E-10
+rel_tolerance=  1.0000000000000000E-10

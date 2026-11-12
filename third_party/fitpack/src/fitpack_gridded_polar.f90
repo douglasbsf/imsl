@@ -1,0 +1,522 @@
+! **************************************************************************************************
+!                                ____________________  ___   ________ __
+!                               / ____/  _/_  __/ __ \/   | / ____/ //_/
+!                              / /_   / /  / / / /_/ / /| |/ /   / ,<
+!                             / __/ _/ /  / / / ____/ ___ / /___/ /| |
+!                            /_/   /___/ /_/ /_/   /_/  |_\____/_/ |_|
+!
+!                                     A Curve Fitting Package
+!
+!   Refactored by Federico Perini, 10/6/2022
+!   Based on the netlib library by Paul Dierckx
+!
+!   References :
+!     - C. De Boor, "On calculating with b-splines", J Approx Theory 6 (1972) 50-62
+!     - M. G. Cox, "The numerical evaluation of b-splines", J Inst Maths Applics 10 (1972) 134-149
+!     - P. Dierckx, "Curve and surface fitting with splines", Monographs on numerical analysis,
+!                    Oxford university press, 1993.
+!
+! **************************************************************************************************
+!> @brief OOP wrapper for bivariate spline fitting on a gridded polar disc.
+!!
+!! Provides fitpack_grid_polar, a derived type for fitting bicubic splines to data
+!! sampled on a polar grid \f$ (u_i, v_j) \f$ over a disc of constant radius \f$ r \f$.
+!! The coordinate mapping is:
+!! \f[
+!!     x = u \, r \cos v, \quad y = u \, r \sin v, \quad 0 \leq u \leq 1, \; -\pi \leq v \leq \pi
+!! \f]
+!! Continuity constraints at the origin and optional specification of the function value
+!! \f$ z_0 = f(0,0) \f$ are supported. Uses the pogrid core routine.
+!!
+!! @see Dierckx, Ch. 11, §11.1 (pp. 255–263); pogrid
+module fitpack_gridded_polar
+    use fitpack_core
+    use fitpack_fitters
+    implicit none
+    private
+
+    public :: fitpack_grid_polar
+
+    !> @brief Bicubic spline fitter for data on a gridded polar disc.
+    !!
+    !! Stores the grid coordinates \f$ u_i \f$, \f$ v_j \f$, the constant boundary
+    !! radius \f$ r \f$, gridded function values \f$ z(i, j) \f$, and the fitted B-spline
+    !! representation. The origin value \f$ z_0 \f$ may optionally be prescribed (exactly
+    !! or approximately), and zero-gradient boundary conditions at the origin can be enforced.
+    !!
+    !! @see Dierckx, Ch. 11, §11.1 (pp. 255–263)
+    type, extends(fitpack_fitter) :: fitpack_grid_polar
+
+        !> Coordinates of the data points in grid coordinates (u,v) and domain size
+        real(FP_REAL), allocatable :: u(:),v(:)
+        real(FP_REAL) :: r = zero
+
+        !> Function values at the points
+        real(FP_REAL), allocatable :: z(:,:)    ! Function values z(iu,iv)
+
+        ! Origin of the polar domain
+        !> Function value at the origin
+        real(FP_REAL) :: z0 = zero              ! Function value at the origin
+
+        !> Fit spline to z0 exactly at the origin
+        logical :: z0_present = .false.
+        logical :: z0_exact   = .false.
+
+        !> Decide if the origin should have zero-gradient BCs in both u and v
+        logical :: z0_zero_gradient = .false.
+
+        !> Node weights are not allowed
+
+        ! Estimated and actual number of knots and their allocations
+        integer :: nest(2)  = 0
+        integer :: nmax     = 0
+        ! (lwrk/wrk inherited from fitpack_fitter)
+
+        ! Knots
+        integer     :: knots(2) = 0
+        real(FP_REAL), allocatable :: t(:,:) ! Knot locations (:,1)=x; (:,2)=y
+
+        ! Curve behavior
+        integer :: bc_continuity_origin = 1 ! Continuity at origin (C0, C1)
+        integer :: bc_boundary = OUTSIDE_EXTRAPOLATE ! Extrapolate (=0) or go to zero (=1)
+
+        contains
+
+           !> Clean memory
+           procedure :: destroy       => surf_destroy
+
+           !> Set new points
+           procedure :: new_points    => surf_new_points
+
+           !> Generate new fit
+           procedure :: new_fit       => surf_new_fit
+
+           !> Set origin BC
+           procedure :: set_origin_BC
+
+           !> Generate/update fitting curve, with optional smoothing
+           procedure :: fit           => polr_fit_automatic_knots
+           procedure :: least_squares => polr_fit_least_squares
+           procedure :: interpolate   => polr_fit_interpolating
+
+           !> Evaluate gridded domain at given x,y coordinates
+           procedure, private :: gridded_eval_one
+           procedure, private :: gridded_eval_many
+           generic :: eval => gridded_eval_one,gridded_eval_many
+
+           !> Parallel communication interface
+           procedure :: comm_size   => gridpolar_comm_size
+           procedure :: comm_pack   => gridpolar_comm_pack
+           procedure :: comm_expand => gridpolar_comm_expand
+
+           !> Write to disk
+           procedure :: write => gridded_to_disk
+
+    end type fitpack_grid_polar
+
+    interface fitpack_grid_polar
+       module procedure surf_new_from_points
+    end interface fitpack_grid_polar
+
+    contains
+
+    !> @brief Fit a least-squares gridded polar surface with fixed knots.
+    !!
+    !! @see pogrid
+    integer function polr_fit_least_squares(this,smoothing,reset_knots) result(ierr)
+       class(fitpack_grid_polar), intent(inout) :: this
+       real(FP_REAL), optional, intent(in) :: smoothing
+       logical, optional, intent(in) :: reset_knots
+
+       logical :: do_reset
+
+       ! Optionally recompute knots via a smoothing fit first
+       do_reset = .false.; if (present(reset_knots)) do_reset = reset_knots
+       if (do_reset) then
+           this%iopt = IOPT_NEW_SMOOTHING
+           ierr = this%fit(smoothing)
+           if (.not.FITPACK_SUCCESS(ierr)) return
+       end if
+
+       this%iopt = IOPT_NEW_LEASTSQUARES
+       ierr = this%fit()
+
+    end function polr_fit_least_squares
+
+    !> @brief Fit an interpolating gridded polar surface (\f$ s = 0 \f$).
+    !!
+    !! @see pogrid
+    integer function polr_fit_interpolating(this,reset_knots) result(ierr)
+        class(fitpack_grid_polar), intent(inout) :: this
+        logical, optional, intent(in) :: reset_knots
+
+        logical :: do_reset
+
+        do_reset = .true.; if (present(reset_knots)) do_reset = reset_knots
+        if (do_reset) this%iopt = IOPT_NEW_SMOOTHING
+        ierr = polr_fit_automatic_knots(this,smoothing=zero,keep_knots=.not.do_reset)
+
+    end function polr_fit_interpolating
+
+
+    !> @brief Fit a smoothing gridded polar surface with automatic knot placement.
+    !!
+    !! Uses the pogrid core routine. Origin continuity constraints and optional function
+    !! value at the origin are configured via `set_origin_BC`.
+    !!
+    !! @see pogrid
+    integer function polr_fit_automatic_knots(this,smoothing,keep_knots) result(ierr)
+        class(fitpack_grid_polar), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: smoothing
+        logical, optional, intent(in) :: keep_knots
+
+        integer :: loop,nit,iopt(3),ider(2)
+        real(FP_REAL) :: smooth_now(3)
+        logical :: do_guard
+
+        call get_smoothing(this%smoothing,smoothing,nit,smooth_now)
+
+        !> Ensure we start with new knots (unless caller wants to keep them)
+        do_guard = .true.; if (present(keep_knots)) do_guard = .not.keep_knots
+        if (do_guard .and. this%iopt==IOPT_OLD_FIT) this%iopt = IOPT_NEW_SMOOTHING
+
+        do loop=1,nit
+
+            ! Set current smoothing
+            this%smoothing = smooth_now(loop)
+
+            ! [Continuation, Origin continuity, Boundary BC]
+            iopt = [this%iopt,this%bc_continuity_origin,this%bc_boundary]
+
+            ! [Fit z0 exactly, z0 zero gradient BC]
+            ider = [merge(merge(1,0,this%z0_exact),-1,this%z0_present), &
+                    merge(1,0,this%z0_zero_gradient .and. this%bc_continuity_origin>0)]
+
+            call pogrid(iopt,                         &  ! Continuation and BCs
+                        ider,                         &  ! Origin point behavior
+                        size(this%u),this%u,          &  ! U grid
+                        size(this%v),this%v,          &  ! V grid
+                        this%z,this%z0,               &  ! Gridded function values
+                        this%r,                       &  ! Polar domain boundary
+                        this%smoothing,               &  ! Smoothing parameter
+                        this%nest(1),this%nest(2),    &  ! Knot space
+                        this%knots(1),this%t(:,1),    &  ! u (0:1) knots (out)
+                        this%knots(2),this%t(:,2),    &  ! v (-pi:pi) knots (out)
+                        this%c,this%fp,               &  ! Spline representation and MSE
+                        this%wrk,this%lwrk,           &  ! memory
+                        this%iwrk,this%liwrk,         &  ! memory
+                        ierr)                            ! Error flag
+
+            ! If fit was successful, set iopt to "old"
+            if (FITPACK_SUCCESS(ierr)) this%iopt = IOPT_OLD_FIT
+
+        end do
+
+    end function polr_fit_automatic_knots
+
+
+    !> @brief Destroy a gridded polar surface object and release all allocated memory.
+    elemental subroutine surf_destroy(this)
+       class(fitpack_grid_polar), intent(inout) :: this
+       integer :: ierr
+       call this%destroy_base()
+       this%r = zero
+       this%z0 = zero
+       this%z0_exact = .false.
+       this%z0_present = .false.
+       this%z0_zero_gradient = .false.
+       deallocate(this%u,stat=ierr)
+       deallocate(this%v,stat=ierr)
+       deallocate(this%z,stat=ierr)
+       deallocate(this%t,stat=ierr)
+
+       this%bc_boundary = OUTSIDE_EXTRAPOLATE
+       this%bc_continuity_origin = 1
+       this%nest      = 0
+       this%nmax      = 0
+       this%knots     = 0
+
+    end subroutine surf_destroy
+
+    !> @brief Load new gridded polar data and allocate workspace.
+    !!
+    !! @param[in,out] this  The grid polar surface (destroyed and reinitialized).
+    !! @param[in]     u     Radial grid values \f$ u_i \in [0, 1] \f$.
+    !! @param[in]     v     Angular grid values \f$ v_j \in [-\pi, \pi] \f$.
+    !! @param[in]     r     Constant boundary radius.
+    !! @param[in]     z     Gridded function values `z(j,i)`.
+    !! @param[in]     z0    Optional function value at the origin.
+    !!
+    !! @see pogrid
+    subroutine surf_new_points(this,u,v,r,z,z0)
+        class(fitpack_grid_polar), intent(inout) :: this
+        real(FP_REAL), intent(in) :: u(:),v(:),r ! polar domain
+        real(FP_REAL), intent(in) :: z(size(v),size(u)) ! Gridded values
+        real(FP_REAL), optional, intent(in) :: z0 ! Origin value (optional)
+
+        integer :: clen,m(2),q
+        integer, parameter :: SAFE = 2
+
+        associate(nest=>this%nest,nmax=>this%nmax)
+
+        call this%destroy()
+
+        m = [size(u),size(v)] ! /= shape(z), == shape(transpose(z))
+
+        ! Set domain radius
+        this%r = r
+
+        ! Copy grid and data
+        allocate(this%u(m(1)),source=u)
+        allocate(this%v(m(2)),source=v)
+        allocate(this%z(m(2),m(1)),source=z)
+
+        call set_origin_BC(this,z0)
+
+        ! Reset run flag
+        this%iopt = IOPT_NEW_SMOOTHING
+
+        ! Knot space: overestimate (mu+5+iopt(2)+iopt(3),mv+7)
+        nest = SAFE*(m + 7)
+        nmax = maxval(nest)
+        allocate(this%t(nmax,2),source=zero)
+
+        ! Spline coefficients
+        clen = product(nest-4) ! nest-order-1, fixed order==3
+        allocate(this%c(clen),source=zero)
+
+        this%fp = zero
+
+        ! Working space
+        this%liwrk = 4+sum(m+nest)
+        allocate(this%iwrk(this%liwrk),source=0)
+
+        ! wrk
+        ! lwrk >= 8+nuest*(mv+nvest+3)+nvest*21+4*mu+6*mv+q
+        q = max(m(2)+nest(2),nest(1))
+        this%lwrk = 8+nest(1)*(m(2)+nest(2)+3)+21*nest(2)+4*m(1)+6*m(2)+q
+        allocate(this%wrk(this%lwrk),source=zero)
+
+        endassociate
+
+    end subroutine surf_new_points
+
+    !> @brief Construct a gridded polar surface from data and perform a default fit.
+    !!
+    !! @see pogrid
+    type(fitpack_grid_polar) function surf_new_from_points(u,v,r,z,z0,ierr) result(this)
+        real(FP_REAL), intent(in) :: u(:),v(:),r ! polar domain
+        real(FP_REAL), intent(in) :: z(size(v),size(u)) ! Gridded values
+        real(FP_REAL), optional, intent(in) :: z0 ! Origin value (optional)
+        integer, optional, intent(out) :: ierr
+
+        integer :: ierr0
+
+        ierr0 = this%new_fit(u,v,r,z,z0)
+
+        ! Error handling
+        call fitpack_error_handling(ierr0,ierr,'new gridded surface fit')
+
+    end function surf_new_from_points
+
+    !> @brief Load new data and perform a fresh gridded polar fit.
+    !!
+    !! @see pogrid
+    integer function surf_new_fit(this,u,v,r,z,z0,smoothing)
+        class(fitpack_grid_polar), intent(inout) :: this
+        real(FP_REAL), intent(in) :: u(:),v(:),r ! polar domain
+        real(FP_REAL), intent(in) :: z(size(v),size(u)) ! Gridded values
+        real(FP_REAL), optional, intent(in) :: z0 ! Origin value (optional)
+        real(FP_REAL), optional, intent(in) :: smoothing
+
+        call this%new_points(u,v,r,z,z0)
+
+        surf_new_fit = this%fit(smoothing)
+
+    end function surf_new_fit
+
+    !> @brief Evaluate the gridded polar surface on a rectangular \f$ u \times v \f$ grid.
+    !!
+    !! Returns `f(j,i)` = \f$ s(u_i, v_j) \f$ in normalized polar coordinates.
+    !!
+    !! @see bispev
+    function gridded_eval_many(this,u,v,ierr) result(f)
+        class(fitpack_grid_polar), intent(inout)  :: this
+        real(FP_REAL), intent(in) :: u(:),v(:)  ! Evaluation grid points (polar coordinates)
+        real(FP_REAL) :: f(size(v),size(u))
+        integer, optional, intent(out) :: ierr ! Optional error flag
+
+        integer :: ier
+
+        !  evaluation of the spline approximation.
+        !  Assume cubic spline in both directions
+
+        ! On successful exit r(j,i) contains the value of s(x,y) at point
+        ! (x(i),y(j)),i=1,...,mx; j=1,...,my.
+        call bispev(tx=this%t(:,1),nx=this%knots(1), &
+                    ty=this%t(:,2),ny=this%knots(2), &
+                    c=this%c, &
+                    kx=3,ky=3, &
+                    x=u,mx=size(u), &
+                    y=v,my=size(v), &
+                    z=f, & ! output in format (j,i)
+                    wrk=this%wrk,lwrk=this%lwrk, &
+                    iwrk=this%iwrk,kwrk=this%liwrk,ier=ier)
+
+        call fitpack_error_handling(ier,ierr,'evaluate gridded surface')
+
+    end function gridded_eval_many
+
+    !> @brief Evaluate the gridded polar surface at a single \f$ (u, v) \f$ point.
+    !!
+    !! @see bispev
+    real(FP_REAL) function gridded_eval_one(this,u,v,ierr) result(f)
+        class(fitpack_grid_polar), intent(inout)  :: this
+        real(FP_REAL),          intent(in)      :: u,v ! Evaluation point (grid polar coordinates)
+        integer, optional,    intent(out)     :: ierr      ! Optional error flag
+        real(FP_REAL) :: f1(1,1)
+
+        f1 = gridded_eval_many(this,[u],[v],ierr)
+        f  = f1(1,1)
+
+    end function gridded_eval_one
+
+    !> @brief Configure origin boundary conditions for the gridded polar surface.
+    !!
+    !! @param[in,out] this            The grid polar surface.
+    !! @param[in]     z0              Optional function value at the origin.
+    !! @param[in]     exact           If `.true.`, fit the origin value exactly.
+    !! @param[in]     differentiable  If `.true.`, enforce \f$ C^1 \f$ continuity at the origin.
+    subroutine set_origin_BC(this,z0,exact,differentiable)
+        class(fitpack_grid_polar), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: z0 ! Function value at origin
+        logical, optional, intent(in) :: exact,differentiable
+
+        this%z0_present = present(z0)
+        if (present(exact)) then
+            this%z0_exact = exact
+        else
+            this%z0_exact = .false.
+        endif
+
+        if (present(differentiable)) then
+            this%bc_continuity_origin = merge(1,0,differentiable)
+        else
+            this%bc_continuity_origin = 0
+        end if
+
+    end subroutine set_origin_BC
+
+    !> @brief Write gridded polar data to a text file.
+    subroutine gridded_to_disk(this,fileName)
+        class(fitpack_grid_polar), intent(inout) :: this
+        character(*), intent(in) :: fileName
+
+        integer :: iunit,ierr,j,i
+
+        open(newunit=iunit,file=fileName,action='write',form='formatted',iostat=ierr)
+
+        ! Write header
+        write(iunit,1) 'u',(named('v',j)       ,j=1,size(this%v))
+        write(iunit,1) ' ',(numbered(this%v(j)),j=1,size(this%v))
+
+        do i=1,size(this%u)
+            write(iunit,2) this%u(i),this%z(:,i)
+        end do
+
+        close(iunit)
+
+        1 format('!',a12,*(1x,a12))
+        2 format(*(1x,1pe12.5))
+
+        contains
+
+           character(12) function named(name,i)
+              character(*), intent(in) :: name
+              integer, intent(in) :: i
+              write(named,"(a,'_',i0)") name,i
+              named = adjustr(named)
+           end function named
+           character(12) function numbered(v)
+              real(FP_REAL), intent(in) :: v
+              write(numbered,"(1pe12.5)") v
+              numbered = adjustr(numbered)
+           end function numbered
+
+    end subroutine gridded_to_disk
+
+    ! =================================================================================================
+    ! PARALLEL COMMUNICATION
+    ! =================================================================================================
+
+    !> @brief Return the communication buffer size for the gridded polar surface.
+    elemental integer(FP_SIZE) function gridpolar_comm_size(this)
+        class(fitpack_grid_polar), intent(in) :: this
+        ! Base fields + grid-polar-specific scalars:
+        ! r, z0, z0_present, z0_exact, z0_zero_gradient, nest(2), nmax,
+        ! bc_continuity_origin, bc_boundary, knots(2) = 12
+        gridpolar_comm_size = this%core_comm_size() &
+                            + 12 &
+                            + FP_COMM_SIZE(this%u) &
+                            + FP_COMM_SIZE(this%v) &
+                            + FP_COMM_SIZE(this%z) &
+                            + FP_COMM_SIZE(this%t)
+    end function gridpolar_comm_size
+
+    !> @brief Pack gridded polar data into a communication buffer.
+    pure subroutine gridpolar_comm_pack(this, buffer)
+        class(fitpack_grid_polar), intent(in) :: this
+        real(FP_COMM), intent(out) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        call this%core_comm_pack(buffer)
+        pos = this%core_comm_size() + 1
+
+        buffer(pos) = this%r;                                              pos = pos + 1
+        buffer(pos) = this%z0;                                             pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%z0_present), FP_COMM);          pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%z0_exact), FP_COMM);            pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%z0_zero_gradient), FP_COMM);    pos = pos + 1
+        buffer(pos) = real(this%nest(1), FP_COMM);                        pos = pos + 1
+        buffer(pos) = real(this%nest(2), FP_COMM);                        pos = pos + 1
+        buffer(pos) = real(this%nmax, FP_COMM);                           pos = pos + 1
+        buffer(pos) = real(this%bc_continuity_origin, FP_COMM);           pos = pos + 1
+        buffer(pos) = real(this%bc_boundary, FP_COMM);                    pos = pos + 1
+        buffer(pos) = real(this%knots(1), FP_COMM);                       pos = pos + 1
+        buffer(pos) = real(this%knots(2), FP_COMM);                       pos = pos + 1
+
+        call FP_COMM_PACK(this%u, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%u)
+        call FP_COMM_PACK(this%v, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%v)
+        call FP_COMM_PACK(this%z, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%z)
+        call FP_COMM_PACK(this%t, buffer(pos:))
+    end subroutine gridpolar_comm_pack
+
+    !> @brief Expand gridded polar data from a communication buffer.
+    pure subroutine gridpolar_comm_expand(this, buffer)
+        class(fitpack_grid_polar), intent(inout) :: this
+        real(FP_COMM), intent(in) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        call this%core_comm_expand(buffer)
+        pos = this%core_comm_size() + 1
+
+        this%r                    = buffer(pos);                  pos = pos + 1
+        this%z0                   = buffer(pos);                  pos = pos + 1
+        this%z0_present           = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%z0_exact             = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%z0_zero_gradient     = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%nest(1)              = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%nest(2)              = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%nmax                 = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%bc_continuity_origin = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%bc_boundary          = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%knots(1)             = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%knots(2)             = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+
+        call FP_COMM_EXPAND(this%u, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%u)
+        call FP_COMM_EXPAND(this%v, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%v)
+        call FP_COMM_EXPAND(this%z, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%z)
+        call FP_COMM_EXPAND(this%t, buffer(pos:))
+    end subroutine gridpolar_comm_expand
+
+end module fitpack_gridded_polar

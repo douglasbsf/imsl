@@ -1,0 +1,880 @@
+project(
+  'GALAHAD',
+  'c', 'fortran',
+  version: '5.5.3',
+  license: 'BSD-3',
+  meson_version: '>= 0.63.0',
+  default_options: [
+    'buildtype=release',
+    'libdir=lib',
+    'default_library=shared',
+    'warning_level=0',
+    'c_std=c99',
+  ],
+)
+
+cc = meson.get_compiler('c')
+fc = meson.get_compiler('fortran')
+fc_compiler = find_program(fc.cmd_array())
+fs = import('fs')
+py = import('python').find_installation()
+host_system = host_machine.system()
+
+# Ensure --prefix is not the GALAHAD source root
+if fs.is_samepath(get_option('prefix'), meson.project_source_root())
+  error('The option --prefix must not be the GALAHAD source directory.')
+endif
+
+# Remove messages about deprecated Intel compilers
+if cc.get_id() == 'intel'
+  add_global_arguments('-diag-disable=10441', language : 'c')
+  add_global_link_arguments('-diag-disable=10441', language : 'c')
+endif
+if cc.get_id() == 'intel-cl'
+  add_global_arguments('/Qdiag-disable=10441', language : 'c')
+  add_global_link_arguments('/Qdiag-disable=10441', language : 'c')
+endif
+
+# Recognise old non-standard double complex intrinsics
+if fc.get_id() == 'nagfor'
+  add_global_arguments('-dcfuns', language : 'fortran')
+endif
+
+# Preprocessing
+if fc.get_id() == 'intel-cl' or fc.get_id() == 'intel-llvm-cl'
+  output_generator = '/Fi:@OUTPUT@'
+else
+  output_generator = ['-o', '@OUTPUT@']
+endif
+
+pp_options = []
+pp_flag = []
+if fc.get_id() == 'gcc' or fc.get_id() == 'llvm-flang'
+  pp_flag += '-cpp'
+  pp_options += ['-cpp', '-E']
+elif fc.get_id() == 'intel' or fc.get_id() == 'intel-llvm'
+  pp_flag += '-fpp'
+  pp_options += ['-fpp', '-P']
+elif fc.get_id() == 'intel-cl' or fc.get_id() == 'intel-llvm-cl'
+  pp_flag += '/fpp'
+  pp_options += ['/fpp', '/P']
+elif fc.get_id() == 'nagfor'
+  pp_flag += '-fpp'
+  pp_options += ['-fpp', '-F']
+elif fc.get_id() == 'nvidia_hpc'
+  pp_flag += '-Mcpp'
+  pp_options += ['-Mcpp', '-F']
+endif
+
+# Options
+install_modules = get_option('modules')
+int64 = get_option('int64')
+build_ciface = get_option('ciface')
+build_pythoniface = get_option('pythoniface')
+build_single = get_option('single')
+build_double = get_option('double')
+build_quadruple = get_option('quadruple')
+build_tests = get_option('tests')
+build_examples = get_option('examples')
+build_binaries = get_option('binaries')
+build_openmp = get_option('openmp')
+
+libblas_name = get_option('libblas')
+liblapack_name = get_option('liblapack')
+libhsl_name = get_option('libhsl')
+libwsmp_name = get_option('libwsmp')
+libpardiso_name = get_option('libpardiso')
+libpastixf_name = get_option('libpastixf')
+libspmf_name = get_option('libspmf')
+libsmumps_name = get_option('libsmumps')
+libdmumps_name = get_option('libdmumps')
+libasl_name = get_option('libasl')
+libcutest_single_name = get_option('libcutest_single')
+libcutest_double_name = get_option('libcutest_double')
+libcutest_quadruple_name = get_option('libcutest_quadruple')
+
+libmumps_path = get_option('libmumps_path')
+libblas_path = get_option('libblas_path')
+liblapack_path = get_option('liblapack_path')
+libhsl_path = get_option('libhsl_path')
+libwsmp_path = get_option('libwsmp_path')
+libpardiso_path = get_option('libpardiso_path')
+libasl_path = get_option('libasl_path')
+libpastixf_path = get_option('libpastixf_path')
+libspmf_path = get_option('libspmf_path')
+libcutest_path = get_option('libcutest_path')
+
+libasl_include = include_directories(get_option('libasl_include'))
+libhsl_modules = include_directories(get_option('libhsl_modules'))
+libcutest_modules = include_directories(get_option('libcutest_modules'))
+
+# Dependencies
+libblas = fc.find_library(libblas_name, dirs : libblas_path, required : false)
+liblapack = fc.find_library(liblapack_name, dirs : liblapack_path, required : false)
+libhsl = fc.find_library(libhsl_name, dirs : libhsl_path, required : false)
+libcutest_single = fc.find_library(libcutest_single_name, dirs : libcutest_path, required : false)
+libcutest_double = fc.find_library(libcutest_double_name, dirs : libcutest_path, required : false)
+libcutest_quadruple = fc.find_library(libcutest_quadruple_name, dirs : libcutest_path, required : false)
+libwsmp = fc.find_library(libwsmp_name, dirs : libwsmp_path, required : false)
+libpardiso = fc.find_library(libpardiso_name, dirs : libpardiso_path, required : false)
+libpastixf = fc.find_library(libpastixf_name, dirs : libpastixf_path, required : false)
+libspmf = fc.find_library(libspmf_name, dirs : libspmf_path, required : false)
+libsmumps = fc.find_library(libsmumps_name, dirs : libmumps_path, required : false)
+libdmumps = fc.find_library(libdmumps_name, dirs : libmumps_path, required : false)
+libasl = fc.find_library(libasl_name, dirs : libasl_path, required : false)
+lm = cc.find_library('m', required : false)
+
+# Quadmath
+if build_quadruple
+  libquadmath = cc.find_library('quadmath', required : true)
+else
+  libquadmath = cc.find_library('quadmath', required : false)
+endif
+
+# METIS
+if host_machine.system() == 'windows'
+  add_global_arguments('-DUSE_GKREGEX', language : 'c')
+else
+  add_global_arguments('-D_POSIX_C_SOURCE=200112L', language : 'c')
+endif
+add_global_arguments('-DNDEBUG', language : 'c')
+
+# OpenMP
+if build_openmp
+  if fc.get_id() == 'nvidia_hpc'
+    add_global_arguments('-mp', language : 'fortran')
+  elif fc.get_id() == 'nagfor'
+    add_global_arguments('-openmp', language : 'fortran')
+  elif fc.get_id() == 'gcc' or fc.get_id() == 'llvm-flang'
+    add_global_arguments('-fopenmp', language : 'fortran')
+  elif fc.get_id() == 'intel' or fc.get_id() == 'intel-llvm'
+    add_global_arguments('-qopenmp', language : 'fortran')
+  elif fc.get_id() == 'intel-cl' or fc.get_id() == 'intel-llvm-cl'
+    add_global_arguments('/Qopenmp', language : 'fortran')
+  endif
+
+  if cc.get_id() == 'nvidia_hpc'
+    add_global_arguments('-mp', language : 'c')
+  elif cc.get_id() == 'gcc' or cc.get_id() == 'clang' or cc.get_id() == 'clang-cl'
+    add_global_arguments('-fopenmp', language : 'c')
+  elif cc.get_id() == 'intel' or cc.get_id() == 'intel-llvm'
+    add_global_arguments('-qopenmp', language : 'c')
+  elif cc.get_id() == 'intel-cl' or cc.get_id() == 'intel-llvm-cl'
+    add_global_arguments('/Qopenmp', language : 'c')
+  endif
+
+  lomp = '-lgomp'
+  if cc.get_id() == 'intel' or cc.get_id() == 'intel-llvm'
+    lomp = '-liomp5'
+  endif
+  if cc.get_id() == 'nvidia_hpc'
+    lomp = '-lomp'
+  endif
+  if host_machine.system() == 'darwin' or host_machine.system() == 'freebsd'
+    if cc.get_id() == 'clang'
+      lomp = '-lomp'
+    endif
+  endif
+  add_global_link_arguments(lomp, language : 'fortran')
+  add_global_link_arguments(lomp, language : 'c')
+endif
+
+libgalahad_single_deps = [libsmumps, libcutest_single, libblas, liblapack,
+                          libhsl, libwsmp, libpardiso, libpastixf, libspmf,
+                          libasl]
+
+libgalahad_double_deps = [libdmumps, libcutest_double, libblas, liblapack,
+                          libhsl, libwsmp, libpardiso, libpastixf, libspmf,
+                          libasl]
+
+libgalahad_quadruple_deps = [libcutest_quadruple, libhsl, libquadmath]
+
+# BLAS and LAPACK
+libblas_src = []
+liblapack_src = []
+
+# Fortran files *.F90 or *.f90
+libgalahad_src = []
+libgalahad_single_src = []
+libgalahad_double_src = []
+libgalahad_quadruple_src = []
+
+# Fortran files *.f
+libgalahad_f_src = []
+
+# Fortran files that contain programs and are precision dependent
+galahad_binaries = []
+
+# Fortran files that contain programs and are precision independent
+galahad_multi_binaries = []
+
+# Header files to install
+galahad_headers = []
+
+# Fortran files for the C interfaces
+libgalahad_c_src = []
+libgalahad_c_single_src = []
+libgalahad_c_double_src = []
+libgalahad_c_quadruple_src = []
+
+# C files for the Python interfaces
+libgalahad_python_src = []
+
+# Files related to the AMPL interfaces
+libgalahad_ampl_src = []
+libgalahad_ampl_cc_src = []
+galahad_ampl_headers = []
+
+# Files related to the CUTEst interfaces
+libgalahad_cutest_src = []
+galahad_cutest_binaries = []
+
+# C files required by GALAHAD
+libgalahad_cc_src = []
+
+# Fortran examples and tests
+galahad_examples = []
+galahad_tests = []
+
+# C examples and tests for the C interfaces
+galahad_c_examples = []
+galahad_c_tests = []
+
+# Python tests for the Python interfaces
+galahad_python_tests = []
+
+# Folders that contain headers and Fortran modules
+libgalahad_include = [include_directories('include'),
+                      include_directories('src/dum/include'),
+                      include_directories('src/external/metis4/include'),
+                      include_directories('src/nodend/metis51/include'),
+                      include_directories('src/nodend/metis52/include'),
+                      include_directories('src/ampl')]
+libgalahad_include = libgalahad_include + libasl_include + libhsl_modules + libcutest_modules
+
+# HSL
+if libhsl.found()
+  add_global_arguments('-DLANCELOT_USE_MA57', language : 'fortran')
+endif
+
+extra_args_single = ['-DREAL_32']
+extra_args_double = []
+extra_args_quadruple = ['-DREAL_128']
+
+# BLAS
+if not libblas.found()
+  extra_args_single += '-DGALAHAD_BLAS'
+  extra_args_double += '-DGALAHAD_BLAS'
+endif
+extra_args_quadruple += '-DGALAHAD_BLAS'
+
+# LAPACK
+if not liblapack.found()
+  extra_args_single += '-DGALAHAD_LAPACK'
+  extra_args_double += '-DGALAHAD_LAPACK'
+endif
+extra_args_quadruple += '-DGALAHAD_LAPACK'
+
+# MUMPS
+if not libsmumps.found()
+  extra_args_single += '-DDUMMY_SMUMPS'
+endif
+if not libdmumps.found()
+  extra_args_double += '-DDUMMY_DMUMPS'
+endif
+extra_args_quadruple += '-DDUMMY_QMUMPS'
+
+# MKL PARDISO
+if not (libblas_name == 'mkl_rt' or liblapack_name == 'mkl_rt')
+  extra_args_single += '-DDUMMY_MKL_PARDISO'
+  extra_args_double += '-DDUMMY_MKL_PARDISO'
+endif
+extra_args_quadruple += '-DDUMMY_MKL_PARDISO'
+
+# PARDISO
+if not libpardiso.found()
+  extra_args_single += '-DDUMMY_PARDISO'
+  extra_args_double += '-DDUMMY_PARDISO'
+endif
+extra_args_quadruple += '-DDUMMY_PARDISO'
+
+# PaStiX
+if not (libpastixf.found() and libspmf.found())
+  extra_args_single += '-DDUMMY_PASTIX'
+  extra_args_double += '-DDUMMY_PASTIX'
+endif
+extra_args_quadruple += '-DDUMMY_PASTIX'
+
+# WSMP
+if not libwsmp.found()
+  extra_args_single += '-DDUMMY_WSMP'
+  extra_args_double += '-DDUMMY_WSMP'
+endif
+extra_args_quadruple += '-DDUMMY_WSMP'
+
+# HSL
+if not libhsl.found()
+  extra_args_single += '-DDUMMY_HSL'
+  extra_args_double += '-DDUMMY_HSL'
+  extra_args_quadruple += '-DDUMMY_HSL'
+endif
+if libcutest_single.found()
+  extra_args_single += '-DCUTEST_SHARED'
+endif
+if libcutest_double.found()
+  extra_args_double += '-DCUTEST_SHARED'
+endif
+if libcutest_quadruple.found()
+  extra_args_quadruple += '-DCUTEST_SHARED'
+endif
+if libasl.found()
+  extra_args_single += '-DGALAHAD_AMPL'
+  extra_args_double += '-DGALAHAD_AMPL'
+endif
+
+# MPI
+extra_args_single += '-DDUMMY_MPI'
+extra_args_double += '-DDUMMY_MPI'
+extra_args_quadruple += '-DDUMMY_MPI'
+
+# Compile GALAHAD with 64-bit integer
+if int64
+  extra_args_single += '-DINTEGER_64'
+  extra_args_double += '-DINTEGER_64'
+  extra_args_quadruple += '-DINTEGER_64'
+endif
+
+# Sources
+subdir('bin')
+subdir('include')
+subdir('src/clock')
+subdir('src/common')
+subdir('src/copyright')
+subdir('src/cutest_functions')
+subdir('src/dum')
+subdir('src/external')
+subdir('src/kinds')
+subdir('src/smt')
+subdir('src/sort')
+subdir('src/specfile')
+subdir('src/space')
+subdir('src/string')
+subdir('src/symbols')
+
+subdir('src/amd')
+subdir('src/ampl')
+subdir('src/arc')
+subdir('src/band')
+subdir('src/bgo')
+subdir('src/blls')
+subdir('src/bllsb')
+subdir('src/bnls')
+subdir('src/bqp')
+subdir('src/bqpb')
+subdir('src/bsc')
+subdir('src/buildspec')
+subdir('src/ccqp')
+subdir('src/cdqp')
+subdir('src/check')
+subdir('src/checkpoint')
+subdir('src/clls')
+subdir('src/convert')
+subdir('src/cqp')
+subdir('src/cro')
+subdir('src/demo')
+subdir('src/dgo')
+subdir('src/dlp')
+subdir('src/dps')
+subdir('src/dqp')
+subdir('src/eqp')
+subdir('src/extend')
+subdir('src/fdc')
+subdir('src/fdh')
+subdir('src/filter')
+subdir('src/filtrane')
+subdir('src/fit')
+subdir('src/forthcoming/expo')
+subdir('src/glrt')
+subdir('src/gls')
+subdir('src/gltr')
+subdir('src/hash')
+subdir('src/icfs')
+subdir('src/ir')
+subdir('src/l1qp')
+subdir('src/l2rt')
+subdir('src/lancelot')
+subdir('src/lancelot_simple')
+subdir('src/lapack')
+subdir('src/lhs')
+subdir('src/lls')
+subdir('src/llsr')
+subdir('src/llst')
+subdir('src/lms')
+subdir('src/lmt')
+subdir('src/lpa')
+subdir('src/lpb')
+subdir('src/lpqp')
+subdir('src/lqr')
+subdir('src/lqt')
+subdir('src/lsp')
+subdir('src/lsqp')
+# subdir('src/lsrb')
+subdir('src/lsrt')
+subdir('src/lstr')
+subdir('src/miqr')
+subdir('src/mo')
+subdir('src/mop')
+subdir('src/ms')
+subdir('src/mu')
+subdir('src/nlpt')
+subdir('src/nls')
+subdir('src/nodend')
+subdir('src/norms')
+subdir('src/nrek')
+subdir('src/oblivion')
+subdir('src/opt')
+subdir('src/presolve')
+subdir('src/problem')
+subdir('src/psls')
+subdir('src/ptrans')
+subdir('src/qp')
+subdir('src/qpa')
+subdir('src/qpb')
+subdir('src/qpc')
+subdir('src/qpd')
+subdir('src/qpp')
+subdir('src/qpt')
+subdir('src/rand')
+subdir('src/reverse')
+subdir('src/rb')
+subdir('src/roots')
+subdir('src/rpd')
+subdir('src/rqs')
+subdir('src/sbls')
+subdir('src/scale')
+subdir('src/scu')
+subdir('src/sec')
+subdir('src/sha')
+subdir('src/sils')
+subdir('src/slblt')
+subdir('src/slls')
+subdir('src/sllsb')
+subdir('src/sls')
+subdir('src/snls')
+subdir('src/ssls')
+subdir('src/svt')
+subdir('src/tools')
+subdir('src/topology')
+subdir('src/trans')
+subdir('src/trb')
+subdir('src/trek')
+subdir('src/trs')
+subdir('src/tru')
+subdir('src/ugo')
+subdir('src/uls')
+subdir('src/userdata')
+subdir('src/version')
+subdir('src/warm')
+subdir('src/wcp')
+
+# Libraries
+if build_single
+  gen_single = generator(fc_compiler,
+                         output : 'single_@BASENAME@.f90',
+                         arguments : pp_options + extra_args_single +
+                                     ['-I', '@CURRENT_SOURCE_DIR@/include',
+                                      '-I', '@CURRENT_SOURCE_DIR@/src/dum/include',
+                                      '@INPUT@'] + output_generator)
+
+  gen_f_single = generator(fc_compiler,
+                           output : 'single_@BASENAME@.f',
+                           arguments : pp_options + extra_args_single +
+                                       ['-I', '@CURRENT_SOURCE_DIR@/include',
+                                        '-I', '@CURRENT_SOURCE_DIR@/src/dum/include',
+                                        '@INPUT@'] + output_generator)
+
+  to_process_single = [libgalahad_src, libgalahad_single_src]
+  if build_ciface
+    to_process_single += libgalahad_c_src
+    to_process_single += libgalahad_c_single_src
+  endif
+  if libcutest_single.found()
+    to_process_single += libgalahad_cutest_src
+  else
+    to_process_single += libgalahad_cutest_dummy_src
+  endif
+  # if libcutest_single.found() and libasl.found()
+  #   to_process_single += libgalahad_ampl_src
+  # endif
+  pp_sources_single = gen_single.process(to_process_single)
+
+  to_process_f_single = [libgalahad_f_src]
+  if to_process_f_single == [[]]
+    pp_sources_f_single = []
+  else
+    pp_sources_f_single = gen_f_single.process(to_process_f_single)
+  endif
+
+  sources_single = [pp_sources_single, pp_sources_f_single, libgalahad_cc_src]
+  # if libcutest_single.found() and libasl.found()
+  #   sources_single += libgalahad_ampl_cc_src
+  #   galahad_headers += galahad_ampl_headers
+  # endif
+
+  libgalahad_single_name = 'galahad_single'
+  if int64
+    libgalahad_single_name += '_64'
+  endif
+
+  libgalahad_single = library(libgalahad_single_name,
+                              sources : sources_single,
+                              dependencies : libgalahad_single_deps,
+                              fortran_args : extra_args_single,
+                              c_args : extra_args_single,
+                              include_directories: libgalahad_include,
+                              install : true)
+endif
+
+if build_double
+  gen_double = generator(fc_compiler,
+                         output : 'double_@BASENAME@.f90',
+                         arguments : pp_options + extra_args_double +
+                                     ['-I', '@CURRENT_SOURCE_DIR@/include',
+                                      '-I', '@CURRENT_SOURCE_DIR@/src/dum/include',
+                                      '@INPUT@'] + output_generator)
+
+  gen_f_double = generator(fc_compiler,
+                           output : 'double_@BASENAME@.f',
+                           arguments : pp_options + extra_args_double +
+                                       ['-I', '@CURRENT_SOURCE_DIR@/include',
+                                        '-I', '@CURRENT_SOURCE_DIR@/src/dum/include',
+                                        '@INPUT@'] + output_generator)
+
+  to_process_double = [libgalahad_src, libgalahad_double_src]
+  if build_ciface
+    to_process_double += libgalahad_c_src
+    to_process_double += libgalahad_c_double_src
+  endif
+  if libcutest_double.found()
+    to_process_double += libgalahad_cutest_src
+  else
+    to_process_double += libgalahad_cutest_dummy_src
+  endif
+  if libcutest_double.found() and libasl.found()
+    to_process_double += libgalahad_ampl_src
+  endif
+  pp_sources_double = gen_double.process(to_process_double)
+
+  to_process_f_double = [libgalahad_f_src]
+  if to_process_f_double == [[]]
+    pp_sources_f_double = []
+  else
+    pp_sources_f_double = gen_f_double.process(to_process_f_double)
+  endif
+
+  sources_double = [pp_sources_double, pp_sources_f_double, libgalahad_cc_src]
+  if libcutest_single.found() and libasl.found()
+    sources_double += libgalahad_ampl_cc_src
+    galahad_headers += galahad_ampl_headers
+  endif
+
+  libgalahad_double_name = 'galahad_double'
+  if int64
+    libgalahad_double_name += '_64'
+  endif
+
+  libgalahad_double = library(libgalahad_double_name,
+                              sources : sources_double,
+                              dependencies : libgalahad_double_deps,
+                              fortran_args : extra_args_double,
+                              c_args : extra_args_double,
+                              include_directories: libgalahad_include,
+                              install : true)
+endif
+
+if build_quadruple
+  gen_quadruple = generator(fc_compiler,
+                            output : 'quadruple_@BASENAME@.f90',
+                            arguments : pp_options + extra_args_quadruple +
+                                        ['-I', '@CURRENT_SOURCE_DIR@/include',
+                                         '-I', '@CURRENT_SOURCE_DIR@/src/dum/include',
+                                         '@INPUT@'] + output_generator)
+
+  gen_f_quadruple = generator(fc_compiler,
+                              output : 'quadruple_@BASENAME@.f',
+                              arguments : pp_options + extra_args_quadruple +
+                                          ['-I', '@CURRENT_SOURCE_DIR@/include',
+                                           '-I', '@CURRENT_SOURCE_DIR@/src/dum/include',
+                                           '@INPUT@'] + output_generator)
+
+  to_process_quadruple = [libgalahad_src, libgalahad_quadruple_src]
+  if build_ciface
+    to_process_quadruple += libgalahad_c_src
+    to_process_quadruple += libgalahad_c_quadruple_src
+  endif
+  if libcutest_quadruple.found()
+    to_process_quadruple += libgalahad_cutest_src
+  else
+    to_process_quadruple += libgalahad_cutest_dummy_src
+  endif
+  pp_sources_quadruple = gen_quadruple.process(to_process_quadruple)
+
+  to_process_f_quadruple = [libgalahad_f_src]
+  if to_process_f_quadruple == [[]]
+    pp_sources_f_quadruple = []
+  else
+    pp_sources_f_quadruple = gen_f_quadruple.process(to_process_f_quadruple)
+  endif
+
+  sources_quadruple = [pp_sources_quadruple, pp_sources_f_quadruple, libgalahad_cc_src]
+
+  libgalahad_quadruple_name = 'galahad_quadruple'
+  if int64
+    libgalahad_quadruple_name += '_64'
+  endif
+
+  libgalahad_quadruple = library(libgalahad_quadruple_name,
+                                 sources : sources_quadruple,
+                                 dependencies : libgalahad_quadruple_deps,
+                                 fortran_args : extra_args_quadruple,
+                                 c_args : extra_args_quadruple,
+                                 include_directories: libgalahad_include,
+                                 install : true)
+endif
+
+# Python interface
+if build_pythoniface and build_ciface and build_double and (not int64)
+  incdir_numpy = run_command(py,
+    ['-c', 'import numpy; print(numpy.get_include())'],
+    check : true
+  ).stdout().strip()
+
+  # patch PATH on windows to allow libgalahad_double.dll to be found
+  py.install_sources('src/__init__.py',
+                     subdir : 'galahad',
+                     pure: false)
+
+  # compile and install python interfaces
+  foreach interface: libgalahad_python_src
+    name = interface[0]
+    file = interface[1]
+
+    py.extension_module(name,
+                        sources : file,
+                        link_with : libgalahad_double,
+                        link_language : 'c',
+                        include_directories : libgalahad_include + incdir_numpy,
+                        subdir : 'galahad',
+                        install : true)
+  endforeach
+endif
+
+# Binaries
+if build_binaries
+  galahad_binaries_single = galahad_binaries
+  galahad_binaries_double = galahad_binaries
+  galahad_binaries_quadruple = galahad_binaries
+  if libcutest_single.found()
+    galahad_binaries_single += galahad_cutest_binaries
+  endif
+  if libcutest_double.found()
+    galahad_binaries_double += galahad_cutest_binaries
+  endif
+  if libcutest_quadruple.found()
+    galahad_binaries_quadruple += galahad_cutest_binaries
+  endif
+
+  if build_single
+    foreach binary: galahad_binaries_single
+      binname = binary[0]
+      binfile = binary[1]
+      pp_binfile = gen_single.process(binfile)
+      executable(binname+'_single', pp_binfile,
+                 dependencies : libhsl,
+                 link_with : libgalahad_single,
+                 include_directories: libgalahad_include,
+                 install : true)
+    endforeach
+  endif
+
+  if build_double
+    foreach binary: galahad_multi_binaries
+      binname = binary[0]
+      binfile = binary[1]
+      pp_binfile = gen_double.process(binfile)
+      executable(binname, pp_binfile,
+                 link_with : libgalahad_double,
+                 include_directories: libgalahad_include,
+                 install : true)
+    endforeach
+
+    foreach binary: galahad_binaries_double
+      binname = binary[0]
+      binfile = binary[1]
+      pp_binfile = gen_double.process(binfile)
+      executable(binname+'_double', pp_binfile,
+                 dependencies : libhsl,
+                 link_with : libgalahad_double,
+                 include_directories: libgalahad_include,
+                 install : true)
+    endforeach
+  endif
+
+  if build_quadruple
+    foreach binary: galahad_binaries_quadruple
+      binname = binary[0]
+      binfile = binary[1]
+      pp_binfile = gen_quadruple.process(binfile)
+      executable(binname+'_quadruple', pp_binfile,
+                 dependencies : [libhsl, libquadmath],
+                 link_with : libgalahad_quadruple,
+                 include_directories: libgalahad_include,
+                 install : true)
+    endforeach
+  endif
+endif
+
+# Headers
+install_headers(galahad_headers)
+
+# Fortran modules
+if install_modules
+  meson.add_install_script(script_modules)
+endif
+
+# Precisions
+precisions = []
+if build_single
+  precisions += [['single', extra_args_single, libgalahad_single]]
+endif
+if build_double
+  precisions += [['double', extra_args_double, libgalahad_double]]
+endif
+if build_quadruple
+  precisions += [['quadruple', extra_args_quadruple, libgalahad_quadruple]]
+endif
+
+# Fortran tests
+if build_tests
+
+  fortran_tests_folder = 'tests/Fortran'
+
+  foreach test: galahad_tests
+    foreach val: precisions
+      precision = val[0]
+      args_precision = val[1]
+      libgalahad_precision = val[2]
+      package = test[0]
+      name = test[1] + '_' + precision
+      file = test[2]
+
+      if precision == 'single'
+        deps_tests = libgalahad_single_deps
+        pp_file = gen_single.process(file)
+      endif
+      if precision == 'double'
+        deps_tests = libgalahad_double_deps
+        pp_file = gen_double.process(file)
+      endif
+      if precision == 'quadruple'
+        deps_tests = libgalahad_quadruple_deps
+        pp_file = gen_quadruple.process(file)
+      endif
+
+      if not (name == 'croti_single' or name == 'croti_quadruple')
+        test(name,
+             executable(name, pp_file,
+                        link_with : libgalahad_precision,
+                        dependencies : deps_tests,
+                        include_directories: libgalahad_include,
+                        install : true,
+                        install_dir : fortran_tests_folder),
+             suite : [package, precision, 'fortran'],
+             is_parallel : false)
+      endif
+    endforeach
+  endforeach
+endif
+
+# C tests
+if build_tests and build_ciface
+
+  c_tests_folder = 'tests/C'
+
+  foreach test: galahad_c_tests
+    foreach val: precisions
+      precision = val[0]
+      args_precision = val[1]
+      libgalahad_precision = val[2]
+      package = test[0]
+      name = test[1] + '_' + precision
+      file = test[2]
+      test(name,
+           executable(name, file,
+                      c_args : args_precision,
+                      link_with : libgalahad_precision,
+                      dependencies : [lm, libquadmath],
+                      include_directories : libgalahad_include,
+                      install : true,
+                      install_dir : c_tests_folder),
+           suite : [package, precision, 'C'],
+           is_parallel : false)
+    endforeach
+  endforeach
+endif
+
+# Python tests
+if build_tests and build_pythoniface and build_ciface and build_double and (not int64) and (host_system != 'windows')
+
+  foreach test: galahad_python_tests
+    package = test[0]
+    name = test[1]
+    file = test[2]
+    test(name,
+         py,
+         args : file,
+         suite : [package, 'Python'],
+         env : ['PYTHONPATH=' + py.get_install_dir()],
+         is_parallel : false)
+  endforeach
+endif
+
+# Fortran examples
+if build_examples and build_double and (not int64)
+
+  fortran_examples_folder = 'examples/Fortran'
+
+  foreach example: galahad_examples
+    name = example[0]
+    file = example[1]
+    executable(name, file,
+               link_with : libgalahad_double,
+               dependencies : libgalahad_double_deps,
+               include_directories : libgalahad_include,
+               install : true,
+               install_dir : fortran_examples_folder)
+  endforeach
+endif
+
+# C examples
+if build_examples and build_ciface
+
+  c_examples_folder = 'examples/C'
+
+  foreach example: galahad_c_examples
+    foreach val: precisions
+      precision = val[0]
+      args_precision = val[1]
+      libgalahad_precision = val[2]
+      name = example[0] + '_' + precision
+      file = example[1]
+      executable(name, file,
+                 c_args : args_precision,
+                 link_with : libgalahad_precision,
+                 dependencies : [lm, libquadmath],
+                 include_directories : libgalahad_include,
+                 install : true,
+                 install_dir : c_examples_folder)
+    endforeach
+  endforeach
+endif

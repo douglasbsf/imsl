@@ -1,0 +1,860 @@
+! **************************************************************************************************
+!                                ____________________  ___   ________ __
+!                               / ____/  _/_  __/ __ \/   | / ____/ //_/
+!                              / /_   / /  / / / /_/ / /| |/ /   / ,<
+!                             / __/ _/ /  / / / ____/ ___ / /___/ /| |
+!                            /_/   /___/ /_/ /_/   /_/  |_\____/_/ |_|
+!
+!                                     A Curve Fitting Package
+!
+!   Refactored by Federico Perini, 10/6/2022
+!   Based on the netlib library by Paul Dierckx
+!
+!   References :
+!     - C. De Boor, "On calculating with b-splines", J Approx Theory 6 (1972) 50-62
+!     - M. G. Cox, "The numerical evaluation of b-splines", J Inst Maths Applics 10 (1972) 134-149
+!     - P. Dierckx, "Curve and surface fitting with splines", Monographs on numerical analysis,
+!                    Oxford university press, 1993.
+!
+! **************************************************************************************************
+!> @brief OOP wrapper for bivariate surface fitting to scattered data.
+!!
+!! Provides fitpack_surface, a derived type for fitting tensor-product B-spline surfaces
+!! \f$ z = s(x, y) \f$ to scattered \f$ (x_i, y_i, z_i) \f$ data. The underlying core
+!! routine is surfit, which uses automatic knot placement with a smoothing parameter.
+!! Supports evaluation, partial derivatives, integration, and cross-section extraction.
+!!
+!! @see Dierckx, Ch. 5, §5.3 (pp. 85–98); surfit, bispev, parder, dblint, profil
+module fitpack_surfaces
+    use fitpack_core
+    use fitpack_fitters
+    use fitpack_curves, only: fitpack_curve
+    implicit none
+    private
+
+    public :: fitpack_surface
+
+    !> @brief Bivariate surface fitter \f$ z = s(x, y) \f$ for scattered data.
+    !!
+    !! Stores the input data points \f$ (x_i, y_i, z_i) \f$, optional weights \f$ w_i \f$,
+    !! the fitted tensor-product B-spline representation (knots and coefficients), and the
+    !! fitting state. The smoothing parameter \f$ s \f$ controls the trade-off between
+    !! closeness of fit and smoothness.
+    !!
+    !! @see Dierckx, Ch. 5, §5.3 (pp. 85–98)
+    type, extends(fitpack_fitter) :: fitpack_surface
+
+        !> The input data points
+        integer :: m = 0
+        real(FP_REAL), allocatable :: x(:),y(:),z(:)
+
+        !> Spline degree
+        integer :: order(2) = 3
+
+        !> Interval boundaries
+        real(FP_REAL) :: left(2),right(2)
+
+        ! Node weights
+        real(FP_REAL), allocatable :: w(:)
+
+        ! Estimated and actual number of knots and their allocations
+        integer :: nest(2)  = 0
+        integer :: nmax = 0
+        integer                  :: lwrk2 = 0
+        real(FP_REAL), allocatable :: wrk2(:)
+
+        ! Curve extrapolation behavior
+        integer     :: bc = OUTSIDE_NEAREST_BND
+
+        ! Knots
+        integer     :: knots(2) = 0
+        real(FP_REAL), allocatable :: t(:,:) ! Knot locations (:,1)=x; (:,2)=y
+
+        contains
+
+           !> Clean memory
+           procedure :: destroy    => surf_destroy
+
+           !> Set new points
+           procedure :: new_points => surf_new_points
+
+           !> Generate new fit
+           procedure :: new_fit    => surf_new_fit
+
+           !> Generate/update fitting curve, with optional smoothing
+           procedure :: fit           => surface_fit_automatic_knots
+           procedure :: interpolate   => surface_fit_interpolating
+           procedure :: least_squares => surface_fit_least_squares
+
+           !> Evaluate surface at given coordinates
+           procedure, private :: surface_eval_one
+           procedure, private :: surface_eval_many
+           generic   :: eval => surface_eval_one,surface_eval_many
+
+           !> Evaluate surface on a grid
+           procedure, private :: surface_eval_gridded
+           generic   :: eval_ongrid => surface_eval_gridded
+
+           !> Evaluate derivatives at given coordinates
+           procedure, private :: surface_derivatives_gridded
+           procedure, private :: surface_derivatives_many
+           procedure, private :: surface_derivatives_one
+           generic   :: dfdx => surface_derivatives_one,surface_derivatives_many
+           generic   :: dfdx_ongrid => surface_derivatives_gridded
+
+           !> Double integration over a rectangular domain
+           procedure :: integral => surface_integral
+
+           !> Extract a 1D cross-section curve from the surface
+           procedure :: cross_section => surface_cross_section
+
+           !> Compute the derivative spline coefficients
+           procedure :: derivative_spline => surface_derivative_spline
+
+           !> Parallel communication interface
+           procedure :: comm_size   => surf_comm_size
+           procedure :: comm_pack   => surf_comm_pack
+           procedure :: comm_expand => surf_comm_expand
+
+    end type fitpack_surface
+
+    interface fitpack_surface
+       module procedure surf_new_from_points
+    end interface fitpack_surface
+
+    contains
+
+    !> @brief Fit a smoothing surface with automatic knot placement.
+    !!
+    !! Uses the surfit core routine. The smoothing parameter controls the trade-off between
+    !! closeness of fit and smoothness.
+    !!
+    !! @param[in,out] this       The surface object.
+    !! @param[in]     smoothing  Optional smoothing factor.
+    !! @param[in]     order      Optional spline degree (applied to both directions).
+    !! @param[in]     keep_knots If `.true.`, continue from current knot set.
+    !! @return Error flag.
+    !!
+    !! @see surfit
+    integer(FP_FLAG) function surface_fit_automatic_knots(this,smoothing,order,keep_knots) result(ierr)
+        class(fitpack_surface), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: smoothing
+        integer, optional, intent(in) :: order
+        logical, optional, intent(in) :: keep_knots
+
+        integer :: loop,nit
+        real(FP_REAL) :: smooth_now(3)
+        logical :: do_guard
+
+        call get_smoothing(this%smoothing,smoothing,nit,smooth_now)
+
+        !> Ensure we start with new knots (unless caller wants to keep them)
+        do_guard = .true.; if (present(keep_knots)) do_guard = .not.keep_knots
+        if (do_guard .and. this%iopt==IOPT_OLD_FIT) this%iopt = IOPT_NEW_SMOOTHING
+
+        ! User may want to change the order for both x and y
+        if (present(order)) this%order = order
+
+        do loop=1,nit
+
+            ! Set current smoothing
+            this%smoothing = smooth_now(loop)
+
+            ! Call curvfit
+            call surfit(this%iopt,                   &  ! [-1]=lsq on given knots; [0,1]=smoothing spline
+                        this%m,this%x,this%y,this%z, &  ! points and their coordinates
+                        this%w,                      &  ! weights
+                        this%left(1),this%right(1),  &  ! x range
+                        this%left(2),this%right(2),  &  ! y range
+                        this%order(1),this%order(2), &  ! [1:5] x,y spline order. Recommended: bicubic (x=y=3)
+                        this%smoothing,              &  ! spline accuracy (iopt>=0)
+                        this%nest(1),this%nest(2),   &  ! estimated number of knots and storage nxest >= 2*(kx+1), nyest >= 2*(ky+1)
+                        this%nmax,                   &  ! nmax>=max(nxest,nyest) size of tx,ty
+                        epsilon(zero),               &  ! numeric limits of the current kind
+                        this%knots(1),this%t(:,1),   &  ! x knots (out)
+                        this%knots(2),this%t(:,2),   &  ! y knots (out)
+                        this%c,this%fp,              &  ! spline output. size(c)>=(nxest-kx-1)*(nyest-ky-1)
+                        this%wrk,this%lwrk,        &  ! memory
+                        this%wrk2,this%lwrk2,        &  ! memory
+                        this%iwrk,this%liwrk,        &  ! memory
+                        ierr)                           ! Error flag
+
+            ! If fit was successful, set iopt to "old"
+            if (FITPACK_SUCCESS(ierr)) this%iopt = IOPT_OLD_FIT
+
+        end do
+
+    end function surface_fit_automatic_knots
+
+
+    !> @brief Fit an interpolating surface (\f$ s = 0 \f$) through the data points.
+    !!
+    !! @see surfit
+    integer(FP_FLAG) function surface_fit_interpolating(this,reset_knots) result(ierr)
+        class(fitpack_surface), intent(inout) :: this
+        logical, optional, intent(in) :: reset_knots
+
+        logical :: do_reset
+
+        do_reset = .true.; if (present(reset_knots)) do_reset = reset_knots
+        if (do_reset) this%iopt = IOPT_NEW_SMOOTHING
+        ierr = surface_fit_automatic_knots(this,smoothing=zero,keep_knots=.not.do_reset)
+    end function surface_fit_interpolating
+
+    !> @brief Fit a least-squares surface with fixed knots.
+    !!
+    !! @see surfit
+    integer(FP_FLAG) function surface_fit_least_squares(this,smoothing,reset_knots) result(ierr)
+       class(fitpack_surface), intent(inout) :: this
+       real(FP_REAL), optional, intent(in) :: smoothing
+       logical, optional, intent(in) :: reset_knots
+
+       logical :: do_reset
+
+       ! Optionally recompute knots via a smoothing fit first
+       do_reset = .false.; if (present(reset_knots)) do_reset = reset_knots
+       if (do_reset) then
+           this%iopt = IOPT_NEW_SMOOTHING
+           ierr = this%fit(smoothing)
+           if (.not.FITPACK_SUCCESS(ierr)) return
+       end if
+
+       this%iopt = IOPT_NEW_LEASTSQUARES
+       ierr = this%fit()
+    end function surface_fit_least_squares
+
+    !> @brief Evaluate the surface at a list of scattered \f$ (x_i, y_i) \f$ points.
+    !!
+    !! @see bispeu
+    function surface_eval_many(this,x,y,ierr) result(f)
+        class(fitpack_surface), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x(:),y(size(x))
+        real(FP_REAL) :: f(size(x))
+        integer(FP_FLAG), optional, intent(out) :: ierr
+
+        integer(FP_FLAG) :: ier
+        real(FP_REAL)    :: xg(2,size(x))
+
+        ! scattered points in the dimension-generic column layout: point i = xg(:,i)
+        xg(1,:) = x;  xg(2,:) = y
+
+        ! On successful exit f(i) contains the value of s(x,y) at point (x(i),y(i)), i=1,...,m
+        call ndspeu(dims=2_FP_DIM,                     &    ! domain dimension (bivariate spline)
+                    t=this%t,n=this%knots(1:2),        &    ! position of the knots per axis, and their number
+                    c=this%c,                          &    ! the b-spline coefficients
+                    k=this%order(1:2),                 &    ! the degrees of the spline
+                    xg=xg,m=size(x,kind=FP_SIZE),      &    ! scattered points xg(:,i), and their number
+                    z=f,                               &    ! value of the spline at the points
+                    ier=ier)                                ! error flag
+
+        call fitpack_error_handling(ier,ierr,'evaluate bivariate surface')
+
+    end function surface_eval_many
+
+    !> @brief Evaluate the surface at a single \f$ (x, y) \f$ point.
+    !!
+    !! @see bispeu
+    real(FP_REAL) function surface_eval_one(this,x,y,ierr) result(f)
+        class(fitpack_surface), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x,y
+        integer(FP_FLAG), optional, intent(out) :: ierr
+
+        real(FP_REAL) :: z1(1)
+
+        z1 = surface_eval_many(this,[x],[y],ierr)
+        f  = z1(1)
+
+    end function surface_eval_one
+
+    !> @brief Evaluate the surface on a rectangular grid \f$ x_i \times y_j \f$.
+    !!
+    !! Returns `f(j,i)` = \f$ s(x_i, y_j) \f$.
+    !!
+    !! @see bispev
+    function surface_eval_gridded(this,x,y,ierr) result(f)
+        class(fitpack_surface), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x(:),y(:)
+        real(FP_REAL) :: f(size(y),size(x))
+        integer(FP_FLAG), optional, intent(out) :: ierr
+
+        integer(FP_FLAG) :: ier
+        integer(FP_SIZE) :: min_lwrk,min_kwrk,m(2)
+        real(FP_REAL), allocatable :: min_wrk(:)
+        integer(FP_SIZE), allocatable :: min_iwrk(:)
+
+        m = [size(x),size(y)]
+
+        ! Assert real working storage
+        min_lwrk = sum(m*(this%order+1)) + product(this%knots-this%order-1)
+        if (min_lwrk>this%lwrk) then
+            allocate(min_wrk(min_lwrk),source=0.0_FP_REAL)
+            call move_alloc(from=min_wrk,to=this%wrk)
+            this%lwrk = min_lwrk
+        end if
+
+        ! Assert integer working storage
+        min_kwrk = sum(m)
+        if (min_kwrk>this%liwrk) then
+            allocate(min_iwrk(min_kwrk),source=0_FP_SIZE)
+            call move_alloc(from=min_iwrk,to=this%iwrk)
+            this%liwrk = min_kwrk
+        end if
+
+        ! On successful exit f(j,i) contains the value of s(x,y) at point
+        ! (x(i),y(j)),i=1,...,mx; j=1,...,my.
+        call bispev(tx=this%t(:,1),nx=this%knots(1),   &    ! position of the knots in the x-direction
+                    ty=this%t(:,2),ny=this%knots(2),   &    ! position of the knots in the y-direction
+                    c=this%c,                          &    ! the b-spline coefficients
+                    kx=this%order(1),ky=this%order(2), &    ! the degrees of the spline
+                    x=x,mx=size(x),                    &    ! x grid points: tx(kx+1)<=x(i-1)<=x(i)<=tx(nx-kx), i=2:mx
+                    y=y,my=size(y),                    &    ! y grid points: ty(ky+1)<=y(i-1)<=y(i)<=ty(ny-ky), i=2:my
+                    z=f,                               &    ! value of the spline at the grid points
+                    wrk=this%wrk,lwrk=this%lwrk,       &    ! memory
+                    iwrk=this%iwrk,kwrk=this%liwrk,    &    ! memory
+                    ier=ier)                                ! error flag
+
+        call fitpack_error_handling(ier,ierr,'evaluate gridded surface')
+
+    end function surface_eval_gridded
+
+    !> @brief Destroy a surface object and release all allocated memory.
+    elemental subroutine surf_destroy(this)
+       class(fitpack_surface), intent(inout) :: this
+       integer :: ierr
+       call this%destroy_base()
+       this%m = 0
+       deallocate(this%x,stat=ierr)
+       deallocate(this%y,stat=ierr)
+       deallocate(this%z,stat=ierr)
+       deallocate(this%w,stat=ierr)
+       deallocate(this%wrk2,stat=ierr)
+       deallocate(this%t,stat=ierr)
+       this%left  = zero
+       this%right = zero
+
+       this%order     = 3
+       this%nest      = 0
+       this%nmax      = 0
+       this%lwrk2     = 0
+       this%knots     = 0
+       this%bc        = OUTSIDE_NEAREST_BND
+
+    end subroutine surf_destroy
+
+    !> @brief Load new scattered data points and allocate workspace for surface fitting.
+    !!
+    !! @param[in,out] this  The surface object (destroyed and reinitialized).
+    !! @param[in]     x     X coordinates of scattered data points.
+    !! @param[in]     y     Y coordinates, same size as `x`.
+    !! @param[in]     z     Function values, same size as `x`.
+    !! @param[in]     w     Optional positive weights, same size as `x`.
+    !!
+    !! @see surfit
+    subroutine surf_new_points(this,x,y,z,w)
+        class(fitpack_surface), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x(:),y(size(x)),z(size(x))
+        real(FP_REAL), optional, intent(in) :: w(size(x)) ! node weights
+
+        integer :: clen,uv(2),km,bxy(2),b1,b2
+        integer, parameter :: SAFE = 2
+
+
+        associate(m=>this%m,nest=>this%nest,nmax=>this%nmax,order=>this%order)
+
+        call this%destroy()
+
+        m = size(x)
+
+        ! Ensure x are sorted
+        allocate(this%x(m),source=x)
+        allocate(this%y(m),source=y)
+        allocate(this%z(m),source=z)
+
+        ! set up uniform weights
+        if (present(w)) then
+           allocate(this%w(m),source=w)
+        else
+           allocate(this%w(m),source=one)
+        endif
+
+        ! Setup boundaries
+        this%left(1)  = minval(x,1)
+        this%left(2)  = minval(y,1)
+        this%right(1) = maxval(x,1)
+        this%right(2) = maxval(y,1)
+
+        ! Reset run flag
+        this%iopt = 0
+
+
+        ! Knot space: overestimate (2*order+1 => order+m+1)
+        nest = SAFE*(order + m + 1)
+        nmax = maxval(nest)
+        nest = nmax
+        allocate(this%t(nmax,2),source=zero)
+
+        ! Spline coefficients
+        clen = product(nest-order-1)
+        allocate(this%c(clen),source=zero)
+
+        this%fp = zero
+
+        ! Working space
+        this%liwrk = m+product(nest-2*order-1)
+        allocate(this%iwrk(this%liwrk),source=0)
+
+        ! wrk
+        uv  = nest-order-1
+        km  = maxval(order,1)+1
+        bxy(1) = order(1)*uv(2)+order(2)+1
+        bxy(2) = order(2)*uv(1)+order(1)+1
+        if (bxy(1)<=bxy(2)) then
+            b1 = bxy(1); b2 = b1 + uv(2) - order(2)
+        else
+            b1 = bxy(2); b2 = b1 + uv(1) - order(1)
+        end if
+        this%lwrk = product(uv)*(2+b1+b2)+2*(sum(uv)+km*(m+nmax)+nmax-sum(order))+b2+1
+        allocate(this%wrk(this%lwrk),source=zero)
+
+        ! wrk2
+        this%lwrk2 = product(uv)*(b2+1)+b2
+        allocate(this%wrk2(this%lwrk2),source=zero)
+
+        endassociate
+
+    end subroutine surf_new_points
+
+    !> @brief Construct a surface from scattered data points and perform a default fit.
+    !!
+    !! @param[in]  x     X coordinates.
+    !! @param[in]  y     Y coordinates, same size as `x`.
+    !! @param[in]  z     Function values, same size as `x`.
+    !! @param[in]  w     Optional weights.
+    !! @param[out] ierr  Optional error flag.
+    !! @return Fitted surface object.
+    !!
+    !! @see surfit
+    type(fitpack_surface) function surf_new_from_points(x,y,z,w,ierr) result(this)
+        real(FP_REAL), intent(in) :: x(:),y(size(x)),z(size(x))
+        real(FP_REAL), optional, intent(in) :: w(size(x)) ! node weights
+        integer(FP_FLAG), optional, intent(out) :: ierr
+
+        integer(FP_FLAG) :: ierr0
+
+        ierr0 = this%new_fit(x,y,z,w)
+
+        ! Error handling
+        call fitpack_error_handling(ierr0,ierr,'new surface fit')
+
+    end function surf_new_from_points
+
+    !> @brief Load new data points and perform a fresh surface fit.
+    !!
+    !! @see surfit
+    integer(FP_FLAG) function surf_new_fit(this,x,y,z,w,smoothing,order)
+        class(fitpack_surface), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x(:),y(size(x)),z(size(x))
+        real(FP_REAL), optional, intent(in) :: w(size(x)) ! node weights
+        real(FP_REAL), optional, intent(in) :: smoothing
+        integer    , optional, intent(in) :: order
+
+        call this%new_points(x,y,z,w)
+
+        surf_new_fit = this%fit(smoothing,order)
+
+    end function surf_new_fit
+
+    !> @brief Evaluate partial derivatives on a rectangular grid.
+    !!
+    !! Returns `f(j,i)` = \f$ \partial^{dx+dy} s / \partial x^{dx} \partial y^{dy} \f$ at \f$ (x_i, y_j) \f$.
+    !!
+    !! @see parder
+    function surface_derivatives_gridded(this,x,y,dx,dy,ierr) result(f)
+        class(fitpack_surface), intent(inout)  :: this
+        
+        ! Grid evaluation ranges
+        real(FP_REAL),    intent(in) :: x(:),y(:)  
+        
+        ! Order of the partial derivatives w.r.t. x and y
+        integer(FP_SIZE), intent(in) :: dx,dy      
+        
+        ! f(j,i) contains the value of the specified partial derivative of s(x,y) at (x(i),y(j))
+        real(FP_REAL) :: f(size(y),size(x))
+        
+        ! Optional error flag
+        integer(FP_FLAG), optional, intent(out) :: ierr 
+
+        integer(FP_FLAG) :: ier
+        integer(FP_SIZE) :: min_lwrk,min_kwrk,mx,my,maxm,nc
+        real(FP_REAL),    allocatable :: min_wrk(:)
+        integer(FP_SIZE), allocatable :: min_iwrk(:)
+        real(FP_REAL)    :: xg(max(size(x),size(y)),2),zt(size(x)*size(y))
+
+        mx   = size(x,kind=FP_SIZE); my = size(y,kind=FP_SIZE)
+        maxm = max(mx,my)
+        nc   = product(this%knots(1:2)-this%order(1:2)-1)
+
+        ! Assert real working storage (parder scratch: nc derivative coeffs + per-axis basis cuboid)
+        min_lwrk = nc + maxm*(max(this%order(1)-dx,this%order(2)-dy)+1)*2
+        if (min_lwrk>this%lwrk) then
+            allocate(min_wrk(min_lwrk),source=0.0_FP_REAL)
+            call move_alloc(from=min_wrk,to=this%wrk)
+            this%lwrk = min_lwrk
+        end if
+
+        ! Assert integer working storage
+        min_kwrk = maxm*2
+        if (min_kwrk>this%liwrk) then
+            allocate(min_iwrk(min_kwrk),source=0_FP_SIZE)
+            call move_alloc(from=min_iwrk,to=this%iwrk)
+            this%liwrk = min_kwrk
+        end if
+
+        ! grid nodes in the dimension-generic per-axis column layout: xg(1:m(d),d)
+        xg(1:mx,1) = x;  xg(1:my,2) = y
+
+        ! On successful exit zt contains the value of the specified partial derivative
+        ! of s(x,y) at point (x(i),y(j)),i=1,...,mx; j=1,...,my.
+        call parder(dims=2_FP_DIM,                     &    ! domain dimension (bivariate spline)
+                    t=this%t,n=this%knots(1:2),        &    ! position of the knots per axis, and their number
+                    c=this%c,                          &    ! the b-spline coefficients
+                    k=this%order(1:2),                 &    ! the degrees of the spline
+                    nu=[dx,dy],                        &    ! order of the derivatives 0<=nu(d)<k(d)
+                    xg=xg,m=[mx,my],                   &    ! per-axis grid points xg(1:m(d),d), ascending
+                    z=zt,                              &    ! value of the partial derivative, flat row-major
+                    wrk=this%wrk,lwrk=this%lwrk,       &    ! memory
+                    iwrk=this%iwrk,kwrk=this%liwrk,    &    ! memory
+                    ier=ier)                                ! error flag
+
+        ! N-D output is flat (x slowest, y fastest): z((i-1)*my+j) = deriv(x_i,y_j) -> f(j,i)
+        f = reshape(zt,[my,mx])
+
+        call fitpack_error_handling(ier,ierr,'evaluate gridded derivatives')
+
+    end function surface_derivatives_gridded
+
+    !> @brief Evaluate partial derivatives at scattered \f$ (x_i, y_i) \f$ points.
+    !!
+    !! @see pardeu
+    function surface_derivatives_many(this,x,y,dx,dy,ierr) result(f)
+        class(fitpack_surface), intent(inout)  :: this
+        
+        ! Grid evaluation ranges
+        real(FP_REAL),    intent(in) :: x(:),y(:)  
+        
+        ! Order of the partial derivatives w.r.t. x and y
+        integer(FP_SIZE), intent(in) :: dx,dy      
+        
+        ! f(j,i) contains the value of the specified partial derivative of s(x,y) at (x(i),y(j))
+        real(FP_REAL) :: f(size(x))
+        
+        ! Optional error flag
+        integer(FP_FLAG), optional, intent(out) :: ierr 
+
+        integer(FP_FLAG) :: ier
+        integer(FP_SIZE) :: min_lwrk,nc,npts
+        real(FP_REAL), allocatable :: min_wrk(:)
+        real(FP_REAL)    :: xg(2,size(x))
+
+        ! Require matching (x,y) point lists
+        if (size(x)/=size(y)) then
+
+            ier = FITPACK_INPUT_ERROR
+
+        else
+
+            npts = size(x,kind=FP_SIZE)
+            nc   = product(this%knots(1:2)-this%order(1:2)-1)
+
+            ! Assert real working storage (pardeu scratch: nc derivative coefficients)
+            min_lwrk = nc
+            if (min_lwrk>this%lwrk) then
+                allocate(min_wrk(min_lwrk),source=0.0_FP_REAL)
+                call move_alloc(from=min_wrk,to=this%wrk)
+                this%lwrk = min_lwrk
+            end if
+
+            ! scattered points in the dimension-generic column layout: point i = xg(:,i)
+            xg(1,:) = x;  xg(2,:) = y
+
+            ! On successful exit f(i) contains the value of the specified partial derivative
+            ! of s(x,y) at point (x(i),y(i)), i=1,...,m
+            call pardeu(dims=2_FP_DIM,                 &    ! domain dimension (bivariate spline)
+                        t=this%t,n=this%knots(1:2),    &    ! position of the knots per axis, and their number
+                        c=this%c,                      &    ! the b-spline coefficients
+                        k=this%order(1:2),             &    ! the degrees of the spline
+                        nu=[dx,dy],                    &    ! order of the derivatives 0<=nu(d)<k(d)
+                        xg=xg,m=npts,                  &    ! scattered points xg(:,i), and their number
+                        z=f,                           &    ! value of the partial derivative at the points
+                        wrk=this%wrk,lwrk=this%lwrk,   &    ! memory
+                        ier=ier)                            ! error flag
+
+        end if
+
+        call fitpack_error_handling(ier,ierr,'evaluate bivariate derivatives')
+
+    end function surface_derivatives_many
+
+    !> @brief Evaluate a partial derivative at a single \f$ (x, y) \f$ point.
+    !!
+    !! @see pardeu
+    real(FP_REAL) function surface_derivatives_one(this,x,y,dx,dy,ierr) result(f)
+        class(fitpack_surface), intent(inout) :: this
+        
+        ! Evaluation point
+        real(FP_REAL),          intent(in)      :: x,y    
+
+        ! Order of the partial derivatives w.r.t. x and y
+        integer(FP_SIZE), intent(in) :: dx,dy              
+        
+        ! Optional error flag
+        integer(FP_FLAG), optional, intent(out) :: ierr   
+
+        real(FP_REAL) :: z1(1),x1(1),y1(1)
+        
+        x1 = x
+        y1 = y
+
+        z1 = surface_derivatives_many(this,x1,y1,dx,dy,ierr)
+        f  = z1(1)
+
+    end function surface_derivatives_one
+
+
+    !> @brief Compute the double integral of the surface over a rectangular domain.
+    !!
+    !! Computes \f$ \int_{x_a}^{x_b} \int_{y_a}^{y_b} s(x,y)\,dy\,dx \f$.
+    !!
+    !! @param[in] this   The fitted surface.
+    !! @param[in] lower  Lower bounds \f$ (x_a, y_a) \f$.
+    !! @param[in] upper  Upper bounds \f$ (x_b, y_b) \f$.
+    !! @return The integral value.
+    !!
+    !! @see dblint
+    real(FP_REAL) function surface_integral(this, lower, upper)
+        class(fitpack_surface), intent(in) :: this
+        real(FP_REAL), intent(in) :: lower(2), upper(2)
+
+        surface_integral = dblint(dims=2_FP_DIM,              &  ! domain dimension (bivariate spline)
+                                  t=this%t,n=this%knots(1:2), &  ! position of the knots per axis, and their number
+                                  c=this%c,                   &  ! the b-spline coefficients
+                                  k=this%order(1:2),          &  ! the degrees of the spline
+                                  xb=lower,xe=upper)             ! per-axis integration bounds
+
+    end function surface_integral
+
+    !> @brief Extract a 1D cross-section curve from the surface.
+    !!
+    !! If `along_y=.true.`, returns \f$ f(y) = s(u, y) \f$; otherwise \f$ g(x) = s(x, u) \f$.
+    !! The result is a fitpack_curve with the appropriate knots and coefficients.
+    !!
+    !! @see profil
+    function surface_cross_section(this, u, along_y, ierr) result(curve)
+        class(fitpack_surface), intent(in) :: this
+        real(FP_REAL), intent(in) :: u
+        logical, intent(in) :: along_y
+        integer(FP_FLAG), optional, intent(out) :: ierr
+        type(fitpack_curve) :: curve
+
+        integer(FP_FLAG) :: ier
+        integer(FP_DIM)  :: ax
+        integer(FP_SIZE) :: nu, nc
+        real(FP_REAL), allocatable :: cu(:)
+
+        if (along_y) then
+            ! f(y) = s(u,y): fix axis x, result over y (knots=ty, order=ky)
+            ax = 1
+            nu = this%knots(2)
+            nc = this%knots(2) - this%order(2) - 1
+        else
+            ! g(x) = s(x,u): fix axis y, result over x (knots=tx, order=kx)
+            ax = 2
+            nu = this%knots(1)
+            nc = this%knots(1) - this%order(1) - 1
+        end if
+
+        allocate(cu(nu))
+
+        ! On successful exit cu contains the b-spline coefficients of the univariate
+        ! cross-section spline f(y)=s(u,y) (ax=1) or g(x)=s(x,u) (ax=2)
+        call profil(ax=ax,                             &    ! axis to fix (1=x, 2=y)
+                    dims=2_FP_DIM,                     &    ! domain dimension (bivariate spline)
+                    t=this%t,n=this%knots(1:2),        &    ! position of the knots per axis, and their number
+                    c=this%c,                          &    ! the b-spline coefficients
+                    k=this%order(1:2),                 &    ! the degrees of the spline
+                    u=u,                               &    ! value at which the fixed axis is frozen
+                    cu=cu,                             &    ! cross-section spline coefficients
+                    ier=ier)                                ! error flag
+
+        if (FITPACK_SUCCESS(ier)) then
+            ! Build a fitpack_curve from the cross-section coefficients
+            curve%order = merge(this%order(2), this%order(1), along_y)
+            curve%knots = nu
+            curve%nest  = nu
+            allocate(curve%t(nu), source=merge_knots(along_y, this%t(:,1), this%t(:,2), nu))
+            allocate(curve%c(nu), source=zero)
+            curve%c(:nc) = cu(:nc)
+            curve%xleft  = curve%t(curve%order + 1)
+            curve%xright = curve%t(curve%knots - curve%order)
+        end if
+
+        call fitpack_error_handling(ier, ierr, 'surface cross-section')
+
+    end function surface_cross_section
+
+    !> @brief Compute the B-spline representation of a partial derivative surface.
+    !!
+    !! Returns a new surface representing \f$ \partial^{n_x+n_y} s / \partial x^{n_x} \partial y^{n_y} \f$,
+    !! with reduced degrees \f$ (k_x - n_x, k_y - n_y) \f$ and trimmed knots.
+    !!
+    !! @see pardtc
+    function surface_derivative_spline(this, nux, nuy, ierr) result(dsurf)
+        class(fitpack_surface), intent(in) :: this
+        integer(FP_SIZE), intent(in) :: nux, nuy
+        integer(FP_FLAG), optional, intent(out) :: ierr
+        type(fitpack_surface) :: dsurf
+
+        integer(FP_FLAG) :: ier
+        integer(FP_SIZE) :: nx, ny, newkx, newky, newnx, newny, nc_old, nc_new
+        real(FP_REAL), allocatable :: newc(:)
+
+        nx = this%knots(1)
+        ny = this%knots(2)
+        nc_old = (nx - this%order(1) - 1) * (ny - this%order(2) - 1)
+
+        allocate(newc(nc_old))
+
+        ! On successful exit newc contains the b-spline coefficients of the derivative
+        ! spline, of degrees (kx-nux,ky-nuy) over the trimmed knot vectors
+        call pardtc(dims=2_FP_DIM,                     &    ! domain dimension (bivariate spline)
+                    t=this%t,n=this%knots(1:2),        &    ! position of the knots per axis, and their number
+                    c=this%c,                          &    ! the b-spline coefficients
+                    k=this%order(1:2),                 &    ! the degrees of the spline
+                    nu=[nux,nuy],                      &    ! order of the derivatives 0<=nu(d)<k(d)
+                    newc=newc,                         &    ! derivative spline coefficients
+                    ier=ier)                                ! error flag
+
+        if (FITPACK_SUCCESS(ier)) then
+            newkx  = this%order(1) - nux
+            newky  = this%order(2) - nuy
+            newnx  = nx - 2*nux
+            newny  = ny - 2*nuy
+            nc_new = (newnx - newkx - 1) * (newny - newky - 1)
+
+            dsurf%order  = [newkx, newky]
+            dsurf%knots  = [newnx, newny]
+            dsurf%nmax   = max(newnx, newny)
+            dsurf%nest   = dsurf%nmax
+
+            allocate(dsurf%t(dsurf%nmax, 2), source=zero)
+            dsurf%t(1:newnx, 1) = this%t(1+nux:nx-nux, 1)
+            dsurf%t(1:newny, 2) = this%t(1+nuy:ny-nuy, 2)
+
+            allocate(dsurf%c(nc_new), source=newc(1:nc_new))
+
+            dsurf%left  = [dsurf%t(newkx+1, 1), dsurf%t(newky+1, 2)]
+            dsurf%right = [dsurf%t(newnx-newkx, 1), dsurf%t(newny-newky, 2)]
+        end if
+
+        call fitpack_error_handling(ier, ierr, 'surface derivative spline')
+
+    end function surface_derivative_spline
+
+    !> @brief Select knots from the appropriate direction for cross-section extraction.
+    pure function merge_knots(along_y, tx, ty, n) result(knots)
+        logical, intent(in) :: along_y
+        real(FP_REAL), intent(in) :: tx(:), ty(:)
+        integer(FP_SIZE), intent(in) :: n
+        real(FP_REAL) :: knots(n)
+        if (along_y) then
+            knots = ty(1:n)
+        else
+            knots = tx(1:n)
+        end if
+    end function merge_knots
+
+
+    ! =================================================================================================
+    ! PARALLEL COMMUNICATION
+    ! =================================================================================================
+
+    !> @brief Return the communication buffer size for the surface.
+    elemental integer(FP_SIZE) function surf_comm_size(this)
+        class(fitpack_surface), intent(in) :: this
+        ! Base fields + surface-specific scalars:
+        ! m, order(2), left(2), right(2), nest(2), nmax, lwrk2, bc, knots(2) = 14
+        surf_comm_size = this%core_comm_size() &
+                       + 14 &
+                       + FP_COMM_SIZE(this%x) &
+                       + FP_COMM_SIZE(this%y) &
+                       + FP_COMM_SIZE(this%z) &
+                       + FP_COMM_SIZE(this%w) &
+                       + FP_COMM_SIZE(this%t) &
+                       + FP_COMM_SIZE(this%wrk2)
+    end function surf_comm_size
+
+    !> @brief Pack surface data into a communication buffer.
+    pure subroutine surf_comm_pack(this, buffer)
+        class(fitpack_surface), intent(in) :: this
+        real(FP_COMM), intent(out) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        call this%core_comm_pack(buffer)
+        pos = this%core_comm_size() + 1
+
+        buffer(pos) = real(this%m, FP_COMM);         pos = pos + 1
+        buffer(pos) = real(this%order(1), FP_COMM);  pos = pos + 1
+        buffer(pos) = real(this%order(2), FP_COMM);  pos = pos + 1
+        buffer(pos) = this%left(1);                   pos = pos + 1
+        buffer(pos) = this%left(2);                   pos = pos + 1
+        buffer(pos) = this%right(1);                  pos = pos + 1
+        buffer(pos) = this%right(2);                  pos = pos + 1
+        buffer(pos) = real(this%nest(1), FP_COMM);   pos = pos + 1
+        buffer(pos) = real(this%nest(2), FP_COMM);   pos = pos + 1
+        buffer(pos) = real(this%nmax, FP_COMM);      pos = pos + 1
+        buffer(pos) = real(this%lwrk2, FP_COMM);     pos = pos + 1
+        buffer(pos) = real(this%bc, FP_COMM);        pos = pos + 1
+        buffer(pos) = real(this%knots(1), FP_COMM);  pos = pos + 1
+        buffer(pos) = real(this%knots(2), FP_COMM);  pos = pos + 1
+
+        call FP_COMM_PACK(this%x, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%x)
+        call FP_COMM_PACK(this%y, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%y)
+        call FP_COMM_PACK(this%z, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%z)
+        call FP_COMM_PACK(this%w, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%w)
+        call FP_COMM_PACK(this%t, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%t)
+        call FP_COMM_PACK(this%wrk2, buffer(pos:))
+    end subroutine surf_comm_pack
+
+    !> @brief Expand surface data from a communication buffer.
+    pure subroutine surf_comm_expand(this, buffer)
+        class(fitpack_surface), intent(inout) :: this
+        real(FP_COMM), intent(in) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        call this%core_comm_expand(buffer)
+        pos = this%core_comm_size() + 1
+
+        this%m        = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%order(1) = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%order(2) = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%left(1)  = buffer(pos);                  pos = pos + 1
+        this%left(2)  = buffer(pos);                  pos = pos + 1
+        this%right(1) = buffer(pos);                  pos = pos + 1
+        this%right(2) = buffer(pos);                  pos = pos + 1
+        this%nest(1)  = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%nest(2)  = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%nmax     = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%lwrk2    = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%bc       = nint(buffer(pos), FP_FLAG);  pos = pos + 1
+        this%knots(1) = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%knots(2) = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+
+        call FP_COMM_EXPAND(this%x, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%x)
+        call FP_COMM_EXPAND(this%y, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%y)
+        call FP_COMM_EXPAND(this%z, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%z)
+        call FP_COMM_EXPAND(this%w, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%w)
+        call FP_COMM_EXPAND(this%t, buffer(pos:));    pos = pos + FP_COMM_SIZE(this%t)
+        call FP_COMM_EXPAND(this%wrk2, buffer(pos:))
+    end subroutine surf_comm_expand
+
+end module fitpack_surfaces

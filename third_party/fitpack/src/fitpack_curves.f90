@@ -1,0 +1,897 @@
+! **************************************************************************************************
+!                                ____________________  ___   ________ __
+!                               / ____/  _/_  __/ __ \/   | / ____/ //_/
+!                              / /_   / /  / / / /_/ / /| |/ /   / ,<
+!                             / __/ _/ /  / / / ____/ ___ / /___/ /| |
+!                            /_/   /___/ /_/ /_/   /_/  |_\____/_/ |_|
+!
+!                                     A Curve Fitting Package
+!
+!   Refactored by Federico Perini, 10/6/2022
+!   Based on the netlib library by Paul Dierckx
+!
+!   References :
+!     - C. De Boor, "On calculating with b-splines", J Approx Theory 6 (1972) 50-62
+!     - M. G. Cox, "The numerical evaluation of b-splines", J Inst Maths Applics 10 (1972) 134-149
+!     - P. Dierckx, "Curve and surface fitting with splines", Monographs on numerical analysis,
+!                    Oxford university press, 1993.
+!
+! **************************************************************************************************
+!> @brief Univariate spline curve fitting module.
+!!
+!! Provides fitpack_curve for fitting and evaluating a spline \f$ y = s(x) \f$ to data,
+!! and fitpack_periodic_curve for periodic splines. Wraps curfit / percur for fitting,
+!! splev for evaluation, splder / spalde for derivatives, splint for integration,
+!! sproot for zero-finding, and fourco for Fourier coefficients.
+!!
+!! @see Dierckx, Ch. 4–5 (smoothing curves), Ch. 6 §6.1–6.2 (periodic curves)
+module fitpack_curves
+    use fitpack_core
+    use fitpack_fitters
+    use ieee_arithmetic, only: ieee_value,ieee_quiet_nan
+    implicit none
+    private
+
+    public :: fitpack_curve
+    public :: fitpack_periodic_curve
+
+    integer, parameter :: MAX_K = 5
+
+    !> @brief Univariate spline curve \f$ y = s(x) \f$.
+    !!
+    !! Fits a smoothing or interpolating spline of degree \f$ k \f$ (default 3 = cubic) to
+    !! weighted data points \f$ (x_i, y_i, w_i) \f$. After fitting, the curve can be evaluated,
+    !! differentiated, integrated, and its zeros found.
+    !!
+    !! **Typical usage:**
+    !! @code
+    !! type(fitpack_curve) :: curve
+    !! curve = fitpack_curve(x, y)          ! construct and fit
+    !! y_eval = curve%eval(x_new)           ! evaluate at new points
+    !! dy = curve%dfdx(x_new, order=1)      ! first derivative
+    !! area = curve%integral(a, b)          ! definite integral
+    !! @endcode
+    type, extends(fitpack_fitter) :: fitpack_curve
+
+        !> The data points
+        integer(FP_SIZE) :: m = 0
+        real(FP_REAL), allocatable :: x(:),y(:)
+
+        !> Spline degree
+        integer(FP_SIZE) :: order = 3
+
+        !> Interval boundaries
+        real(FP_REAL) :: xleft,xright
+
+        ! Node weights
+        real(FP_REAL), allocatable :: sp(:),w(:)
+
+        ! Estimated and actual number of knots and their allocations
+        integer(FP_SIZE)               :: nest  = 0
+        real(FP_REAL), allocatable     :: wrk_fou(:,:)
+
+        ! Curve extrapolation behavior
+        integer(FP_FLAG) :: bc = OUTSIDE_NEAREST_BND
+
+        ! Knots
+        integer(FP_SIZE) :: knots = 0
+        real(FP_REAL), allocatable :: t(:)  ! Knot location
+
+        contains
+
+           !> Clean memory
+           procedure :: destroy
+
+           !> Set new points
+           procedure :: new_points
+
+           !> Generate new fit
+           procedure :: new_fit
+
+           !> Generate/update fitting curve, with optional smoothing
+           procedure :: fit           => curve_fit_automatic_knots
+           procedure :: interpolate   => interpolating_curve
+           procedure :: least_squares => curve_fit_least_squares
+
+           !> Evaluate curve at given coordinates
+           procedure, private :: curve_eval_one
+           procedure, private :: curve_eval_one_noerr
+           procedure, private :: curve_eval_many
+           procedure, private :: curve_eval_many_pure
+           generic :: eval => curve_eval_one,curve_eval_one_noerr, &
+                              curve_eval_many,curve_eval_many_pure
+
+           !> Integrate
+           procedure :: integral
+
+           !> Fourier coefficients
+           procedure :: fourier_coefficients
+
+           !> Find the zeros of a spline s(x), only if it is cubic
+           procedure :: zeros
+
+           !> Evaluate derivative at given coordinates
+           procedure, private :: curve_derivative
+           procedure, private :: curve_derivatives
+           procedure, private :: curve_all_derivatives
+           procedure, private :: curve_all_derivatives_pure
+           generic   :: dfdx     => curve_derivative,curve_derivatives
+           generic   :: dfdx_all => curve_all_derivatives,curve_all_derivatives_pure
+
+           !> Insert knot(s) into the spline representation
+           procedure, private :: curve_insert_knot_one
+           procedure, private :: curve_insert_knot_many
+           generic :: insert_knot => curve_insert_knot_one, curve_insert_knot_many
+
+           !> Parallel communication interface (size/pack/expand)
+           procedure :: comm_size   => curve_comm_size
+           procedure :: comm_pack   => curve_comm_pack
+           procedure :: comm_expand => curve_comm_expand
+
+    end type fitpack_curve
+
+    !> Derived type describing a periodic curve. No changes are made to the storage,
+    !> but the appropriate package functions will be called depending on the type
+    type, extends(fitpack_curve) :: fitpack_periodic_curve
+
+    end type fitpack_periodic_curve
+
+    !> @brief Default constructor: create a curve from data points and fit it.
+    interface fitpack_curve
+       module procedure new_from_points
+    end interface fitpack_curve
+
+    contains
+
+    !> @brief Construct a fitpack_curve from data points and perform a default fit.
+    !!
+    !! @param[in]  x     Independent variable values (must be sortable).
+    !! @param[in]  y     Dependent variable values, same size as `x`.
+    !! @param[in]  w     Optional weights (positive), same size as `x`.
+    !! @param[out] ierr  Optional error flag.
+    !! @return     Fitted curve object.
+    type(fitpack_curve) function new_from_points(x,y,w,ierr) result(this)
+        real(FP_REAL), intent(in) :: x(:),y(size(x))
+        real(FP_REAL), optional, intent(in) :: w(size(x)) ! node weights
+        integer(FP_FLAG), optional, intent(out) :: ierr
+
+        integer(FP_FLAG) :: ierr0
+
+        ierr0 = this%new_fit(x,y,w)
+
+        ! Error handling
+        call fitpack_error_handling(ierr0,ierr,'new curve fit')
+
+    end function new_from_points
+
+    !> @brief Load new data points and perform a fresh fit.
+    integer(FP_FLAG) function new_fit(this,x,y,w,smoothing,order)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x(:),y(size(x))
+        real(FP_REAL), optional, intent(in) :: w(size(x)) ! node weights
+        real(FP_REAL), optional, intent(in) :: smoothing
+        integer(FP_SIZE), optional, intent(in) :: order
+
+        call this%new_points(x,y,w)
+
+        new_fit = this%fit(smoothing,order)
+
+    end function new_fit
+
+    !> @brief Destroy a curve object and release all allocated memory.
+    elemental subroutine destroy(this)
+       class(fitpack_curve), intent(inout) :: this
+       integer :: ierr
+       call this%destroy_base()
+       this%m = 0
+       deallocate(this%x,stat=ierr)
+       deallocate(this%y,stat=ierr)
+       deallocate(this%w,stat=ierr)
+       deallocate(this%sp,stat=ierr)
+       deallocate(this%wrk_fou,stat=ierr)
+       deallocate(this%t,stat=ierr)
+       this%xleft = zero
+       this%xright = zero
+
+       this%order     = 3
+       this%nest      = 0
+       this%knots     = 0
+       this%bc        = OUTSIDE_NEAREST_BND
+
+    end subroutine destroy
+
+    !> @brief Load new data points into the curve, resetting all internal state.
+    !!
+    !! Sorts data by `x`, allocates knot/coefficient storage, and prepares workspaces.
+    !! A subsequent call to `fit`, `interpolate`, or `least_squares` is required to compute
+    !! the spline representation.
+    !!
+    !! @param[in,out] this  The curve object (destroyed and reinitialized).
+    !! @param[in]     x     Independent variable values (unsorted OK; will be sorted internally).
+    !! @param[in]     y     Dependent variable values, same size as `x`.
+    !! @param[in]     w     Optional positive weights, same size as `x`. Default: uniform.
+    !!
+    !! @see curfit, percur
+    subroutine new_points(this,x,y,w)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x(:),y(size(x))
+        real(FP_REAL), optional, intent(in) :: w(size(x)) ! node weights
+
+        integer, allocatable :: isort(:)
+        integer, parameter   :: SAFE = 10
+
+        associate(m=>this%m,nest=>this%nest,lwrk=>this%lwrk)
+
+        call this%destroy()
+
+        m = size(x)
+
+        ! Ensure x are sorted
+        isort = fitpack_argsort(x)
+        allocate(this%x(m),source=x(isort))
+        allocate(this%y(m),source=y(isort))
+
+        ! set up uniform weights
+        if (present(w)) then
+           allocate(this%w(m),source=w(isort))
+        else
+           allocate(this%w(m),source=1.0_FP_REAL)
+        endif
+        allocate(this%sp(m),source=0.0_FP_REAL)
+
+        ! Setup boundaries
+        this%xleft  = minval(x)
+        this%xright = maxval(x)
+
+        ! Reset run flag
+        this%iopt = 0
+
+        ! Reset estimated knots
+        nest = max(SAFE*2*MAX_K+2,ceiling(1.4*this%m))
+        this%liwrk = nest
+        allocate(this%iwrk(nest),this%t(nest),this%c(nest))
+
+        ! Setup working space.
+        ! percur needs m*(k+1)+nest*(8+5*k), curfit needs m*(k+1)+nest*(7+3*k).
+        ! Use the larger (percur) formula to support both periodic and non-periodic curves.
+        lwrk = (m*(MAX_K+1)+nest*(8+5*MAX_K))
+        allocate(this%wrk(lwrk),source=0.0_FP_REAL)
+        allocate(this%wrk_fou(nest,2))
+
+        endassociate
+
+    end subroutine new_points
+
+    !> @brief Evaluate the spline at a single point (with error flag).
+    !!
+    !! @param[in,out] this  The fitted curve object.
+    !! @param[in]     x     Evaluation point.
+    !! @param[out]    ierr  Error flag.
+    !! @return Spline value \f$ s(x) \f$.
+    !!
+    !! @see splev
+    real(FP_REAL) function curve_eval_one(this,x,ierr) result(y)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL),        intent(in)    :: x      ! Evaluation point
+        integer(FP_FLAG),     intent(out)   :: ierr   ! Optional error flag
+
+        real(FP_REAL) :: y1(1)
+
+        y1 = curve_eval_many(this,[x],ierr)
+        y  = y1(1)
+
+    end function curve_eval_one
+
+    !> @brief Evaluate the spline at a single point (pure, returns NaN on error).
+    !!
+    !! @param[in] this  The fitted curve object.
+    !! @param[in] x     Evaluation point.
+    !! @return Spline value \f$ s(x) \f$, or NaN on error.
+    !!
+    !! @see splev
+    pure real(FP_REAL) function curve_eval_one_noerr(this,x) result(y)
+        class(fitpack_curve), intent(in) :: this
+        real(FP_REAL),        intent(in) :: x      ! Evaluation point
+
+        real(FP_REAL) :: y1(1)
+
+        y1 = curve_eval_many_pure(this,[x])
+        y  = y1(1)
+
+    end function curve_eval_one_noerr
+
+    !> @brief Evaluate the spline at multiple points (with error flag).
+    function curve_eval_many(this,x,ierr) result(y)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL),        intent(in)    :: x(:)   ! Evaluation points
+        integer(FP_FLAG),     intent(out)   :: ierr   ! Optional error flag
+        real(FP_REAL) :: y(size(x))
+
+        integer(FP_SIZE) :: npts
+        integer(FP_FLAG) :: ier
+
+        npts = size(x)
+
+        !  subroutine splev evaluates in a number of points x(i),i=1,2,...,m
+        !  a spline s(x) of degree k, given in its b-spline representation.
+        !
+        !  calling sequence:
+        !     call splev(t,n,c,k,x,y,m,e,ier)
+        !
+        !  input parameters:
+        !    t    : array,length n, which contains the position of the knots.
+        !    n    : integer, giving the total number of knots of s(x).
+        !    c    : array,length n, which contains the b-spline coefficients.
+        !    k    : integer, giving the degree of s(x).
+        !    x    : array,length m, which contains the points where s(x) must
+        !           be evaluated.
+        !    m    : integer, giving the number of points where s(x) must be
+        !           evaluated.
+        !    e    : integer, if 0 the spline is extrapolated from the end
+        !           spans for points not in the support, if 1 the spline
+        !           evaluates to zero for those points, if 2 ier is set to
+        !           1 and the subroutine returns, and if 3 the spline evaluates
+        !           to the value of the nearest boundary point.
+
+        call splev(t=this%t,&                      ! the position of the knots
+                   n=this%knots,&                  ! total number of knots of s(x)
+                   c=this%c,&                      ! the b-spline coefficients
+                   k=this%order,&                  ! the degree of s(x)
+                   x=x,m=npts,&                    ! the points where s(x) must be evaluated.
+                   y=y, &                          ! the predictions
+                   e=this%bc,           &          ! What to do outside mapped knot range
+                   ier=ier)
+
+        call fitpack_error_handling(ier,ierr,'evaluate 1d spline')
+
+    end function curve_eval_many
+
+    !> @brief Evaluate the spline at multiple points (pure, returns NaN on error).
+    pure function curve_eval_many_pure(this,x) result(y)
+        class(fitpack_curve), intent(in)  :: this
+        real(FP_REAL), intent(in) :: x(:)   ! Evaluation points
+        real(FP_REAL) :: y(size(x))
+
+        integer(FP_SIZE) :: npts
+        integer(FP_FLAG) :: ier
+
+        npts = size(x)
+
+        !  subroutine splev evaluates in a number of points x(i),i=1,2,...,m
+        !  a spline s(x) of degree k, given in its b-spline representation.
+        !
+        !  calling sequence:
+        !     call splev(t,n,c,k,x,y,m,e,ier)
+        !
+        !  input parameters:
+        !    t    : array,length n, which contains the position of the knots.
+        !    n    : integer, giving the total number of knots of s(x).
+        !    c    : array,length n, which contains the b-spline coefficients.
+        !    k    : integer, giving the degree of s(x).
+        !    x    : array,length m, which contains the points where s(x) must
+        !           be evaluated.
+        !    m    : integer, giving the number of points where s(x) must be
+        !           evaluated.
+        !    e    : integer, if 0 the spline is extrapolated from the end
+        !           spans for points not in the support, if 1 the spline
+        !           evaluates to zero for those points, if 2 ier is set to
+        !           1 and the subroutine returns, and if 3 the spline evaluates
+        !           to the value of the nearest boundary point.
+
+        call splev(t=this%t,&                      ! the position of the knots
+                   n=this%knots,&                  ! total number of knots of s(x)
+                   c=this%c,&                      ! the b-spline coefficients
+                   k=this%order,&                  ! the degree of s(x)
+                   x=x,m=npts,&                    ! the points where s(x) must be evaluated.
+                   y=y, &                          ! the predictions
+                   e=this%bc,           &          ! What to do outside mapped knot range
+                   ier=ier)
+
+        ! For the pure version, return NaNs on error
+        if (.not.FITPACK_SUCCESS(ier)) y = ieee_value(0.0_FP_REAL,ieee_quiet_nan)
+
+    end function curve_eval_many_pure
+
+    !> @brief Fit an interpolating spline (\f$ s = 0 \f$) through the data points.
+    integer(FP_FLAG) function interpolating_curve(this,order,reset_knots) result(ierr)
+        class(fitpack_curve), intent(inout) :: this
+        integer(FP_SIZE), optional, intent(in) :: order
+        logical, optional, intent(in) :: reset_knots
+
+        logical :: do_reset
+
+        do_reset = .true.; if (present(reset_knots)) do_reset = reset_knots
+        if (do_reset) this%iopt = IOPT_NEW_SMOOTHING
+
+        ierr = curve_fit_automatic_knots(this,smoothing=zero,order=order,keep_knots=.not.do_reset)
+
+    end function interpolating_curve
+
+    !> @brief Fit a least-squares spline with fixed knots.
+    integer(FP_FLAG) function curve_fit_least_squares(this,smoothing,reset_knots) result(ierr)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: smoothing
+        logical, optional, intent(in) :: reset_knots
+
+        logical :: do_reset
+
+        ! Optionally recompute knots via a smoothing fit first
+        do_reset = .false.; if (present(reset_knots)) do_reset = reset_knots
+        if (do_reset) then
+            this%iopt = IOPT_NEW_SMOOTHING
+            ierr = this%fit(smoothing)
+            if (.not.FITPACK_SUCCESS(ierr)) return
+        end if
+
+        this%iopt = IOPT_NEW_LEASTSQUARES
+        ierr = this%fit()
+    end function curve_fit_least_squares
+
+    !> @brief Fit a smoothing spline with automatic knot placement (curfit / percur).
+    integer(FP_FLAG) function curve_fit_automatic_knots(this,smoothing,order,keep_knots) result(ierr)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: smoothing
+        integer(FP_SIZE), optional, intent(in) :: order
+        logical, optional, intent(in) :: keep_knots
+
+        integer(FP_SIZE) :: loop,nit
+        real(FP_REAL) :: smooth_now(3)
+        logical :: do_guard
+
+        !> Get smoothing trajectory
+        call get_smoothing(this%smoothing,smoothing,nit,smooth_now)
+
+        !> Ensure we start with new knots (unless caller wants to keep them)
+        do_guard = .true.; if (present(keep_knots)) do_guard = .not.keep_knots
+        if (do_guard .and. this%iopt==IOPT_OLD_FIT) this%iopt = IOPT_NEW_SMOOTHING
+
+        !> Set/update order
+        if (present(order)) this%order = order
+
+        do loop=1,nit
+
+            ! Set current smoothing
+            this%smoothing = smooth_now(loop)
+
+            select type (curve => this)
+
+               type is (fitpack_periodic_curve)
+
+                  ! Call fitting function
+                  call percur(curve%iopt,                      &  ! option
+                              curve%m,curve%x,curve%y,curve%w, &  ! points
+                              curve%order,curve%smoothing,     &  ! spline accuracy
+                              curve%nest,curve%knots,curve%t,  &  ! spline output
+                              curve%c,curve%fp,                &  ! spline output
+                              curve%wrk,curve%lwrk,curve%iwrk, &  ! memory
+                              ierr)                               ! Error flag
+
+               class default
+
+                  ! Call curvfit
+                  call curfit(curve%iopt,                      &  ! option
+                              curve%m,curve%x,curve%y,curve%w, &  ! points
+                              curve%xleft,curve%xright,        &  ! x range
+                              curve%order,curve%smoothing,     &  ! spline accuracy
+                              curve%nest,curve%knots,curve%t,  &  ! spline output
+                              curve%c,curve%fp,                &  ! spline output
+                              curve%wrk,curve%lwrk,curve%iwrk, &  ! memory
+                              ierr)                               ! Error flag
+
+            end select
+
+            ! If fit was successful, set iopt to "old"
+            if (FITPACK_SUCCESS(ierr)) this%iopt = IOPT_OLD_FIT
+
+        end do
+
+    end function curve_fit_automatic_knots
+
+    !> @brief Evaluate the k-th derivative at multiple points (with error flag).
+    !!
+    !! @param[in,out] this   The fitted curve object.
+    !! @param[in]     x      Array of evaluation points.
+    !! @param[in]     order  Derivative order (\f$ \text{order} > k \f$ evaluates to zero).
+    !! @param[out]    ierr   Optional error flag.
+    !! @return Array of derivative values \f$ s^{(\text{order})}(x_i) \f$.
+    !!
+    !! @see splder
+    function curve_derivatives(this, x, order, ierr) result(ddx)
+       class(fitpack_curve), intent(inout) :: this
+       real(FP_REAL),        intent(in)    :: x(:)   ! Evaluation point (scalar)
+       integer,              intent(in)    :: order  ! Derivative order. Default 1
+       integer(FP_FLAG), optional, intent(out)   :: ierr  ! Optional error flag
+       real(FP_REAL), dimension(size(x))   :: ddx
+
+       integer(FP_SIZE) :: ddx_order,m
+       integer(FP_FLAG) :: ierr0
+
+       ! Order 0 = spline value
+       ddx_order = max(0,order)
+
+       ierr0 = FITPACK_OK
+
+       m = size(x); if (m<=0) goto 1
+
+       !  subroutine splder evaluates in a number of points x(i),i=1,2,...,m the derivative of
+       !  order nu of a spline s(x) of degree k, given in its b-spline representation.
+       call splder(this%t,     & ! Position of the knots
+                   this%knots, & ! Number of knots
+                   this%c,     & ! spline coefficients
+                   this%order, & ! spline degree
+                   ddx_order,  & ! derivative order (0<=order<=this%order)  x,y,m,e,wrk,ier)
+                   x,          & ! Array of points where this should be evaluated
+                   ddx,        & ! Evaluated derivatives
+                   m,          & ! Number of input points
+                   this%bc,    & ! Extrapolation behavior
+                   this%wrk,   & ! Temporary working space
+                   ierr0)        ! Output flag
+
+       1 call fitpack_error_handling(ierr0,ierr,'evaluate derivative')
+
+    end function curve_derivatives
+
+
+    !> @brief Evaluate all derivatives \f$ s^{(j)}(x) \f$ for \f$ j = 0, \ldots, k \f$ (with error flag).
+    !!
+    !! @param[in,out] this  The fitted curve object.
+    !! @param[in]     x     Scalar evaluation point.
+    !! @param[out]    ierr  Error flag.
+    !! @return Array of size \f$ k+1 \f$ containing \f$ s(x), s'(x), \ldots, s^{(k)}(x) \f$.
+    !!
+    !! @see spalde
+    function curve_all_derivatives(this, x, ierr) result(ddx)
+       class(fitpack_curve), intent(inout) :: this
+       real(FP_REAL),        intent(in)    :: x   ! Evaluation point (scalar)
+       integer(FP_FLAG),     intent(out)   :: ierr  ! Optional error flag
+       real(FP_REAL), dimension(this%order+1)  :: ddx
+
+       integer(FP_FLAG) :: ierr0
+
+       ierr0 = FITPACK_OK
+
+       !  subroutine splder evaluates in a number of points x(i),i=1,2,...,m the derivative of
+       !  order nu of a spline s(x) of degree k, given in its b-spline representation.
+       call spalde(this%t,       & ! Position of the knots
+                   this%knots,   & ! Number of knots
+                   this%c,       & ! spline coefficients
+                   this%order+1, & ! spline order (=degree+1)
+                   x,            & ! Point where this should be evaluated
+                   ddx,          & ! Evaluated derivatives
+                   ierr0)        ! Output flag
+
+       call fitpack_error_handling(ierr0,ierr,'evaluate all derivatives')
+
+    end function curve_all_derivatives
+
+    !> @brief Evaluate all derivatives \f$ s^{(j)}(x) \f$ for \f$ j = 0, \ldots, k \f$ (pure, NaN on error).
+    !!
+    !! @param[in] this  The fitted curve object.
+    !! @param[in] x     Scalar evaluation point.
+    !! @return Array of size \f$ k+1 \f$ containing \f$ s(x), s'(x), \ldots, s^{(k)}(x) \f$.
+    !!
+    !! @see spalde
+    function curve_all_derivatives_pure(this, x) result(ddx)
+       class(fitpack_curve), intent(in)        :: this
+       real(FP_REAL),        intent(in)        :: x   ! Evaluation point (scalar)
+       real(FP_REAL), dimension(this%order+1)  :: ddx
+
+       integer(FP_FLAG) :: ierr0
+
+       ierr0 = FITPACK_OK
+
+       !  subroutine splder evaluates in a number of points x(i),i=1,2,...,m the derivative of
+       !  order nu of a spline s(x) of degree k, given in its b-spline representation.
+       call spalde(this%t,       & ! Position of the knots
+                   this%knots,   & ! Number of knots
+                   this%c,       & ! spline coefficients
+                   this%order+1, & ! spline order (=degree+1)
+                   x,            & ! Point where this should be evaluated
+                   ddx,          & ! Evaluated derivatives
+                   ierr0)        ! Output flag
+
+       if (.not.FITPACK_SUCCESS(ierr0)) ddx = ieee_value(0.0_FP_REAL,ieee_quiet_nan)
+
+    end function curve_all_derivatives_pure
+
+    !> @brief Evaluate the k-th derivative at a single point (with optional error flag).
+    !!
+    !! @param[in,out] this   The fitted curve object.
+    !! @param[in]     x      Scalar evaluation point.
+    !! @param[in]     order  Derivative order (\f$ \text{order} > k \f$ evaluates to zero).
+    !! @param[out]    ierr   Optional error flag.
+    !! @return Scalar derivative value \f$ s^{(\text{order})}(x) \f$.
+    !!
+    !! @see splder
+    real(FP_REAL) function curve_derivative(this, x, order, ierr) result(ddx)
+       class(fitpack_curve), intent(inout) :: this
+       real(FP_REAL),        intent(in)    :: x      ! Evaluation point (scalar)
+       integer,              intent(in)    :: order  ! Derivative order. Default 1
+       integer(FP_FLAG), optional, intent(out)   :: ierr   ! Optional error flag
+
+       real(FP_REAL) :: ddxa(1)
+
+       ! Use the array-based wrapper
+       ddxa = curve_derivatives(this,[x],order,ierr)
+       ddx  = ddxa(1)
+
+    end function curve_derivative
+
+    !> @brief Compute the definite integral \f$ \int_a^b s(x)\,dx \f$ via splint.
+    real(FP_REAL) function integral(this,from,to)
+       class(fitpack_curve), intent(inout) :: this
+       real(FP_REAL), intent(in) :: from,to
+
+       integral = splint(this%t, &  ! array of knots
+                         this%knots, & ! number of knots
+                         this%c    , & ! array of spline coefficients
+                         this%order, & ! degree of the spline
+                         from,to,    & ! endpoints of the integration interval
+                         this%wrk)     ! working space
+
+    end function integral
+
+    !> @brief Compute Fourier sine and cosine coefficients of the spline.
+    !!
+    !! Computes integrals over the interior knot range \f$ [t_4, t_{n-3}] \f$:
+    !! \f[
+    !!     A_i = \int_{t_4}^{t_{n-3}} s(x) \sin(\alpha_i x) \, dx, \quad
+    !!     B_i = \int_{t_4}^{t_{n-3}} s(x) \cos(\alpha_i x) \, dx
+    !! \f]
+    !! Requires at least 10 knots.
+    !!
+    !! @param[in,out] this   The fitted curve (must have \f$ \geq 10 \f$ knots).
+    !! @param[in]     alpha  Array of frequency values \f$ \alpha_i \f$.
+    !! @param[out]    A      Sine coefficients, same size as `alpha`.
+    !! @param[out]    B      Cosine coefficients, same size as `alpha`.
+    !! @param[out]    ierr   Optional error flag.
+    !!
+    !! @see fourco
+    subroutine fourier_coefficients(this,alpha,A,B,ierr)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL),    intent(in) :: alpha(:)
+        real(FP_REAL),    intent(out), dimension(size(alpha)) :: A,B
+        integer(FP_FLAG), intent(out), optional :: ierr
+
+        integer(FP_FLAG) :: ier
+
+        call fourco(this%t,this%knots,  & ! Spline knots)
+                    this%c,             & ! spline coefficients
+                    alpha,size(alpha),  & ! Parameters alpha(i)
+                    A,B,                & ! Computed Fourier coefficients
+                    this%wrk_fou(:,1),  & ! Working space
+                    this%wrk_fou(:,2),  & ! Working space
+                    ier)
+
+        call fitpack_error_handling(ier,ierr,'fourier_coefficients')
+
+    end subroutine fourier_coefficients
+
+    !> @brief Find all real zeros of a cubic spline \f$ s(x) = 0 \f$.
+    !!
+    !! Only valid for cubic splines (\f$ k = 3 \f$). Iteratively grows storage until all
+    !! zeros are found.
+    !!
+    !! @param[in]  this  The fitted cubic curve.
+    !! @param[out] ierr  Optional error flag.
+    !! @return Allocatable array of zero locations (empty if none found).
+    !!
+    !! @see sproot
+    function zeros(this,ierr)
+        class(fitpack_curve), intent(in) :: this
+        real(FP_REAL), allocatable :: zeros(:)
+        integer(FP_FLAG), optional, intent(out) :: ierr
+
+        integer(FP_SIZE), parameter :: maxit = 10
+        integer(FP_SIZE) :: mest,m,nit,i
+        integer(FP_FLAG) :: ier
+        real(FP_REAL), allocatable :: tmp_zeros(:)
+
+        ! Estimate a relatively safe number of zeros
+        m    = this%knots
+        ier  = FITPACK_INSUFFICIENT_STORAGE
+        nit  = 0
+
+        ! Iterate until all zeros fit the array
+        storage_attempts: do while (nit<maxit .and. ier==FITPACK_INSUFFICIENT_STORAGE)
+
+            nit = nit+1
+
+            ! Allocate storage with the new estimate
+            mest = 2*m
+            deallocate(tmp_zeros,stat=i)
+            allocate(tmp_zeros(mest))
+
+            call sproot(this%t,this%knots,   & ! Spline knots
+                        this%c,              & ! the spline coefficients
+                        tmp_zeros,mest,      & ! Temporary storage
+                        m,                   & ! Actual number of zeros
+                        ier)
+
+        end do storage_attempts
+
+        !> Always return an allocated array
+        if (m>0) then
+            allocate(zeros(m),source=tmp_zeros(1:m))
+        else
+            allocate(zeros(0))
+        endif
+
+        call fitpack_error_handling(ier,ierr,'compute zeros')
+
+    end function zeros
+
+    ! =================================================================================================
+    ! KNOT INSERTION
+    ! =================================================================================================
+
+    !> @brief Grow the knot and coefficient arrays when storage is insufficient.
+    subroutine grow_knot_storage(this)
+        class(fitpack_curve), intent(inout) :: this
+
+        integer(FP_SIZE) :: new_nest
+        real(FP_REAL), allocatable :: tmp(:)
+
+        new_nest = max(this%nest + max(8_FP_SIZE, this%nest/2), this%knots + 2)
+
+        ! Grow t(:)
+        allocate(tmp(new_nest), source=zero)
+        tmp(1:this%knots) = this%t(1:this%knots)
+        call move_alloc(tmp, this%t)
+
+        ! Grow c(:)
+        allocate(tmp(new_nest), source=zero)
+        tmp(1:this%knots) = this%c(1:this%knots)
+        call move_alloc(tmp, this%c)
+
+        this%nest = new_nest
+
+    end subroutine grow_knot_storage
+
+    !> @brief Insert a single knot into the B-spline representation.
+    !!
+    !! The spline value is unchanged; only the knot vector and coefficients are updated.
+    !! Workspace state is reset after insertion.
+    !!
+    !! @param[in,out] this  The fitted curve.
+    !! @param[in]     x     Knot position to insert.
+    !! @param[out]    ierr  Optional error flag.
+    !!
+    !! @see insert_inplace
+    subroutine curve_insert_knot_one(this, x, ierr)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x
+        integer(FP_FLAG), optional, intent(out) :: ierr
+
+        integer(FP_SIZE) :: iopt
+        integer(FP_FLAG) :: ier
+
+        ! Periodic curves use iopt=1
+        select type (this)
+           type is (fitpack_periodic_curve)
+              iopt = 1
+           class default
+              iopt = 0
+        end select
+
+        ! Ensure there is room for one more knot
+        if (this%knots >= this%nest) call grow_knot_storage(this)
+
+        call insert_inplace(iopt, this%t, this%knots, this%c, this%order, x, this%nest, ier)
+
+        ! Workspace state is invalidated after knot insertion
+        if (FITPACK_SUCCESS(ier)) this%iopt = IOPT_NEW_SMOOTHING
+
+        call fitpack_error_handling(ier, ierr, 'insert knot')
+
+    end subroutine curve_insert_knot_one
+
+    !> @brief Insert multiple knots into the B-spline representation.
+    !!
+    !! @param[in,out] this  The fitted curve.
+    !! @param[in]     x     Array of knot positions to insert.
+    !! @param[out]    ierr  Optional error flag.
+    !!
+    !! @see insert_inplace
+    subroutine curve_insert_knot_many(this, x, ierr)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x(:)
+        integer(FP_FLAG), optional, intent(out) :: ierr
+
+        integer(FP_SIZE) :: i
+        integer(FP_FLAG) :: ier
+
+        do i = 1, size(x)
+            call this%curve_insert_knot_one(x(i), ier)
+            if (.not.FITPACK_SUCCESS(ier)) then
+                call fitpack_error_handling(ier, ierr, 'insert knots')
+                return
+            end if
+        end do
+
+        if (present(ierr)) ierr = FITPACK_OK
+
+    end subroutine curve_insert_knot_many
+
+    ! =================================================================================================
+    ! PARALLEL COMMUNICATION (size/pack/expand)
+    ! =================================================================================================
+
+    !> @brief Return the communication buffer size (number of FP_COMM elements).
+    elemental integer(FP_SIZE) function curve_comm_size(this)
+        class(fitpack_curve), intent(in) :: this
+
+        ! Base fields (iopt, smoothing, fp, c, iwrk, wrk)
+        ! Curve-specific scalars: m, order, knots, bc, nest, xleft, xright (7 values)
+        curve_comm_size = this%core_comm_size() &
+                        + 7 &
+                        + FP_COMM_SIZE(this%x) &
+                        + FP_COMM_SIZE(this%y) &
+                        + FP_COMM_SIZE(this%sp) &
+                        + FP_COMM_SIZE(this%w) &
+                        + FP_COMM_SIZE(this%t) &
+                        + FP_COMM_SIZE(this%wrk_fou)
+
+    end function curve_comm_size
+
+    !> @brief Pack curve data into a communication buffer for parallel transfer.
+    pure subroutine curve_comm_pack(this, buffer)
+        class(fitpack_curve), intent(in) :: this
+        real(FP_COMM), intent(out) :: buffer(:)
+
+        integer(FP_SIZE) :: pos
+
+        ! Pack base fields first
+        call this%core_comm_pack(buffer)
+        pos = this%core_comm_size() + 1
+
+        ! Pack curve-specific scalars
+        buffer(pos)   = real(this%m, FP_COMM);     pos = pos + 1
+        buffer(pos)   = real(this%order, FP_COMM);  pos = pos + 1
+        buffer(pos)   = real(this%knots, FP_COMM);  pos = pos + 1
+        buffer(pos)   = real(this%bc, FP_COMM);     pos = pos + 1
+        buffer(pos)   = real(this%nest, FP_COMM);   pos = pos + 1
+        buffer(pos)   = this%xleft;                  pos = pos + 1
+        buffer(pos)   = this%xright;                 pos = pos + 1
+
+        ! Pack curve-specific arrays
+        call FP_COMM_PACK(this%x, buffer(pos:));       pos = pos + FP_COMM_SIZE(this%x)
+        call FP_COMM_PACK(this%y, buffer(pos:));       pos = pos + FP_COMM_SIZE(this%y)
+        call FP_COMM_PACK(this%sp, buffer(pos:));      pos = pos + FP_COMM_SIZE(this%sp)
+        call FP_COMM_PACK(this%w, buffer(pos:));       pos = pos + FP_COMM_SIZE(this%w)
+        call FP_COMM_PACK(this%t, buffer(pos:));       pos = pos + FP_COMM_SIZE(this%t)
+        call FP_COMM_PACK(this%wrk_fou, buffer(pos:))
+
+    end subroutine curve_comm_pack
+
+    !> @brief Expand curve data from a communication buffer.
+    pure subroutine curve_comm_expand(this, buffer)
+        class(fitpack_curve), intent(inout) :: this
+        real(FP_COMM), intent(in) :: buffer(:)
+
+        integer(FP_SIZE) :: pos
+
+        ! Expand base fields first
+        call this%core_comm_expand(buffer)
+        pos = this%core_comm_size() + 1
+
+        ! Expand curve-specific scalars
+        this%m     = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%order = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%knots = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%bc    = nint(buffer(pos), FP_FLAG);  pos = pos + 1
+        this%nest  = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%xleft     = buffer(pos);              pos = pos + 1
+        this%xright    = buffer(pos);              pos = pos + 1
+
+        ! Expand curve-specific arrays
+        call FP_COMM_EXPAND(this%x, buffer(pos:));       pos = pos + FP_COMM_SIZE(this%x)
+        call FP_COMM_EXPAND(this%y, buffer(pos:));       pos = pos + FP_COMM_SIZE(this%y)
+        call FP_COMM_EXPAND(this%sp, buffer(pos:));      pos = pos + FP_COMM_SIZE(this%sp)
+        call FP_COMM_EXPAND(this%w, buffer(pos:));       pos = pos + FP_COMM_SIZE(this%w)
+        call FP_COMM_EXPAND(this%t, buffer(pos:));       pos = pos + FP_COMM_SIZE(this%t)
+        call FP_COMM_EXPAND(this%wrk_fou, buffer(pos:))
+
+    end subroutine curve_comm_expand
+
+end module fitpack_curves

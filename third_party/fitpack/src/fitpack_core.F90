@@ -1,0 +1,19092 @@
+! **************************************************************************************************
+!                                ____________________  ___   ________ __
+!                               / ____/  _/_  __/ __ \/   | / ____/ //_/
+!                              / /_   / /  / / / /_/ / /| |/ /   / ,<
+!                             / __/ _/ /  / / / ____/ ___ / /___/ /| |
+!                            /_/   /___/ /_/ /_/   /_/  |_\____/_/ |_|
+!
+!                                     A Curve Fitting Package
+!
+!   Refactored by Federico Perini, 10/6/2022
+!   Based on the netlib library by Paul Dierckx
+!
+!   References :
+!     - C. De Boor, "On calculating with b-splines", J Approx Theory 6 (1972) 50-62
+!     - M. G. Cox, "The numerical evaluation of b-splines", J Inst Maths Applics 10 (1972) 134-149
+!     - P. Dierckx, "Curve and surface fitting with splines", Monographs on numerical analysis,
+!                    Oxford university press, 1993.
+!
+! **************************************************************************************************
+module fitpack_core
+    use iso_c_binding, only: c_double,c_int32_t,c_bool
+    implicit none
+    private
+
+    ! Precision and array size
+    integer, parameter, public :: FP_REAL = c_double
+    integer, parameter, public :: FP_SIZE = c_int32_t
+    integer, parameter, public :: FP_FLAG = c_int32_t
+    integer, parameter, public :: FP_BOOL = c_bool
+    integer, parameter, public :: FP_COMM = c_double
+    integer, parameter, public :: FP_DIM  = c_int32_t  ! Tensor (domain) dimension count for N-D gridded fits
+
+    !> Marker for unallocated arrays in communication buffers
+    integer(FP_SIZE), parameter :: FP_NOT_ALLOC = -99999999_FP_SIZE
+
+    ! Curve fitting routines
+    public :: curfit ! * General curve fitting
+    public :: percur ! * Curve fitting with periodic splines
+    public :: parcur ! * Smoothing of parametric curves
+    public :: clocur ! * Smoothing of closed curves
+    public :: concur ! * Smoothing with end-point derivative constraints
+    public :: cocosp ! Least-squares fitting with convexity constraints
+    public :: concon ! Automated smoothing with convexity constraints
+
+    ! Curve approximation routines
+    public :: splev  ! * Evaluation of a spline function
+    public :: splder ! * Derivative calculation of a spline function
+    public :: spalde ! * All derivatives of a spline function
+    public :: curev  ! * Evaluation of a spline curve
+    public :: cualde ! * All derivatives of a spline curve
+    public :: insert ! Insert a knot into a given spline
+    public :: insert_inplace
+    public :: splint ! * Integration of a spline function
+    public :: fourco ! * Fourier coefficients of a cubic spline
+    public :: sproot ! * The roots of a cubic spline
+
+    ! Surface fitting routines
+    public :: surfit ! * Surface fitting to scattered data
+    public :: polar  ! * Surface fitting using generalized polar coordinates
+    public :: pogrid ! * Surface fitting to data on a polar grid
+    public :: sphere ! * Surface fitting using spherical coordinates
+    public :: spgrid ! * Surface fitting to data on a spherical grid
+    public :: parsur ! * Parametric surface fitting to data on a grid
+
+    ! N-D gridded core (dimensionalized behind a bit-for-bit gate at dims=2; see
+    ! todo/fitpack_nd_grids.md). fpregr/fpgrre stay private and are covered transitively
+    ! by the regrid backbone gate. fpndsp is the N-D evaluation kernel; ndspev its public
+    ! flat-workspace wrapper (the N-D analogue of bispev).
+    public :: regrid ! tensor-product gridded smoothing-spline fit (any domain dimension)
+    public :: fpndsp ! N-D gridded evaluation kernel (the engine behind bispev)
+    public :: ndspev ! N-D generalization of bispev (gridded evaluation, flat workspace)
+
+    ! Surface application routines
+    public :: ndspeu ! * Evaluation of a tensor-product spline at scattered points (any dimension)
+    public :: bispev ! * Evaluation of a bivariate spline function (2-D grid)
+    public :: parder ! Partial derivatives of a tensor-product spline on a grid (any dimension)
+    public :: pardeu ! Partial derivatives of a tensor-product spline at scattered points (any dimension)
+    public :: pardtc ! B-spline coefficients of a partial-derivative spline (any dimension)
+    public :: dblint ! Box/domain integral of a tensor-product spline (any dimension)
+    public :: profil ! Cross-section of a tensor-product spline: fix one axis (any dimension)
+    public :: evapol ! * Evaluation of a polar spline
+    public :: surev  ! * Evaluation of a parametric spline surface
+
+    ! Polar domain boundary
+    public :: fitpack_polar_boundary
+
+    ! Utilities
+    public :: equal
+    public :: fitpack_swap
+    public :: fitpack_argsort
+    public :: fitpack_error_handling
+    public :: get_smoothing
+
+    ! Parallel communication utilities for standalone use
+    public :: FP_RCOMMS_PER_BITS
+    public :: FP_COMM_SIZE
+    public :: FP_COMM_PACK
+    public :: FP_COMM_EXPAND
+
+    ! Spline behavior for points not in the support
+    integer(FP_FLAG), parameter,  public :: OUTSIDE_EXTRAPOLATE = 0 ! extrapolated from the end spans
+    integer(FP_FLAG), parameter,  public :: OUTSIDE_ZERO        = 1 ! spline evaluates to zero
+    integer(FP_FLAG), parameter,  public :: OUTSIDE_NOT_ALLOWED = 2 ! an error flag is returned
+    integer(FP_FLAG), parameter,  public :: OUTSIDE_NEAREST_BND = 3 ! evaluate to value of nearest boundary point
+
+    ! IOPT defines a curve state
+                                  public :: IOPT_MESSAGE
+    integer(FP_FLAG), parameter,  public :: IOPT_NEW_LEASTSQUARES = -1 ! Request a new lsq fit
+    integer(FP_FLAG), parameter,  public :: IOPT_NEW_SMOOTHING    =  0 ! Request a new smoothing fit
+    integer(FP_FLAG), parameter,  public :: IOPT_OLD_FIT          =  1 ! Update an old fit
+
+    ! Dimension index of the last knot addition. KNOT_DIM_NONE = none added yet; otherwise the
+    ! 1-based axis ID (1 = first dim x/u, 2 = second dim y/v, ... up to MAX_IDIM), so the value can
+    ! be used directly as an array/axis index. This generalizes to N dimensions.
+    integer(FP_SIZE), parameter,  public :: MAX_IDIM      = 10  ! Max number of dimensions
+    integer(FP_DIM),  parameter,  public :: IDIMS(MAX_IDIM) = [1,2,3,4,5,6,7,8,9,10]
+    integer(FP_FLAG), parameter,  public :: KNOT_DIM_NONE =  0  ! No knots added yet
+    integer(FP_FLAG), parameter,  public :: KNOT_DIM_1    =  1  ! Last knot added on 1st dim (x or u)
+    integer(FP_FLAG), parameter,  public :: KNOT_DIM_2    =  2  ! Last knot added on 2nd dim (y or v)
+
+    ! Default cap on the smoothing-parameter iterations of the gridded fit. Large grids can need
+    ! more; regrid takes an optional maxit that overrides it.
+    integer(FP_SIZE), parameter, public :: REGRID_MAXIT = 20
+
+    ! Spline degrees
+    integer(FP_SIZE), parameter, public :: MAX_ORDER = 19    ! Max spline order (for array allocation)
+    integer(FP_SIZE), parameter, public :: DEGREE_3  =  3
+    integer(FP_SIZE), parameter, public :: DEGREE_4  =  4
+    integer(FP_SIZE), parameter, public :: DEGREE_5  =  5
+
+                                  public :: FITPACK_MESSAGE
+                                  public :: FITPACK_SUCCESS
+    integer(FP_FLAG), parameter,  public :: FITPACK_OK                   = 0  ! ok for spline, abs(fp-s)/s <= tol=0.001
+    integer(FP_FLAG), parameter,  public :: FITPACK_INTERPOLATING_OK     = -1 ! ok for interpolating spline, fp=0
+    integer(FP_FLAG), parameter,  public :: FITPACK_LEASTSQUARES_OK      = -2 ! ok for weighted least-squares polynomial of degree k.
+    integer(FP_FLAG), parameter,  public :: FITPACK_INSUFFICIENT_STORAGE = 1
+    integer(FP_FLAG), parameter,  public :: FITPACK_S_TOO_SMALL          = 2
+    integer(FP_FLAG), parameter,  public :: FITPACK_MAXIT                = 3
+    integer(FP_FLAG), parameter,  public :: FITPACK_TOO_MANY_KNOTS       = 4
+    integer(FP_FLAG), parameter,  public :: FITPACK_OVERLAPPING_KNOTS    = 5
+    integer(FP_FLAG), parameter,  public :: FITPACK_INVALID_RANGE        = 6
+    integer(FP_FLAG), parameter,  public :: FITPACK_INPUT_ERROR          = 10
+    integer(FP_FLAG), parameter,  public :: FITPACK_TEST_ERROR           = 11
+    integer(FP_FLAG), parameter,  public :: FITPACK_INVALID_CONSTRAINT   = 12
+    integer(FP_FLAG), parameter,  public :: FITPACK_INSUFFICIENT_KNOTS   = 13
+    integer(FP_FLAG), parameter,  public :: CONCON_MAXBIN                = 14 ! concon: maxbin too small
+    integer(FP_FLAG), parameter,  public :: CONCON_MAXTR                 = 15 ! concon: maxtr too small
+    integer(FP_FLAG), parameter,  public :: CONCON_QP_FAIL               = 16 ! concon: QP solver failed
+
+    ! Internal Parameters
+    logical(FP_BOOL), parameter, public :: FP_TRUE  = .true._FP_BOOL
+    logical(FP_BOOL), parameter, public :: FP_FALSE = .false._FP_BOOL
+
+    integer(FP_SIZE), parameter :: IZERO  = 0_FP_SIZE
+    integer(FP_SIZE), parameter :: IONE   = 1_FP_SIZE
+    integer(FP_SIZE), parameter :: ITWO   = 2_FP_SIZE
+    integer(FP_SIZE), parameter :: ITHREE = 3_FP_SIZE
+    integer(FP_SIZE), parameter :: IFOUR  = 4_FP_SIZE
+    integer(FP_SIZE), parameter :: IFIVE  = 5_FP_SIZE
+
+    real(FP_REAL), parameter, public :: one     = 1.0_FP_REAL
+    real(FP_REAL), parameter, public :: zero    = 0.0_FP_REAL
+    real(FP_REAL), parameter, public :: half    = 0.5_FP_REAL
+    real(FP_REAL), parameter, public :: onep5   = 1.5_FP_REAL
+    real(FP_REAL), parameter, public :: third   = one/3.0_FP_REAL
+    real(FP_REAL), parameter, public :: fourth  = 0.25_FP_REAL
+    real(FP_REAL), parameter, public :: two     = 2.0_FP_REAL
+    real(FP_REAL), parameter, public :: three   = 3.0_FP_REAL
+    real(FP_REAL), parameter, public :: four    = 4.0_FP_REAL
+    real(FP_REAL), parameter, public :: five    = 5.0_FP_REAL
+    real(FP_REAL), parameter, public :: six     = 6.0_FP_REAL
+    real(FP_REAL), parameter, public :: ten     = 10.0_FP_REAL
+    real(FP_REAL), parameter, public :: pi      = atan2(zero,-one)
+    real(FP_REAL), parameter, public :: pi2     = 2*pi
+    real(FP_REAL), parameter, public :: pi4     = 4*pi
+    real(FP_REAL), parameter, public :: pio2    = half*pi
+    real(FP_REAL), parameter, public :: pio4    = fourth*pi
+    real(FP_REAL), parameter, public :: pio8    = 0.125_FP_REAL*pi
+    real(FP_REAL), parameter, public :: deg2rad = pi/180.0_FP_REAL
+    real(FP_REAL), parameter, public :: smallnum03 = 1.0e-03_FP_REAL
+    real(FP_REAL), parameter, public :: smallnum06 = 1.0e-06_FP_REAL
+    real(FP_REAL), parameter, public :: smallnum08 = 1.0e-08_FP_REAL
+    real(FP_REAL), parameter, public :: smallnum10 = 1.0e-10_FP_REAL
+
+    abstract interface
+       ! Function defining the boundary of the curve approximation domain
+       pure real(FP_REAL) function fitpack_polar_boundary(theta)
+          import FP_REAL
+          real(FP_REAL), intent(in) :: theta
+       end function fitpack_polar_boundary
+    end interface
+
+    interface fitpack_swap
+        module procedure swap_data
+        module procedure swap_size
+    end interface fitpack_swap
+
+    !> Communication size for allocatable 1D arrays
+    interface FP_COMM_SIZE
+        module procedure FP_REAL_COMM_SIZE_1D
+        module procedure FP_REAL_COMM_SIZE_2D
+        module procedure FP_REAL_COMM_SIZE_3D
+        module procedure FP_SIZE_COMM_SIZE_1D
+        module procedure FP_BOOL_COMM_SIZE_1D
+    end interface FP_COMM_SIZE
+
+    !> Pack allocatable arrays into communication buffer
+    interface FP_COMM_PACK
+        module procedure FP_REAL_COMM_PACK_1D
+        module procedure FP_REAL_COMM_PACK_2D
+        module procedure FP_REAL_COMM_PACK_3D
+        module procedure FP_SIZE_COMM_PACK_1D
+        module procedure FP_BOOL_COMM_PACK_1D
+    end interface FP_COMM_PACK
+
+    !> Expand communication buffer into allocatable arrays
+    interface FP_COMM_EXPAND
+        module procedure FP_REAL_COMM_EXPAND_1D
+        module procedure FP_REAL_COMM_EXPAND_2D
+        module procedure FP_REAL_COMM_EXPAND_3D
+        module procedure FP_SIZE_COMM_EXPAND_1D
+        module procedure FP_BOOL_COMM_EXPAND_1D
+    end interface FP_COMM_EXPAND
+
+    contains
+
+      !> @brief Row-major strides for a flat tensor of the given per-axis sizes.
+      !!
+      !! Returns the multipliers `str(d)` such that a 1-based multi-index `idx(1:d)` maps to the
+      !! flat 0-based offset `sum((idx-1)*str)`. The first axis varies slowest (leading stride =
+      !! product of the trailing sizes), matching the storage of the gridded data tensor `z`
+      !! (sizes `[mx,my]` -> strides `[my,1]`) and the coefficient tensor `c`
+      !! (sizes `[nk1x,nk1y]` -> strides `[nk1y,1]`) used by the 2-D gridded core. Each tensor
+      !! must be passed its own size vector; the two differ only in the leading stride.
+      !!
+      !! @param[in] d      Number of axes.
+      !! @param[in] sizes  Per-axis extents, sizes(d).
+      !! @return    str    Row-major strides; `str(d) = 1`.
+      pure function fp_grid_strides(d,sizes) result(str)
+          integer(FP_DIM),  intent(in) :: d
+          integer(FP_SIZE), intent(in) :: sizes(d)
+          integer(FP_SIZE) :: str(d)
+          integer(FP_DIM)  :: i
+          if (d<=0) return
+          str(d) = 1_FP_SIZE
+          do i=d-1,1,-1
+             str(i) = str(i+1)*sizes(i+1)
+          end do
+      end function fp_grid_strides
+
+      !> @brief Flat 0-based offset of a multi-index into a row-major tensor.
+      !!
+      !! Given a 1-based multi-index `idx(1:d)` and the strides from fp_grid_strides, returns the
+      !! 0-based linear offset `sum((idx-1)*strides)`. Add 1 for Fortran 1-based access, e.g.
+      !! `c(fp_grid_index(idx,str)+1)`. Integer arithmetic is exact, so routing tensor addresses
+      !! through this helper is bit-for-bit identical to the hand-written 2-D index expressions.
+      !!
+      !! @param[in] d        Number of axes (length of idx and strides).
+      !! @param[in] idx      1-based multi-index (length d).
+      !! @param[in] strides  Row-major strides (length d), from fp_grid_strides.
+      !! @return    offset   0-based flat offset.
+      pure function fp_grid_index(d,idx,strides) result(offset)
+          integer(FP_DIM),  intent(in) :: d
+          integer(FP_SIZE), intent(in) :: idx(d),strides(d)
+          integer(FP_SIZE) :: offset
+          offset = sum((idx-1_FP_SIZE)*strides)
+      end function fp_grid_index
+
+      !> @brief Multi-index of a flat 0-based offset into a row-major tensor (inverse of fp_grid_index).
+      !!
+      !! Given a 0-based linear offset and the per-axis extents `sizes(1:d)`, returns the 1-based
+      !! multi-index `idx(1:d)` such that `fp_grid_index(d, idx, fp_grid_strides(d, sizes)) == offset`.
+      !! Row-major: the last axis varies fastest (stride 1), the first axis slowest. Used to drive a
+      !! dimension-generic loop over a tensor's grid points with a single linear counter. Integer
+      !! arithmetic is exact, so it is bit-for-bit consistent with the hand-written 2-D index walks.
+      !!
+      !! @param[in] d       Number of axes (length of sizes and idx).
+      !! @param[in] offset  0-based flat offset (0 <= offset < product(sizes)).
+      !! @param[in] sizes   Per-axis extents, sizes(d).
+      !! @return    idx     1-based multi-index, idx(d).
+      pure function fp_grid_unravel(d,offset,sizes) result(idx)
+          integer(FP_DIM),  intent(in) :: d
+          integer(FP_SIZE), intent(in) :: offset,sizes(d)
+          integer(FP_SIZE) :: idx(d)
+          integer(FP_DIM)  :: i
+          integer(FP_SIZE) :: rem
+          rem = offset
+          do i=d,1,-1
+             idx(i) = mod(rem,sizes(i)) + 1_FP_SIZE
+             rem    = rem/sizes(i)
+          end do
+      end function fp_grid_unravel
+
+      !> @brief Dispatch an error code: return it to caller or halt with a message.
+      !!
+      !! If `ierr_out` is present, the error code is returned through it. Otherwise, if `ierr`
+      !! indicates failure, the program halts with a diagnostic message.
+      !!
+      !! @param[in]  ierr      Error flag from a FITPACK routine.
+      !! @param[out] ierr_out  Optional output flag; if present, receives `ierr` instead of halting.
+      !! @param[in]  whereAt   Location string for the diagnostic message.
+      subroutine fitpack_error_handling(ierr,ierr_out,whereAt)
+          integer(FP_FLAG), intent(in) :: ierr
+          integer(FP_FLAG), optional, intent(out) :: ierr_out
+          character(*), intent(in) :: whereAt
+
+          if (present(ierr_out)) then
+              ierr_out = ierr
+          elseif (.not.FITPACK_SUCCESS(ierr)) then
+              print *, '[fitpack] at '//trim(whereAt)//' failed with error '//FITPACK_MESSAGE(ierr)
+              stop ierr
+          end if
+      end subroutine fitpack_error_handling
+
+      !> @brief Convert an integer error flag to a human-readable message string.
+      !!
+      !! @param[in]  ierr  FITPACK error flag (e.g., `FITPACK_OK`, `FITPACK_INPUT_ERROR`).
+      !! @return     Allocatable character string describing the error.
+      pure function FITPACK_MESSAGE(ierr) result(msg)
+         integer(FP_FLAG), intent(in) :: ierr
+         character(len=:), allocatable :: msg
+
+         select case (ierr)
+            case (FITPACK_OK); msg = 'Success!'
+            case (FITPACK_INTERPOLATING_OK); msg = 'Success! (interpolation)'
+            case (FITPACK_LEASTSQUARES_OK); msg = 'Success! (least-squares)'
+            case (FITPACK_INSUFFICIENT_STORAGE); msg = 'Insufficient Storage'
+            case (FITPACK_S_TOO_SMALL); msg = 'Smoothing parameter is too small'
+            case (FITPACK_MAXIT); msg = 'Iteration limit reached before f(p)=s'
+            case (FITPACK_TOO_MANY_KNOTS); msg = 'More knots than data points'
+            case (FITPACK_OVERLAPPING_KNOTS); msg = 'Overlapping knots found'
+            case (FITPACK_INVALID_RANGE); msg = 'Invalid variable range'
+            case (FITPACK_INPUT_ERROR); msg = 'Invalid input'
+            case (FITPACK_TEST_ERROR); msg = 'Test(s) failed'
+            case (FITPACK_INVALID_CONSTRAINT); msg = 'Invalid constraint(s) provided'
+            case (FITPACK_INSUFFICIENT_KNOTS); msg = 'Not enough knots (n>=10)'
+            case (CONCON_MAXBIN); msg = 'concon: maxbin too small'
+            case (CONCON_MAXTR);  msg = 'concon: maxtr too small'
+            case (CONCON_QP_FAIL); msg = 'concon: QP solver failed'
+            case default; msg = 'UNKNOWN ERROR'
+         end select
+
+      end function FITPACK_MESSAGE
+
+      !> @brief Choose the smoothing parameter(s) for an iterative fit.
+      !!
+      !! Selects one or more values of the smoothing factor \f$ s \f$ for the next fitting
+      !! iteration(s). If a user-supplied value is present it is used directly; if a previous
+      !! value exists it is re-used; otherwise a default decreasing trajectory is applied.
+      !!
+      !! @param[in]     old_smoothing   Previous smoothing factor.
+      !! @param[in]     user_smoothing  Optional user-supplied value.
+      !! @param[out]    nit             Number of smoothing iterations to perform.
+      !! @param[out]    smooth_now      Array of 3 smoothing values for the iterations.
+      subroutine get_smoothing(old_smoothing,user_smoothing,nit,smooth_now)
+          integer(FP_SIZE), intent(out)   :: nit
+          real(FP_REAL), intent(in), optional :: user_smoothing
+          real(FP_REAL), intent(in)    :: old_smoothing
+          real(FP_REAL), intent(out)   :: smooth_now(3)
+
+          real(FP_REAL), parameter :: smoothing_trajectory(3) = [1000.d0,60.d0,30.d0]
+
+          if (present(user_smoothing)) then
+              nit        = 1
+              smooth_now = user_smoothing
+          elseif (old_smoothing<1000.0_FP_REAL) then
+              nit        = 1
+              smooth_now = old_smoothing
+          else
+              nit        = 3
+              smooth_now = smoothing_trajectory
+          end if
+
+      end subroutine get_smoothing
+
+      !> @brief Convert an `iopt` computation-mode flag to a human-readable string.
+      !!
+      !! @param[in]  iopt  Computation mode flag (`-1` = Least-Squares, `0` = Smoothing, `1` = Old).
+      !! @return     Allocatable character string describing the mode.
+      pure function IOPT_MESSAGE(iopt) result(msg)
+         integer(FP_FLAG), intent(in) :: iopt
+         character(len=:), allocatable :: msg
+         select case (iopt)
+            case (IOPT_NEW_LEASTSQUARES); msg = 'Least-Squares'
+            case (IOPT_NEW_SMOOTHING);    msg = 'Smoothing'
+            case (IOPT_OLD_FIT);          msg = 'Old'
+            case default; msg = 'UNKNOWN IOPT'
+         end select
+      end function IOPT_MESSAGE
+
+      !> @brief Test whether a FITPACK error flag indicates success.
+      !!
+      !! Returns `.true.` if `ierr <= 0` (i.e., `FITPACK_OK` or any negative success variant).
+      !!
+      !! @param[in]  ierr  Error flag from a FITPACK routine.
+      !! @return     `.true.` on success, `.false.` on error.
+      elemental logical(FP_BOOL) function FITPACK_SUCCESS(ierr)
+         integer(FP_FLAG), intent(in) :: ierr
+         FITPACK_SUCCESS = ierr<=FITPACK_OK
+      end function FITPACK_SUCCESS
+
+
+      !> @brief Evaluate a bivariate spline on a rectangular grid.
+      !!
+      !! Given a bivariate spline \f$ s(x,y) \f$ of degrees \f$ k_x \f$ and \f$ k_y \f$ in
+      !! tensor-product B-spline representation, evaluates \f$ s(x_i, y_j) \f$ on the
+      !! grid \f$ i = 1,\ldots,m_x;\; j = 1,\ldots,m_y \f$.
+      !!
+      !! @param[in]     tx    Knot positions in \f$ x \f$-direction (length \f$ n_x \f$).
+      !! @param[in]     nx    Total number of knots in \f$ x \f$.
+      !! @param[in]     ty    Knot positions in \f$ y \f$-direction (length \f$ n_y \f$).
+      !! @param[in]     ny    Total number of knots in \f$ y \f$.
+      !! @param[in]     c     B-spline coefficients, length \f$ (n_x{-}k_x{-}1)(n_y{-}k_y{-}1) \f$.
+      !! @param[in]     kx    Degree in \f$ x \f$.
+      !! @param[in]     ky    Degree in \f$ y \f$.
+      !! @param[in]     x     \f$ x \f$-grid coordinates (length \f$ m_x \f$), non-decreasing.
+      !! @param[in]     mx    Number of grid points in \f$ x \f$, \f$ m_x \ge 1 \f$.
+      !! @param[in]     y     \f$ y \f$-grid coordinates (length \f$ m_y \f$), non-decreasing.
+      !! @param[in]     my    Number of grid points in \f$ y \f$, \f$ m_y \ge 1 \f$.
+      !! @param[out]    z     Spline values: `z(my*(i-1)+j)` = \f$ s(x_i, y_j) \f$ (length \f$ m_x m_y \f$).
+      !! @param[in,out] wrk   Real workspace, length \f$ \ge m_x(k_x+1) + m_y(k_y+1) \f$.
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace, length \f$ \ge m_x + m_y \f$.
+      !! @param[in]     kwrk  Declared dimension of `iwrk`.
+      !! @param[out]    ier   Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @see ndspeu — scattered-point variant; fpndsp — tensor-product evaluation kernel
+      pure subroutine bispev(tx,nx,ty,ny,c,kx,ky,x,mx,y,my,z,wrk,lwrk,iwrk,kwrk,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: nx,ny,kx,ky,mx,my,lwrk,kwrk
+      integer(FP_FLAG), intent(out) :: ier
+      !  ..array arguments..
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      real(FP_REAL), intent(in)    :: tx(nx),ty(ny),c((nx-kx-1)*(ny-ky-1)),x(mx),y(my)
+      real(FP_REAL), intent(out)   :: z(mx*my)
+      real(FP_REAL), intent(inout) :: wrk(lwrk)
+      !  ..local scalars..
+      integer(FP_SIZE) :: lwest
+      !  ..N-D column-layout marshalling scratch (fpndsp fills its basis tables into w2/lidx2)..
+      real(FP_REAL)    :: t2(max(nx,ny),2),xg2(max(mx,my),2),w2(max(kx,ky)+1,max(mx,my),2)
+      integer(FP_SIZE) :: lidx2(max(mx,my),2)
+      !  ..
+      !  before starting computations a data check is made. if the input data
+      !  are invalid control is immediately repassed to the calling program.
+      !  (wrk/iwrk retained for ABI; the marshalling scratch below is local, fpndsp self-manages.)
+      ier   = FITPACK_INPUT_ERROR
+      lwest = (kx+1)*mx+(ky+1)*my
+
+      if (lwrk<lwest .or. kwrk<(mx+my) .or. mx<1 .or. my<1) return
+      if (mx>1 .and. any(x(2:mx)<x(1:mx-1))) return
+      if (my>1 .and. any(y(2:my)<y(1:my-1))) return
+
+      ! Evaluate spline: marshal the split 2-D arguments (tx/ty, x/y, kx/ky) into the N-D
+      ! column layout and defer the basis build + tensor contraction to fpndsp, the single
+      ! evaluation kernel (bit-for-bit identical to the classic 2-D contraction, locked by gate A).
+      ier = FITPACK_OK
+      t2(1:nx,1)  = tx;   t2(1:ny,2)  = ty
+      xg2(1:mx,1) = x;    xg2(1:my,2) = y
+      call fpndsp(2_FP_DIM,t2,[nx,ny],c,[kx,ky],xg2,[mx,my],z,w2,lidx2)
+
+      end subroutine bispev
+
+
+      !  given the ordered set of m points x(i) in the idim-dimensional space with x(1)=x(m), and given
+      !  also a corresponding set of strictly increasing values u(i) and the set of positive numbers
+      !  w(i),i=1,2,...,m subroutine clocur determines a smooth approximating closed spline
+      !  curve s(u), i.e.
+      !      x1 = s1(u)
+      !      x2 = s2(u)       u(1) <= u <= u(m)
+      !      .........
+      !      xidim = sidim(u)
+      !  with sj(u),j=1,2,...,idim periodic spline functions of degree k with common knots
+      !  t(j),j=1,2,...,n.
+      !  if ipar=1 the values u(i),i=1,2,...,m must be supplied by the user.
+      !  if ipar=0 these values are chosen automatically by clocur as
+      !      v(1) = 0
+      !      v(i) = v(i-1) + dist(x(i),x(i-1)) ,i=2,3,...,m
+      !      u(i) = v(i)/v(m) ,i=1,2,...,m
+      !  if iopt=-1 clocur calculates the weighted least-squares closed spline curve according to a
+      !     given set of knots.
+      !  if iopt>=0 the number of knots of the splines sj(u) and the position t(j),j=1,2,...,n is chosen
+      !     automatically by the routine. the smoothness of s(u) is then achieved by minimalizing the
+      !     discontinuity jumps of the k-th derivative of s(u) at the knots t(j),j=k+2,k+3,...,n-k-1.
+      !     the amount of smoothness is determined by the condition that
+      !     f(p)=sum((w(i)*dist(x(i),s(u(i))))**2) be <= s, with s a given nonnegative constant, called
+      !     the smoothing factor.
+      !  the fit s(u) is given in the b-spline representation and can be evaluated by means of
+      !  subroutine curev.
+
+      !> @brief Determine a smooth closed parametric spline curve approximation.
+      !!
+      !! Given \f$ m \f$ data points \f$ \mathbf{x}_i \in \mathbb{R}^{\text{idim}} \f$ with
+      !! \f$ \mathbf{x}_1 = \mathbf{x}_m \f$ (closure condition) and weights \f$ w_i > 0 \f$,
+      !! computes an `idim`-dimensional periodic spline curve
+      !! \f$ \mathbf{s}(u) = (s_1(u),\ldots,s_{\text{idim}}(u)) \f$ of degree \f$ k \f$.
+      !!
+      !! Parameter values \f$ u_i \f$ can be supplied by the user (`ipar=1`) or computed
+      !! automatically from cumulative chord lengths (`ipar=0`).
+      !!
+      !! @param[in]     iopt  Computation mode: `-1` (LSQ), `0` (new smoothing), `1` (continue).
+      !! @param[in]     ipar  Parameter mode: `0` = automatic (chord-length), `1` = user-supplied.
+      !! @param[in]     idim  Dimension of the curve, \f$ 1 \le \text{idim} \le 10 \f$.
+      !! @param[in]     m     Number of data points, \f$ m > 1 \f$.
+      !! @param[in,out] u     Parameter values (length \f$ m \f$). Output when `ipar=0`.
+      !! @param[in]     mx    Declared dimension of `x`, \f$ \text{mx} \ge \text{idim} \times m \f$.
+      !! @param[in]     x     Data coordinates: `x(idim*(i-1)+j)` is the \f$ j \f$-th coordinate
+      !!   of point \f$ i \f$. First and last points must coincide.
+      !! @param[in]     w     Weights (length \f$ m \f$). \f$ w_m \f$ not used.
+      !! @param[in]     k     Spline degree, \f$ 1 \le k \le 5 \f$. Cubic recommended.
+      !! @param[in]     s     Smoothing factor \f$ S \ge 0 \f$.
+      !! @param[in]     nest  Over-estimate of total knots. `nest=m+2*k` always suffices.
+      !! @param[in,out] n     Total number of knots.
+      !! @param[in,out] t     Knot positions (length `nest`).
+      !! @param[in]     nc    Declared dimension of `c`, \f$ \text{nc} \ge \text{nest} \times \text{idim} \f$.
+      !! @param[in,out] c     B-spline coefficients (length `nc`).
+      !! @param[in,out] fp    Weighted sum of squared residuals.
+      !! @param[in,out] wrk   Real workspace, length \f$ \ge m(k+1) + \text{nest}(7+\text{idim}+5k) \f$.
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace (length `nest`).
+      !! @param[in,out] ier   Error flag (same codes as curfit).
+      !!
+      !! @see Dierckx, Ch. 6, §6.1--6.2; fpclos — core closed-curve fitting algorithm
+      pure subroutine clocur(iopt,ipar,idim,m,u,mx,x,w,k,s,nest,n,t,nc,c,fp,wrk,lwrk,iwrk,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)    :: s
+      real(FP_REAL),    intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,ipar,idim,m,mx,k,nest,nc,lwrk
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(inout) :: ier
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)    :: x(mx),w(m)
+      real(FP_REAL),    intent(inout) :: u(m),t(nest),c(nc),wrk(lwrk)
+      integer(FP_SIZE), intent(inout) :: iwrk(nest)
+
+      !  ..local scalars..
+      real(FP_REAL) :: per,dist
+      integer(FP_SIZE) :: i,ia1,ia2,ib,ifp,ig1,ig2,iq,iz,i1,i2,j1,j2,k1,k2,lwest,m1,nmin,ncc
+
+      !  we set up the parameters tol and maxit
+      integer(FP_SIZE), parameter :: maxit = 20
+      real(FP_REAL), parameter :: tol = smallnum03
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier   = FITPACK_INPUT_ERROR
+      k1    = k+1
+      k2    = k1+1
+      m1    = m-1
+      nmin  = 2*k1
+      ncc   = nest*idim
+      lwest = m*k1+nest*(7+idim+5*k)
+
+      if (iopt<(-1) .or. iopt>1)      return
+      if (ipar<0 .or. ipar>1)         return
+      if (idim<=0 .or. idim>MAX_IDIM) return
+      if (k<=0 .or. k>5)              return
+      if (m<2 .or. nest<nmin)         return
+      if (mx<m*idim .or. nc<ncc)      return
+      if (lwrk<lwest)                 return
+
+      ! Check closed curve (1st and last points match)
+      if (any(not_equal(x(1:idim),x((m-1)*idim+1:m*idim)))) return
+
+      ! Normalized cumulative length parameter coordinate along the curve
+      if (ipar==0 .and. iopt<=0) then
+
+          i1   = 0
+          i2   = idim
+
+          u(1) = zero
+          do i=2,m
+             dist = zero
+             do j1=1,idim
+                i1 = i1+1
+                i2 = i2+1
+                dist = dist+(x(i2)-x(i1))**2
+             end do
+             u(i) = u(i-1)+sqrt(dist)
+          end do
+          if (u(m)<=zero) return
+
+          u(2:m) = u(2:m)/u(m)
+          u(m)   = one
+      endif
+
+      if (w(1)<=zero) return
+      if (any(u(1:m1)>=u(2:m) .or. w(1:m1)<=zero)) return
+
+      if (iopt>=0) then
+
+         if (s<zero) return
+         if (equal(s,zero) .and. nest<(m+2*k)) return
+
+      else
+
+         if (n<=nmin .or. n>nest) return
+
+         per = u(m)-u(1)
+         j1 = k1
+         t(j1) = u(1)
+         i1 = n-k
+         t(i1) = u(m)
+         j2 = j1
+         i2 = i1
+         do i=1,k
+            i1 = i1+1
+            i2 = i2-1
+            j1 = j1+1
+            j2 = j2-1
+            t(j2) = t(i2)-per
+            t(i1) = t(j1)+per
+         end do
+
+         ier = fpchep(u,m,t,n,k)
+         if (ier/=FITPACK_OK) return
+
+      end if
+
+      ier = FITPACK_OK
+
+      ! we partition the working space and determine the spline approximation.
+      ifp = 1
+      iz  = ifp+nest
+      ia1 = iz+ncc
+      ia2 = ia1+nest*k1
+      ib  = ia2+nest*k
+      ig1 = ib+nest*k2
+      ig2 = ig1+nest*k2
+      iq  = ig2+nest*k1
+      call fpclos(iopt,idim,m,u,mx,x,w,k,s,nest,tol,maxit,k1,k2,n,t,ncc,c,fp, &
+                  wrk(ifp),wrk(iz),wrk(ia1),wrk(ia2),wrk(ib),wrk(ig1),wrk(ig2),wrk(iq),iwrk,ier)
+      return
+      end subroutine clocur
+
+
+      !  given the set of data points (x(i),y(i)) and the set of positive numbers w(i),i=1,2,...,m,
+      !  subroutine cocosp determines the weighted least-squares cubic spline s(x) with given knots
+      !  t(j),j=1,2,...,n which satisfies the following concavity/convexity conditions
+      !      s''(t(j+3))*e(j) <= 0, j=1,2,...n-6
+      !  the fit is given in the b-spline representation( b-spline coefficients c(j),j=1,2,...n-4) and
+      !  can be evaluated by means of subroutine splev.
+      !
+      !> @brief Fit a cubic spline with convexity/concavity constraints and user-specified knots.
+      !!
+      !! Given data points \f$ (x_i, y_i) \f$ with weights \f$ w_i > 0 \f$ and a fixed set of
+      !! knots \f$ t_j \f$, computes the weighted least-squares cubic spline \f$ s(x) \f$ subject
+      !! to local convexity/concavity constraints specified by the array `e`:
+      !! - \f$ e_j = +1 \f$: \f$ s''(t_{j+3}) \ge 0 \f$ (locally concave)
+      !! - \f$ e_j = -1 \f$: \f$ s''(t_{j+3}) \le 0 \f$ (locally convex)
+      !! - \f$ e_j = 0 \f$: no constraint at \f$ t_{j+3} \f$
+      !!
+      !! The constrained fitting uses a quadratic programming approach with a binary
+      !! tree structure for managing active constraints.
+      !!
+      !! @param[in]     m      Number of data points, \f$ m > 3 \f$.
+      !! @param[in]     x      Abscissae (strictly ascending).
+      !! @param[in]     y      Ordinates.
+      !! @param[in]     w      Weights, \f$ w_i > 0 \f$.
+      !! @param[in]     n      Total number of knots, \f$ 8 \le n \le m + 4 \f$.
+      !! @param[in]     t      Knot positions (length \f$ n \f$), user-specified.
+      !! @param[in,out] e      Convexity indicators (length \f$ n \f$). Only `e(1:n-6)` used.
+      !! @param[in]     maxtr  Over-estimate of tree records. `maxtr=100` usually sufficient.
+      !! @param[in]     maxbin Over-estimate of inflection knots. `maxbin=10` usually sufficient.
+      !! @param[out]    c      B-spline coefficients (length \f$ n \f$).
+      !! @param[out]    sq     Weighted sum of squared residuals.
+      !! @param[out]    sx     Spline values at data points (length \f$ m \f$).
+      !! @param[out]    bind   Active constraint flags (length \f$ n \f$): `.true.` where \f$ s''=0 \f$.
+      !! @param[in,out] wrk    Real workspace, length \f$ \ge 4m + 7n + \text{maxbin}(\text{maxbin}+n+1) \f$.
+      !! @param[in]     lwrk   Declared dimension of `wrk`.
+      !! @param[in,out] iwrk   Integer workspace, length \f$ \ge 4 \times \text{maxtr} + 2(\text{maxbin}+1) \f$.
+      !! @param[in]     kwrk   Declared dimension of `iwrk`.
+      !! @param[out]    ier    Error flag: `0` = success; `1` = maxbin exceeded; `2` = maxtr exceeded;
+      !!   `3` = QP solver failed; `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 7, §7.1--7.2; fpcosp — core convexity-constrained algorithm
+      pure subroutine cocosp(m,x,y,w,n,t,e,maxtr,maxbin,c,sq,sx,bind,wrk,lwrk,iwrk,kwrk,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(out)   :: sq
+      integer(FP_SIZE), intent(in)    :: m,n,maxtr,maxbin,lwrk,kwrk
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)    :: x(m),y(m),w(m),t(n)
+      real(FP_REAL),    intent(inout) :: e(n)
+      real(FP_REAL),    intent(out)   :: c(n),sx(m)
+      real(FP_REAL),    intent(inout) :: wrk(lwrk)
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      logical(FP_BOOL), intent(out)   :: bind(n)
+
+      !  ..local scalars..
+      integer(FP_SIZE) :: ia,ib,ic,iq,iu,iz,izz,ji,jib,jjb,jl,jr,ju,kwest,lwest,mb,nm,n6
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+
+      lwest = 7*n+m*4+maxbin*(1+n+maxbin)
+      kwest = 4*maxtr+2*(maxbin+1)
+      n6    = n-6
+
+      if (m<4 .or. n<8)               return
+      if (maxtr<1 .or. maxbin<1)      return
+      if (lwrk<lwest .or. kwrk<kwest) return
+      if (any(w<=zero))               return
+      if (any(x(1:m-1)>=x(2:m)))      return
+
+      ier = fpchec(x,m,t,n,DEGREE_3); if (ier/=FITPACK_OK) return
+
+      !  set numbers e(i)
+      where (not_equal(e,zero)) e = sign(one,e)
+
+      !  we partition the working space and determine the spline approximation
+      nm  = n+maxbin
+      mb  = maxbin+1
+      ia  = 1
+      ib  = ia+4*n
+      ic  = ib+nm*maxbin
+      iz  = ic+n
+      izz = iz+n
+      iu  = izz+n
+      iq  = iu+maxbin
+      ji  = 1
+      ju  = ji+maxtr
+      jl  = ju+maxtr
+      jr  = jl+maxtr
+      jjb = jr+maxtr
+      jib = jjb+mb
+
+      call fpcosp(m,x,y,w,n,t,e,maxtr,maxbin,c,sq,sx,bind,nm,mb,wrk(ia),    &
+                  wrk(ib),wrk(ic),wrk(iz),wrk(izz),wrk(iu),wrk(iq),iwrk(ji), &
+                  iwrk(ju),iwrk(jl),iwrk(jr),iwrk(jjb),iwrk(jib),ier)
+
+      return
+      end subroutine cocosp
+
+
+      !  given the set of data points (x(i),y(i)) and the set of positive numbers w(i), i=1,2,...,m,
+      !  subroutine concon determines a cubic spline approximation s(x) which satisfies the following
+      !  local convexity constraints  s''(x(i))*v(i) <= 0, i=1,2,...,m.  the number of knots n and the
+      !  position t(j),j=1,2,...n is chosen automatically by the routine in a way that
+      !  sq = sum((w(i)*(y(i)-s(x(i))))**2) be <= s.
+      !  the fit is given in the b-spline representation (b-spline coefficients c(j),j=1,2,...n-4) and
+      !  can be evaluated by means of subroutine splev.
+      !> @brief Fit a cubic spline with convexity/concavity constraints and automatic knot placement.
+      !!
+      !! Given data points \f$ (x_i, y_i) \f$ with weights \f$ w_i > 0 \f$ and local
+      !! convexity/concavity requirements \f$ v_i \in \{-1, 0, +1\} \f$ at the data points,
+      !! determines a cubic spline \f$ s(x) \f$ satisfying the constraints with
+      !! weighted residual sum \f$ \text{sq} \le S \f$.
+      !!
+      !! Unlike cocosp (which takes fixed knots), concon automatically selects the number
+      !! and position of knots, starting from a minimal set and adding knots progressively.
+      !!
+      !! @param[in]     iopt   Computation mode: `0` = start with minimal knots; `1` = continue.
+      !! @param[in]     m      Number of data points, \f$ m > 3 \f$.
+      !! @param[in]     x      Abscissae (strictly ascending).
+      !! @param[in]     y      Ordinates.
+      !! @param[in]     w      Weights, \f$ w_i > 0 \f$.
+      !! @param[in,out] v      Convexity indicators at data points: `+1` (concave), `-1` (convex), `0` (free).
+      !! @param[in]     s      Smoothing factor \f$ S \ge 0 \f$ (target upper bound for sq).
+      !! @param[in]     nest   Over-estimate of total knots, \f$ \ge 8 \f$. `nest=m+4` always suffices.
+      !! @param[in]     maxtr  Over-estimate of tree records. `maxtr=100` usually sufficient.
+      !! @param[in]     maxbin Over-estimate of inflection knots. `maxbin=10` usually sufficient.
+      !! @param[in,out] n      Total number of knots.
+      !! @param[in,out] t      Knot positions (length `nest`).
+      !! @param[in,out] c      B-spline coefficients (length `nest`).
+      !! @param[out]    sq     Weighted sum of squared residuals.
+      !! @param[in,out] sx     Spline values at data points (length \f$ m \f$).
+      !! @param[in,out] bind   Active constraint flags (length `nest`).
+      !! @param[in,out] wrk    Real workspace, length \f$ \ge 4m + 8\,\text{nest} + \text{maxbin}(\text{maxbin}+\text{nest}+1) \f$.
+      !! @param[in]     lwrk   Declared dimension of `wrk`.
+      !! @param[in,out] iwrk   Integer workspace, length \f$ \ge 4\,\text{maxtr} + 2(\text{maxbin}+1) \f$.
+      !! @param[in]     kwrk   Declared dimension of `iwrk`.
+      !! @param[out]    ier    Error flag:
+      !!   - `0`: normal return (\f$ \text{sq} \le S \f$ and constraints satisfied).
+      !!   - `-3`: nest too small.
+      !!   - `-2`: max knots \f$ m+4 \f$ reached.
+      !!   - `-1`: adding knots won't help.
+      !!   - `1`--`5`: various errors (maxbin, maxtr, QP, nest, constraint conflicts).
+      !!   - `10`: invalid input.
+      !!
+      !! @see Dierckx, Ch. 7, §7.2; fpcoco — convexity-constrained driver; fpcosp — core algorithm
+      pure subroutine concon(iopt,m,x,y,w,v,s,nest,maxtr,maxbin, &
+                             n,t,c,sq,sx,bind,wrk,lwrk,iwrk,kwrk,ier)
+      !
+      !  references:
+      !   dierckx p. : an algorithm for cubic spline fitting with convexity constraints,
+      !                computing 24 (1980) 349-371.
+      !   dierckx p. : an algorithm for least-squares cubic spline fitting with convexity and concavity
+      !                constraints, report tw39, dept. computer science, k.u.leuven, 1978.
+      !   dierckx p. : curve and surface fitting with splines, monographs on
+      !                numerical analysis, oxford university press, 1993.
+      !
+      !  author:
+      !   p. dierckx
+      !   dept. computer science, k.u.leuven
+      !   celestijnenlaan 200a, b-3001 heverlee, belgium.
+      !   e-mail : Paul.Dierckx@cs.kuleuven.ac.be
+      !
+      !  creation date : march 1978
+      !
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)    :: s
+      real(FP_REAL),    intent(out)   :: sq
+      integer(FP_SIZE), intent(in)        :: iopt,m,nest,maxtr,maxbin,lwrk,kwrk
+      integer(FP_SIZE), intent(inout)     :: n
+      integer(FP_FLAG), intent(out)       :: ier
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)    :: x(m),y(m),w(m)
+      real(FP_REAL),    intent(inout) :: v(m),t(nest),c(nest),sx(m),wrk(lwrk)
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      logical(FP_BOOL), intent(inout) :: bind(nest)
+      !  ..local scalars..
+      integer(FP_SIZE) :: lwest,kwest,ie,iw,lww
+
+      !  before starting computations a data check is made. if the input data are invalid, control is
+      !  immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+
+      lwest = 8*nest+m*4+maxbin*(1+nest+maxbin)
+      kwest = 4*maxtr+2*(maxbin+1)
+
+      if (iopt<0 .or. iopt>1)         return
+      if (m<4 .or. nest<8)            return
+      if (s<zero)                     return
+      if (maxtr<1 .or. maxbin<1)      return
+      if (lwrk<lwest .or. kwrk<kwest) return
+
+      if (iopt==0) then
+
+          ! Zero weights
+          if (any(w<=zero))           return
+
+          ! Non-monotonic x
+          if (any(x(2:m)<=x(1:m-1))) return
+
+          where (not_equal(v,zero)) v = sign(one,v)
+
+      endif
+
+      ier = FITPACK_OK
+
+      !  we partition the working space and determine the spline approximation
+      ie  = 1
+      iw  = ie+nest
+      lww = lwrk-nest
+
+      call fpcoco(iopt,m,x,y,w,v,s,nest,maxtr,maxbin,n,t,c,sq,sx, &
+                  bind,wrk(ie),wrk(iw),lww,iwrk,kwrk,ier)
+      return
+
+      end subroutine concon
+
+
+
+      !  given the ordered set of m points x(i) in the idim-dimensional space and given also a
+      !  corresponding set of strictly increasing values u(i) and the set of positive numbers
+      !  w(i),i=1,2,...,m, subroutine concur determines a smooth approximating spline curve s(u), i.e.
+      !      x1 = s1(u)
+      !      x2 = s2(u)      ub = u(1) <= u <= u(m) = ue
+      !      .........
+      !      xidim = sidim(u)
+      !  with sj(u),j=1,2,...,idim spline functions of odd degree k with common knots
+      !  t(j),j=1,2,...,n.
+      !  in addition these splines will satisfy the following boundary constraints
+      !                     (l)
+      !      if ib > 0 :  sj   (u(1)) = db(idim*l+j) ,l=0,1,...,ib-1
+      !  and                (l)
+      !      if ie > 0 :  sj   (u(m)) = de(idim*l+j) ,l=0,1,...,ie-1.
+      !  if iopt=-1 concur calculates the weighted least-squares spline curve according to a given set
+      !    of knots.
+      !  if iopt>=0 the number of knots of the splines sj(u) and the position t(j),j=1,2,...,n is
+      !    chosen automatically by the routine. the smoothness of s(u) is then achieved by minimalizing
+      !    the discontinuity jumps of the k-th derivative of s(u) at the knots t(j),j=k+2,k+3,...,
+      !    n-k-1. the amount of smoothness is determined by the condition that
+      !    f(p)=sum((w(i)*dist(x(i),s(u(i))))**2) be <= s, with s a given non-negative constant,
+      !    called the smoothing factor. the fit s(u) is given in the b-spline representation and can
+      !    be evaluated by means of subroutine curev.
+
+      !> @brief Determine a smooth parametric spline curve with derivative constraints at endpoints.
+      !!
+      !! Given \f$ m \f$ ordered points \f$ \mathbf{x}_i \in \mathbb{R}^{\text{idim}} \f$ with
+      !! parameter values \f$ u_i \f$ and weights \f$ w_i > 0 \f$, computes a parametric spline
+      !! curve \f$ \mathbf{s}(u) \f$ of degree \f$ k \f$ that satisfies derivative constraints
+      !! at the endpoints:
+      !! \f[
+      !!   s_j^{(l)}(u_1) = d_b(\text{idim} \cdot l + j), \quad l = 0,\ldots,i_b{-}1
+      !! \f]
+      !! \f[
+      !!   s_j^{(l)}(u_m) = d_e(\text{idim} \cdot l + j), \quad l = 0,\ldots,i_e{-}1
+      !! \f]
+      !!
+      !! @param[in]     iopt  Computation mode: `-1` (LSQ), `0` (new smoothing), `1` (continue).
+      !! @param[in]     idim  Dimension of the curve, \f$ 1 \le \text{idim} \le 10 \f$.
+      !! @param[in]     m     Number of data points.
+      !! @param[in]     u     Parameter values (strictly ascending).
+      !! @param[in]     mx    Declared dimension of `x` and `xx`.
+      !! @param[in]     x     Data coordinates (length `mx`).
+      !! @param[in,out] xx    Workspace (length `mx`). Modified data for constrained fitting.
+      !! @param[in]     w     Weights (length \f$ m \f$), strictly positive.
+      !! @param[in]     ib    Number of derivative constraints at \f$ u_1 \f$, \f$ 0 \le i_b \le (k+1)/2 \f$.
+      !! @param[in]     db    Begin-point derivatives (length `nb`).
+      !! @param[in]     nb    Dimension of `db`, \f$ \ge \max(1, \text{idim} \times i_b) \f$.
+      !! @param[in]     ie    Number of derivative constraints at \f$ u_m \f$, \f$ 0 \le i_e \le (k+1)/2 \f$.
+      !! @param[in]     de    End-point derivatives (length `ne`).
+      !! @param[in]     ne    Dimension of `de`, \f$ \ge \max(1, \text{idim} \times i_e) \f$.
+      !! @param[in]     k     Spline degree: 1, 3, or 5.
+      !! @param[in]     s     Smoothing factor \f$ S \ge 0 \f$.
+      !! @param[in]     nest  Over-estimate of total knots.
+      !! @param[in,out] n     Total number of knots.
+      !! @param[in,out] t     Knot positions (length `nest`).
+      !! @param[in]     nc    Declared dimension of `c`.
+      !! @param[in,out] c     B-spline coefficients (length `nc`).
+      !! @param[in]     np    Declared dimension of `cp`, \f$ \ge 2(k+1) \times \text{idim} \f$.
+      !! @param[in,out] cp    Constraint polynomial coefficients (length `np`).
+      !! @param[in,out] fp    Weighted sum of squared residuals.
+      !! @param[in,out] wrk   Real workspace.
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace (length `nest`).
+      !! @param[out]    ier   Error flag (same codes as curfit).
+      !!
+      !! @see Dierckx, Ch. 8, §8.2; fpcons — core constrained fitting algorithm
+      pure subroutine concur(iopt,idim,m,u,mx,x,xx,w,ib,db,nb, &
+                             ie,de,ne,k,s,nest,n,t,nc,c,np,cp,fp,wrk,lwrk,iwrk,ier)
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)    :: s
+      real(FP_REAL),    intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,idim,m,mx,ib,nb,ie,ne,k,nest,nc,np,lwrk
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)    :: u(m),x(mx),db(nb),de(ne),w(m)
+      real(FP_REAL),    intent(inout) :: xx(mx),t(nest),c(nc),cp(np),wrk(lwrk)
+      integer(FP_SIZE), intent(inout) :: iwrk(nest)
+      !  ..local scalars..
+      integer(FP_SIZE) :: ib1,ie1,ja,jb,jfp,jg,jq,jz,k1,k2,lwest,nmin,ncc,kk,mmin,nmax,mxx
+      !  ..
+      !  we set up the parameters tol and maxit
+      real(FP_REAL), parameter :: tol = smallnum03
+      integer(FP_SIZE), parameter :: maxit = 20
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier   = FITPACK_INPUT_ERROR
+
+      k1    = k+1
+      k2    = k+2
+      kk    = k1/2
+      nmin  = 2*k1
+      ib1   = max(0,ib-1)
+      ie1   = max(0,ie-1)
+      mmin  = k1-ib1-ie1
+      mxx   = m*idim
+      ncc   = nest*idim
+      lwest = m*k1+nest*(6+idim+3*k)
+
+      if (iopt<(-1) .or. iopt>1)          return
+      if (idim<=0 .or. idim>MAX_IDIM)     return
+      if (k<=0 .or. k>5)                  return
+      if (kk*2/=k1)                       return
+      if (ib<0 .or. ib>kk)                return
+      if (ie<0 .or. ie>kk)                return
+      if (m<mmin .or. nest<nmin)          return
+      if (nb<(idim*ib) .or. ne<(idim*ie)) return
+      if (np<(2*k1*idim))                 return
+      if (mx<mxx .or. nc<ncc)             return
+      if (lwrk<lwest)                     return
+      if (any(w<=zero))                   return
+      if (any(u(1:m-1)>=u(2:m)))          return
+
+      if (iopt<0) then
+
+          if (n<nmin .or. n>nest)         return
+
+          t(1:k1)  = u(1)
+          t(n-k:n) = u(m)
+
+          ier = fpched(u,m,t,n,k,ib,ie)
+
+          if (ier/=FITPACK_OK)            return
+
+      else
+
+          nmax = m+k1+ib1+ie1
+
+          if (s<zero)                     return
+          if (equal(s,zero) .and. nest<nmax)    return
+
+          ier = FITPACK_OK
+
+      endif
+
+      if (iopt<=0) then
+
+          !  we determine a polynomial curve satisfying the boundary constraints.
+          call fppocu(idim,k,u(1),u(m),ib,db,nb,ie,de,ne,cp,np)
+
+          !  we generate new data points which will be approximated by a spline
+          !  with zero derivative constraints.
+
+          wrk(1:k1) = u(1)
+          wrk(nmin-k1+1:nmin) = u(m)
+
+          !  evaluate the polynomial curve
+          call curev(idim,wrk,nmin,cp,np,k,u,m,xx,mxx,ier)
+
+          !  subtract from the old data, the values of the polynomial curve
+          xx(1:mxx) = x(1:mxx)-xx(1:mxx)
+
+      endif
+
+      ! we partition the working space and determine the spline curve.
+      jfp = 1
+      jz  = jfp+nest
+      ja  = jz+ncc
+      jb  = ja+nest*k1
+      jg  = jb+nest*k2
+      jq  = jg+nest*k2
+
+      call fpcons(iopt,idim,m,u,mxx,xx,w,ib,ie,k,s,nest,tol,maxit,k1, &
+                  k2,n,t,ncc,c,fp,wrk(jfp),wrk(jz),wrk(ja),wrk(jb),wrk(jg),wrk(jq),iwrk,ier)
+
+      !  add the polynomial curve to the calculated spline.
+      call fpadpo(idim,t,n,c,ncc,k,cp,np,wrk(jz),wrk(ja),wrk(jb))
+
+      return
+      end subroutine concur
+
+
+      !  subroutine cualde evaluates at the point u all the derivatives
+      !                     (l)
+      !     d(idim*l+j) = sj   (u) ,l=0,1,...,k, j=1,2,...,idim
+      !  of a spline curve s(u) of order k1 (degree k=k1-1) and dimension idim
+      !  given in its b-spline representation.
+
+      !> @brief Evaluate all derivatives of a parametric spline curve at a single point.
+      !!
+      !! Given an `idim`-dimensional spline curve \f$ \mathbf{s}(u) = (s_1(u),\ldots,s_{\text{idim}}(u)) \f$
+      !! of order \f$ k_1 = k + 1 \f$ with common knots, evaluates all derivatives up to order
+      !! \f$ k \f$ at the point \f$ u \f$. Uses the stable recurrence scheme of de Boor for each
+      !! coordinate component.
+      !!
+      !! @param[in]  idim  Dimension of the curve.
+      !! @param[in]  t     Knot positions (length \f$ n \f$), common to all components.
+      !! @param[in]  n     Total number of knots.
+      !! @param[in]  c     B-spline coefficients (length `nc`), stored as \f$ n \f$ coefficients
+      !!   for each of the `idim` components consecutively.
+      !! @param[in]  nc    Total number of coefficients (\f$ \ge n \times \text{idim} \f$).
+      !! @param[in]  k1    Order of the spline (\f$ k_1 = k + 1 \f$).
+      !! @param[in]  u     Parameter value where derivatives are evaluated.
+      !!   Must satisfy \f$ t_{k_1} \le u \le t_{n-k_1+1} \f$.
+      !! @param[out] d     Derivative values (length `nd`): `d(idim*l+j)` contains the
+      !!   \f$ j \f$-th coordinate of the \f$ l \f$-th derivative.
+      !! @param[in]  nd    Dimension of `d`. Must satisfy \f$ \text{nd} \ge k_1 \times \text{idim} \f$.
+      !! @param[out] ier   Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @note At a knot, right derivatives are computed (left derivatives at the right boundary).
+      !!
+      !! @see spalde — scalar variant; fpader — derivative computation kernel
+      pure subroutine cualde(idim,t,n,c,nc,k1,u,d,nd,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)  :: idim,n,nc,k1,nd
+      integer(FP_FLAG), intent(out) :: ier
+      real(FP_REAL),    intent(in)  :: u
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)  :: t(n),c(nc)
+      real(FP_REAL),    intent(out) :: d(nd)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,j,kk,l,m,nk1
+      !  ..local array..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+      !  ..
+      !  before starting computations a data check is made. if the input data
+      !  are invalid control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      if(nd<(k1*idim)) return
+      nk1 = n-k1
+      if(u<t(k1) .or. u>t(nk1+1)) return
+
+      !  search for knot interval t(l) <= u < t(l+1)
+      l = fp_knot_interval(t, u, k1, nk1)
+      if(t(l)>=t(l+1)) return
+
+      ier = FITPACK_OK
+
+      !  calculate the derivatives.
+      j = 1
+      do i=1,idim
+         call fpader(t,n,c(j),k1,u,l,h)
+         m = i
+         do kk=1,k1
+            d(m) = h(kk)
+            m = m+idim
+         end do
+         j = j+n
+      end do
+      return
+      end subroutine cualde
+
+
+
+      !> @brief Evaluate a parametric spline curve at a set of parameter values.
+      !!
+      !! Given an `idim`-dimensional spline curve \f$ \mathbf{s}(u) = (s_1(u),\ldots,s_{\text{idim}}(u)) \f$
+      !! of degree \f$ k \f$ in B-spline representation with common knots, evaluates
+      !! \f$ \mathbf{s}(u_i) \f$ for \f$ i = 1,\ldots,m \f$.
+      !!
+      !! @param[in]  idim  Dimension of the curve (\f$ 1 \le \text{idim} \le 10 \f$).
+      !! @param[in]  t     Knot positions (length \f$ n \f$).
+      !! @param[in]  n     Total number of knots.
+      !! @param[in]  c     B-spline coefficients (length `nc`), stored consecutively for each dimension.
+      !! @param[in]  nc    Total number of coefficients.
+      !! @param[in]  k     Degree of the spline.
+      !! @param[in]  u     Parameter values (length \f$ m \f$), must be non-decreasing and within
+      !!   \f$ [t_{k+1}, t_{n-k}] \f$.
+      !! @param[in]  m     Number of evaluation points, \f$ m \ge 1 \f$.
+      !! @param[out] x     Curve values (length `mx`): `x(idim*(i-1)+j)` is the \f$ j \f$-th
+      !!   coordinate at the \f$ i \f$-th point.
+      !! @param[in]  mx    Dimension of `x`. Must satisfy \f$ \text{mx} \ge m \times \text{idim} \f$.
+      !! @param[out] ier   Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 6, §6.3; fpbspl — B-spline basis evaluation
+      pure subroutine curev(idim,t,n,c,nc,k,u,m,x,mx,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: idim,n,nc,k,m,mx
+      integer(FP_FLAG), intent(out) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: t(n),c(nc),u(m)
+      real(FP_REAL), intent(out) :: x(idim,m) ! x has size (mx), assume 2d (idim,m)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,j1,k1,l,ll,l1,nk1
+      real(FP_REAL) :: arg,tb,te
+      !  ..local array..
+      real(FP_REAL) h(MAX_ORDER+1)
+      !  ..
+      !  before starting computations a data check is made. if the input data
+      !  are invalid control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      if (m<1) return
+
+      ! Check monotonic
+      if (m>1 .and. any(u(2:m)<u(1:m-1))) return
+
+      ! Check enough output space
+      if (mx<(m*idim)) return
+
+      ier = FITPACK_OK
+
+      !  fetch tb and te, the boundaries of the approximation interval.
+      k1  = k+1
+      nk1 = n-k1
+      tb  = t(k1)
+      te  = t(nk1+1)
+      l   = k1
+      l1  = l+1
+      !  main loop for the different points.
+      eval_points: do i=1,m
+
+        ! fetch a new u-value arg.
+        arg = min(max(u(i),tb),te)
+
+        ! search for knot interval t(l) <= arg < t(l+1)
+        l = fp_knot_interval(t, arg, l, nk1)
+        l1 = l + 1
+
+        ! evaluate the non-zero b-splines at arg.
+        h = fpbspl(t,n,k,arg,l)
+
+        ! find the value of s(u) at u=arg.
+        ll = l-k1
+        do j1=1,idim
+          x(j1,i) = dot_product(h(1:k1),c(ll+1:ll+k1))
+          ll = ll+n
+        end do
+      end do eval_points
+
+      return
+      end subroutine curev
+
+
+      !> @brief Determine a smooth spline approximation of degree \f$ k \f$ to a set of data points.
+      !!
+      !! Given data points \f$ (x_i, y_i) \f$ with positive weights \f$ w_i \f$, \f$ i=1,\ldots,m \f$,
+      !! computes a spline \f$ s(x) \f$ of degree \f$ k \f$ on the interval \f$ [x_b, x_e] \f$.
+      !!
+      !! - If `iopt=-1`: computes the weighted least-squares spline for a given set of knots.
+      !! - If `iopt>=0`: the number and position of knots is chosen automatically.
+      !!   Smoothness is achieved by minimizing discontinuity jumps of the \f$ k \f$-th derivative
+      !!   at interior knots, subject to the constraint
+      !!   \f[
+      !!       F(p) = \sum_{i=1}^{m} \bigl(w_i\,(y_i - s(x_i))\bigr)^2 \le S
+      !!   \f]
+      !!   where \f$ S \ge 0 \f$ is the smoothing factor.
+      !!
+      !! The result is returned in B-spline representation with coefficients
+      !! \f$ c_j,\; j=1,\ldots,n{-}k{-}1 \f$ and can be evaluated with splev.
+      !!
+      !! **Choosing the smoothing factor:** If weights are \f$ w_i = 1/\sigma_i \f$ where
+      !! \f$ \sigma_i \f$ is the standard deviation of \f$ y_i \f$, a good value of \f$ S \f$ lies
+      !! in the range \f$ (m - \sqrt{2m},\; m + \sqrt{2m}) \f$. Otherwise, start with a large
+      !! \f$ S \f$ to get the least-squares polynomial and upper bound \f$ F_0 \f$, then decrease
+      !! progressively (e.g. \f$ S = F_0/10, F_0/100, \ldots \f$). Use `iopt=1` to continue
+      !! with knots from the previous call when searching for a good \f$ S \f$.
+      !!
+      !! @param[in]     iopt  Computation mode:
+      !!   - `-1`: weighted least-squares spline with user-specified knots.
+      !!   - `0`: smoothing spline, starting with initial knots \f$ t_i = x_b,\; t_{i+k+1} = x_e \f$.
+      !!   - `1`: smoothing spline, continuing with knots from the previous call.
+      !! @param[in]     m     Number of data points. Must satisfy \f$ m > k \f$.
+      !! @param[in]     x     Abscissae \f$ x_1 < x_2 < \cdots < x_m \f$ (strictly ascending).
+      !! @param[in]     y     Ordinates \f$ y_1, y_2, \ldots, y_m \f$.
+      !! @param[in]     w     Weights \f$ w_i \ge 0 \f$. Setting \f$ w_i = 0 \f$ excludes point \f$ i \f$,
+      !!   so at least \f$ k+1 \f$ weights must be strictly positive.
+      !! @param[in]     xb    Left boundary of the approximation interval. \f$ x_b \le x_1 \f$.
+      !! @param[in]     xe    Right boundary of the approximation interval. \f$ x_e \ge x_m \f$.
+      !! @param[in]     k     Spline degree, \f$ 1 \le k \le 5 \f$. Cubic (\f$ k=3 \f$) recommended.
+      !! @param[in]     s     Smoothing factor \f$ S \ge 0 \f$ (used when `iopt>=0`).
+      !! @param[in]     nest  Over-estimate of total knots. `nest>=2*k+2`; `nest=m+k+1` always suffices.
+      !! @param[in,out] n     Total number of knots. Output when `iopt>=0`; input when `iopt=-1`.
+      !! @param[in,out] t     Knot positions (length `nest`). On exit: \f$ t_1=\cdots=t_{k+1}=x_b \f$,
+      !!   interior knots \f$ t_{k+2},\ldots,t_{n-k-1} \f$, and \f$ t_{n-k}=\cdots=t_n=x_e \f$.
+      !! @param[in,out] c     B-spline coefficients (length `nest`). On exit: \f$ c_1,\ldots,c_{n-k-1} \f$.
+      !! @param[in,out] fp    Weighted sum of squared residuals of the returned spline.
+      !! @param[in,out] wrk   Real workspace, length \f$ \ge m(k+1) + \text{nest}(7+3k) \f$.
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace, length \f$ \ge \text{nest} \f$.
+      !! @param[out]    ier   Error flag:
+      !!   - `0`: normal return, \f$ |F_p - S|/S \le 0.001 \f$.
+      !!   - `-1`: interpolating spline (\f$ F_p = 0 \f$).
+      !!   - `-2`: least-squares polynomial of degree \f$ k \f$ (\f$ F_p = F_0 \f$).
+      !!   - `1`: `nest` too small (returned spline uses all `nest` knots).
+      !!   - `2`: impossible result in iteration (\f$ S \f$ too small).
+      !!   - `3`: iteration limit (20) reached (\f$ S \f$ too small).
+      !!   - `10`: invalid input data.
+      !!
+      !! @see Dierckx, Ch. 4--5, §4.1--5.3; fpcurf — core fitting algorithm
+      pure subroutine curfit(iopt,m,x,y,w,xb,xe,k,s,nest,n,t,c,fp,wrk,lwrk,iwrk,ier)
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)    :: xb,xe,s
+      real(FP_REAL),    intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,m,k,nest,lwrk
+      integer(FP_FLAG), intent(out)   :: ier
+      integer(FP_SIZE), intent(inout) :: n
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)    :: x(m),y(m),w(m)
+      real(FP_REAL),    intent(inout) :: t(nest),c(nest),wrk(lwrk)
+      integer(FP_SIZE), intent(inout) :: iwrk(nest)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ia,ib,ifp,ig,iq,iz,j,k1,k2,lwest,nmin
+      !  ..
+      !  we set up the parameters tol and maxit
+      real(FP_REAL), parameter :: tol = smallnum03
+      integer(FP_SIZE), parameter :: maxit = 20
+
+      k1   = k+1
+      k2   = k1+1
+      nmin = 2*k1
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      if (k<=0 .or. k>5)         return
+      if (iopt<(-1) .or. iopt>1) return
+      if (m<k1 .or. nest<nmin)   return
+      if (count(w>zero)<k1)      return ! w=0 excludes a point, so m>k is not enough on its own
+      lwest = m*k1+nest*(7+3*k)
+      if (lwrk<lwest)             return
+      if (xb>x(1) .or. xe<x(m))  return
+      if (any(x(1:m-1)>x(2:m)))  return
+
+      if (iopt>=0) then
+          if (s<zero .or. (equal(s,zero) .and. nest<(m+k1))) return
+      else
+          if (n<nmin .or. n>nest) return
+          j = n
+          do i=1,k1
+             t(i) = xb
+             t(j) = xe
+             j = j-1
+          end do
+          ier = fpchec(x,m,t,n,k); if (ier/=0) return
+      endif
+
+      ier = FITPACK_OK
+
+      ! we partition the working space and determine the spline approximation.
+      ifp = 1
+      iz = ifp+nest
+      ia = iz+nest
+      ib = ia+nest*k1
+      ig = ib+nest*k2
+      iq = ig+nest*k2
+      call fpcurf(iopt,x,y,w,m,xb,xe,k,s,nest,tol,maxit,k1,k2,n,t,c,fp, &
+                  wrk(ifp),wrk(iz),wrk(ia),wrk(ib),wrk(ig),wrk(iq),iwrk,ier)
+
+      end subroutine curfit
+
+
+
+      !> @brief Integral of a tensor-product spline over an axis-aligned box (any dimension).
+      !!
+      !! Computes \f$ \int_{xb_1}^{xe_1}\!\cdots\!\int_{xb_d}^{xe_d} s(x_1,\ldots,x_d)\,dx_1\cdots dx_d \f$.
+      !! The box integral is separable: with \f$ s=\sum_{\mathbf i} c_{\mathbf i}\prod_d N^{(d)}_{i_d} \f$
+      !! it factors into a product of 1-D B-spline integrals per axis contracted against the coefficient
+      !! tensor. Each per-axis integral vector is produced by `fpintb`; the contraction reuses the fpndsp
+      !! odometer. At `dims=2` the terms and their accumulation order reduce to the classic bivariate box integral.
+      !!
+      !! @param[in]  dims  Number of axes (domain dimension)
+      !! @param[in]  t     Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]  n     Number of knots per axis, `n(dims)`
+      !! @param[in]  c     B-spline coefficient tensor, flat row-major (first axis varies slowest)
+      !! @param[in]  k     Spline degree per axis, `k(dims)`
+      !! @param[in]  xb    Per-axis lower integration limits, `xb(dims)`
+      !! @param[in]  xe    Per-axis upper integration limits, `xe(dims)`
+      !! @return     res   Value of the box integral
+      !!
+      !! @see dblint, fpintb; todo/fitpack_nd_grids.md
+      pure real(FP_REAL) function dblint(dims,t,n,c,k,xb,xe) result(res)
+          integer(FP_DIM),  intent(in)  :: dims
+          integer(FP_SIZE), intent(in)  :: n(dims),k(dims)
+          real(FP_REAL),    intent(in)  :: t(:,:),c(:),xb(dims),xe(dims)
+
+          integer(FP_DIM)  :: d,a
+          integer(FP_SIZE) :: nk1(dims),cstride(dims),cidx(dims)
+          integer(FP_SIZE) :: j,q,nsupp,coff
+          real(FP_REAL)    :: pw(0:dims-1)
+          real(FP_REAL)    :: iax(maxval(n-k-1),dims)   ! per-axis B-spline integral vectors
+
+          nk1 = n-k-1
+
+          !  per-axis integrals of the normalized B-splines
+          iax = zero
+          do d=1,dims
+             call fpintb(t(1:n(d),d), n(d), iax(1:nk1(d),d), nk1(d), xb(d), xe(d))
+          end do
+
+          cstride = fp_grid_strides(dims,nk1)
+          nsupp   = product(nk1(1:dims-1))
+
+          !  contract the coefficient tensor against the per-axis integral vectors (fpndsp odometer);
+          !  carry the partial product pw over axes 1..dims-1 and skip a slice whose weight vanishes,
+          !  exactly as dblint skips Ix(i)==0. At dims=2: res += (Ix(i)*Iy(j))*c(m), bit-for-bit.
+          res   = zero
+          cidx(1:dims-1) = 1
+          coff  = 0
+          pw(0) = one
+          do a=1,dims-1
+             pw(a) = pw(a-1)*iax(cidx(a),a)
+          end do
+          do q=1,nsupp
+             if (.not.equal(pw(dims-1),zero)) then
+                do j=1,nk1(dims)
+                   res = res + (pw(dims-1)*iax(j,dims))*c(coff+j)
+                end do
+             end if
+             if (q==nsupp) exit
+             do a=dims-1,1,-1
+                if (cidx(a)<nk1(a)) then
+                   cidx(a) = cidx(a)+1
+                   coff    = coff + cstride(a)
+                   do d=a,dims-1
+                      pw(d) = pw(d-1)*iax(cidx(d),d)
+                   end do
+                   exit
+                else
+                   cidx(a) = 1
+                   coff    = coff - (nk1(a)-1)*cstride(a)
+                end if
+             end do
+          end do
+          return
+      end function dblint
+
+      !> @brief Evaluate a polar spline \f$ f(x,y) = s(u,v) \f$ at a Cartesian point.
+      !!
+      !! Given a bicubic spline \f$ s(u,v) \f$ (\f$ 0 \le u \le 1 \f$, \f$ -\pi \le v \le \pi \f$)
+      !! fitted by polar, evaluates \f$ f(x,y) \f$ via the polar transformation:
+      !! \f[
+      !!   x = u \cdot r(v) \cos v, \qquad y = u \cdot r(v) \sin v
+      !! \f]
+      !! where \f$ r(v) \f$ is the boundary function defining the polar domain.
+      !!
+      !! @param[in] tu   Knot positions in \f$ u \f$ (length \f$ n_u \f$).
+      !! @param[in] nu   Total number of knots in \f$ u \f$.
+      !! @param[in] tv   Knot positions in \f$ v \f$ (length \f$ n_v \f$).
+      !! @param[in] nv   Total number of knots in \f$ v \f$.
+      !! @param[in] c    B-spline coefficients, length \f$ (n_u{-}4)(n_v{-}4) \f$.
+      !! @param[in] rad  Boundary function \f$ r(v) \f$ defining the polar domain.
+      !! @param[in] x    Cartesian \f$ x \f$-coordinate.
+      !! @param[in] y    Cartesian \f$ y \f$-coordinate.
+      !! @return The value \f$ f(x,y) = s(u,v) \f$.
+      !!
+      !! @see Dierckx, Ch. 11, §11.1; polar — polar spline fitting
+      pure real(FP_REAL) function evapol(tu,nu,tv,nv,c,rad,x,y) result(e_res)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: nu,nv
+      real(FP_REAL),    intent(in) :: x,y
+      !  ..array arguments..
+      real(FP_REAL),    intent(in) :: tu(nu),tv(nv),c((nu-4)*(nv-4))
+      !  ..user specified function
+#if defined(__GFORTRAN__) && __GNUC__ == 15
+      ! GCC 15 bug #120163: use inline interface instead of procedure(fitpack_polar_boundary)
+      interface
+         pure real(FP_REAL) function rad(theta)
+            import FP_REAL
+            real(FP_REAL), intent(in) :: theta
+         end function rad
+      end interface
+#else
+      procedure(fitpack_polar_boundary) :: rad
+#endif
+
+      !  ..local scalars..
+      integer(FP_FLAG) :: ier
+      integer(FP_SIZE), parameter :: liwrk = 2, lwrk = 8
+      real(FP_REAL) :: u(1),v(1),r,f(1),dist
+      !  ..local arrays
+      real(FP_REAL) :: wrk(lwrk)
+      integer(FP_SIZE) :: iwrk(liwrk)
+      !  ..
+      !  calculate the (u,v)-coordinates of the given point.
+      u    = zero
+      v    = zero
+      dist = x**2+y**2
+      if (dist>zero) then
+         v(1) = atan2(y,x)
+         r    = rad(v(1))
+         if (r>zero) &
+         u(1) = min(sqrt(dist)/r,one)
+      endif
+
+      ! evaluate s(u,v)
+      call bispev(tu,nu,tv,nv,c,3,3,u,1,v,1,f,wrk,lwrk,iwrk,liwrk,ier)
+
+      ! Return scalar result
+      e_res = f(1)
+      return
+      end function evapol
+
+      !  subroutine fourco calculates the integrals
+      !                    /t(n-3)
+      !    ress(i) =      !        s(x)*sin(alfa(i)*x) dx    and
+      !              t(4)/
+      !                    /t(n-3)
+      !    resc(i) =      !        s(x)*cos(alfa(i)*x) dx, i=1,...,m,
+      !              t(4)/
+      !  where s(x) denotes a cubic spline which is given in its b-spline representation.
+      !> @brief Compute Fourier coefficients of a cubic spline.
+      !!
+      !! For a cubic spline \f$ s(x) \f$ and a set of parameters \f$ \alpha_i \f$,
+      !! \f$ i = 1,\ldots,m \f$, computes the Fourier integrals:
+      !! \f[
+      !!   R_s(i) = \int s(x) \sin(\alpha_i x)\,dx, \qquad
+      !!   R_c(i) = \int s(x) \cos(\alpha_i x)\,dx
+      !! \f]
+      !! over the support of the spline.
+      !!
+      !! @param[in]     t     Knot positions (length \f$ n \f$). Must have \f$ n \ge 10 \f$.
+      !! @param[in]     n     Total number of knots.
+      !! @param[in]     c     B-spline coefficients (length \f$ n \f$).
+      !! @param[in]     alfa  Fourier parameters \f$ \alpha_i \f$ (length \f$ m \f$).
+      !! @param[in]     m     Number of integrals to compute.
+      !! @param[out]    ress  Sine integrals \f$ R_s(i) \f$ (length \f$ m \f$).
+      !! @param[out]    resc  Cosine integrals \f$ R_c(i) \f$ (length \f$ m \f$).
+      !! @param[in,out] wrk1  Real workspace (length \f$ n \f$).
+      !! @param[in,out] wrk2  Real workspace (length \f$ n \f$).
+      !! @param[out]    ier   Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 3, §3.3; fpbfou — B-spline Fourier integrals; fpcsin — cos/sin integrals
+      pure subroutine fourco(t,n,c,alfa,m,ress,resc,wrk1,wrk2,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: n,m
+      integer(FP_FLAG), intent(out) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: t(n),c(n),alfa(m)
+      real(FP_REAL), intent(inout) :: wrk1(n),wrk2(n)
+      real(FP_REAL), intent(out) :: ress(m),resc(m)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,n4
+
+      n4 = n-4
+      !  before starting computations a data check is made. in the input data
+      !  are invalid, control is immediately repassed to the calling program.
+
+      ! Not enough points
+      if (n<10) then
+         ier = FITPACK_INSUFFICIENT_KNOTS
+         return
+      else
+         ier = FITPACK_INPUT_ERROR
+      end if
+
+      ! Ends of the support: knots must be monotonic
+      if (any(t(1:3)>t(2:4)))       return
+      if (any(t(n-2:n)<t(n-3:n-1))) return
+
+      ! Interior: knots must be strictly monotonic
+      if (any(t(4:n4)>=t(5:n-3)))   return
+
+      ier = FITPACK_OK
+      !  main loop for the different alfa(i).
+      alphas: do i=1,m
+
+         !  calculate the integrals
+         !    wrk1(j) = integral(nj,4(x)*sin(alfa*x))    and
+         !    wrk2(j) = integral(nj,4(x)*cos(alfa*x)),  j=1,2,...,n-4,
+         !  where nj,4(x) denotes the normalised cubic b-spline defined on the knots t(j),t(j+1),...,t(j+4).
+         call fpbfou(t,n,alfa(i),wrk1,wrk2)
+
+         ! calculate the integrals ress(i) and resc(i).
+         ress(i) = dot_product(c(1:n4),wrk1(1:n4))
+         resc(i) = dot_product(c(1:n4),wrk2(1:n4))
+      end do alphas
+
+      end subroutine fourco
+
+
+      !> @brief Evaluate all derivatives of a spline at a single point.
+      !!
+      !! Computes all \f$ k+1 \f$ derivatives of a spline of order \f$ k_1 = k+1 \f$
+      !! at a point \f$ x \f$ in the knot interval \f$ [\lambda_l, \lambda_{l+1}) \f$:
+      !!
+      !! \f[
+      !!     d(j) = s^{(j-1)}(x), \quad j = 1, \ldots, k_1
+      !! \f]
+      !!
+      !! Uses the stable recurrence scheme of de Boor, which first forms divided
+      !! differences of the B-spline coefficients, then evaluates each derivative
+      !! level by the standard B-spline recursion.
+      !!
+      !! @param[in]  t   Knot vector \f$ \lambda_1, \ldots, \lambda_n \f$
+      !! @param[in]  n   Length of the knot vector
+      !! @param[in]  c   B-spline coefficients, length \f$ n \f$
+      !! @param[in]  k1  Spline order \f$ k+1 \f$ (= degree + 1)
+      !! @param[in]  x   Evaluation point, \f$ \lambda_l \leq x < \lambda_{l+1} \f$
+      !! @param[in]  l   Knot interval index
+      !! @param[out] d   Array of derivatives: `d(j)` = \f$ s^{(j-1)}(x) \f$, \f$ j = 1, \ldots, k_1 \f$
+      !!
+      !! @see Dierckx, Ch. 1, §1.4 (pp. 11-14): de Boor recurrence for derivatives
+      !! @see de Boor, C. (1978). *A Practical Guide to Splines*. Springer.
+      pure subroutine fpader(t,n,c,k1,x,l,d)
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)  :: x
+      integer(FP_SIZE), intent(in)      :: n,k1,l
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)  :: t(n),c(n)
+      real(FP_REAL),    intent(out) :: d(k1)
+
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ik,j,jj,j1,j2,ki,kj,li,lj,lk
+      real(FP_REAL) :: ak,fac
+      !  ..local array..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+      !  ..
+      lk = l-k1
+      do i=1,k1
+        ik = i+lk
+        h(i) = c(ik)
+      end do
+
+      kj  = k1
+      fac = one
+
+      order_loop: do j=1,k1
+        ki = kj
+        j1 = j+1
+        if(j>1) then
+           i = k1
+           do jj=j,k1
+              li = i+lk
+              lj = li+kj
+              h(i) = (h(i)-h(i-1))/(t(lj)-t(li))
+              i = i-1
+           end do
+        endif
+
+        d(j:k1) = h(j:k1)
+
+        if(j<k1) then
+            do jj=j1,k1
+              ki = ki-1
+              i = k1
+              do j2=jj,k1
+                li = i+lk
+                lj = li+ki
+                d(i) = ((x-t(li))*d(i)+(t(lj)-x)*d(i-1))/(t(lj)-t(li))
+                i = i-1
+              end do
+            end do
+        endif
+        d(j) = d(k1)*fac
+        ak = k1-j
+        fac = fac*ak
+        kj = kj-1
+      end do order_loop
+
+      return
+      end subroutine fpader
+
+
+      !> @brief Add a branch to the constraint-set binary tree.
+      !!
+      !! Adds a new branch of length `n1` to the triply linked binary tree used
+      !! by the Theil-Van de Panne convexity procedure (§7.2). The branch
+      !! represents a candidate active-constraint set; its nodes contain
+      !! constraint indices from `jbind(1:n1)`.
+      !!
+      !! The tree maintains the ordering invariant
+      !! \f$ \text{info}(k) < \text{info}(\text{right}(k)) \f$ and
+      !! \f$ \text{info}(k) < \text{info}(\text{left}(k)) \f$, preventing
+      !! duplicate constraint sets. If no free nodes are available, fpfrno is
+      !! called to reclaim nodes; if that also fails, `ier = 1`.
+      !!
+      !! @param[in]     maxtr  Size of the tree arrays
+      !! @param[in,out] up     Parent pointers; `up(i) = 0` marks a free node
+      !! @param[in,out] left   Left-child pointers
+      !! @param[in,out] right  Right-child pointers
+      !! @param[in,out] info   Constraint index stored at each node
+      !! @param[in,out] count  Next free node pointer
+      !! @param[in,out] merk   Terminal node of the most recent branch
+      !! @param[in]     jbind  Constraint indices for the new branch, length `n1`
+      !! @param[in]     n1     Length of the new branch
+      !! @param[out]    ier    Error flag: 0 = success, 1 = tree full
+      !!
+      !! @see Dierckx, Ch. 7, §7.2.4 (pp. 125-130)
+      !! @see fpdeno, fpfrno, fpseno — companion tree operations
+      pure subroutine fpadno(maxtr,up,left,right,info,count,merk,jbind,n1,ier)
+      !  ..
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: maxtr,n1
+      integer(FP_SIZE), intent(inout) :: count,merk
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      integer(FP_SIZE), intent(inout) :: up(maxtr),left(maxtr),right(maxtr),info(maxtr)
+      integer(FP_SIZE), intent(in)    :: jbind(n1)
+      !  ..local scalars..
+      integer(FP_SIZE) :: k,level,point
+      logical(FP_BOOL) :: is_left
+
+      !  ..
+      point   = 1
+      level   = 1
+      k       = left(point)
+      is_left = .true.
+      loop: do while (k/=0 .and. info(max(1,k))-jbind(min(level,n1))<=0)
+          point = k
+          if (info(k)-jbind(level)<0) then
+              k       = right(point)
+              is_left = FP_FALSE
+          else ! info(k)-jbind(level)==0
+              level  = level+1
+              k       = left(point)
+              is_left = FP_TRUE
+          endif
+      end do loop
+
+      loop2: do while (level<=n1)
+          count = count+1
+          if (count>maxtr) then
+             call fpfrno(maxtr,up,left,right,info,point,merk,n1,count,ier)
+             if (ier/=FITPACK_OK) return
+          endif
+
+          info (count) = jbind(level)
+          left (count) = 0
+          right(count) = k
+
+          if(is_left) then
+              up   (count) = point
+              left (point) = count
+          else
+              is_left      = .true.
+              right(point) = count
+              up   (count) = up(point)
+          endif
+
+          point        = count
+          level       = level+1
+          k = 0
+      end do loop2
+
+      ! Success!
+      ier = FITPACK_OK
+
+      end subroutine fpadno
+
+
+      !> @brief Add a polynomial curve to a spline curve in B-spline representation.
+      !!
+      !! Given a \f$ d \f$-dimensional spline curve of degree \f$ k \f$ with
+      !! knots \f$ t \f$ and coefficients \f$ c \f$, and a polynomial curve
+      !! with B-spline coefficients \f$ c_p \f$ (on the knot vector
+      !! \f$ [a, \ldots, a, b, \ldots, b] \f$), computes the B-spline
+      !! coefficients of their sum by inserting knots from \f$ t \f$ into the
+      !! polynomial representation via fpinst, then adding coefficients.
+      !!
+      !! @param[in]     idim  Number of curve dimensions \f$ d \f$
+      !! @param[in]     t     Knot vector of the spline, length `n`
+      !! @param[in]     n     Number of knots
+      !! @param[in,out] c     B-spline coefficients; on exit, contains the sum
+      !! @param[in]     nc    Length of `c`
+      !! @param[in]     k     Spline degree
+      !! @param[in]     cp    Polynomial B-spline coefficients, length `np`
+      !! @param[in]     np    Length of `cp`
+      !! @param[in,out] cc    Work array, length `nest`
+      !! @param[in,out] t1    Work array, length `nest`
+      !! @param[in,out] t2    Work array, length `nest`
+      !!
+      !! @see Dierckx, Ch. 7, §7.1 (pp. 115-120)
+      !! @see fpinst — single knot insertion; fppocu — polynomial construction
+      pure subroutine fpadpo(idim,t,n,c,nc,k,cp,np,cc,t1,t2)
+
+      !  ..
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: idim,k,n,nc,np
+      !  ..array arguments..
+      real(FP_REAL),    intent(in) :: t(n),cp(np)
+      real(FP_REAL),    intent(out) :: c(nc),cc(nc),t1(n),t2(n)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ii,j,jj,k1,l,l1,n1,n2,nk1,nk2
+      !  ..
+      k1  = k+1
+      nk1 = n-k1
+      !  initialization
+      j = 1
+      l = 1
+      do jj=1,idim
+        l1 = j
+        do ii=1,k1
+          cc(l1) = cp(l)
+          l1 = l1+1
+          l = l+1
+        end do
+        j = j+n
+        l = l+k1
+      end do
+
+      if (nk1/=k1) then
+          n1 = k1*2
+          j  = n
+          l  = n1
+          do i=1,k1
+            t1(i) = t(i)
+            t1(l) = t(j)
+            l = l-1
+            j = j-1
+          end do
+          !  find the b-spline representation of the given polynomial curve
+          !  according to the given set of knots.
+          nk2 = nk1-1
+          do l=k1,nk2
+            l1 = l+1
+            j = 1
+            do i=1,idim
+              call fpinst(0,t1,n1,cc(j),k,t(l1),l,t2,n2,cc(j),n)
+              j = j+n
+            end do
+            t1(1:n2) = t2(1:n2)
+            n1 = n2
+          end do
+      endif
+
+      !  find the b-spline representation of the resulting curve.
+      j = 1
+      do jj=1,idim
+         l = j
+         do i=1,nk1
+            c(l) = cc(l)+c(l)
+            l = l+1
+         end do
+         j = j+n
+      end do
+      return
+      end subroutine fpadpo
+
+      !> @brief Solve an upper triangular banded system by back-substitution.
+      !!
+      !! Computes the B-spline coefficients \f$ c \f$ by solving the triangular system:
+      !!
+      !! \f[
+      !!     R_1 \, c = z_1
+      !!     \tag{4.14}
+      !! \f]
+      !!
+      !! where \f$ R_1 \f$ is an \f$ n \times n \f$ upper triangular matrix with
+      !! bandwidth \f$ k \f$, obtained from the QR factorization of the observation
+      !! matrix \f$ E \f$.
+      !!
+      !! ### Matrix structure
+      !!
+      !! \f$ R_1 \f$ is stored as `a(nest, k)` where `a(i,1)` holds the diagonal
+      !! element \f$ r_{i,i} \f$ and `a(i,j)` for \f$ j > 1 \f$ holds \f$ r_{i,i+j-1} \f$.
+      !!
+      !! ### Rank deficiency
+      !!
+      !! A row of \f$ R_1 \f$ reduces to exactly zero when the observation matrix is rank
+      !! deficient — duplicated abscissae, or a knot span whose data all carry zero weight. The
+      !! corresponding coefficient is then unconstrained: it is set to zero (the minimum-norm
+      !! choice) instead of being divided out into a NaN that silently poisons the whole fit.
+      !!
+      !! @param[in]  a     Upper triangular band matrix \f$ R_1 \f$, stored as `a(nest, k)`
+      !! @param[in]  z     Right-hand side vector \f$ z_1 \f$ of length \f$ n \f$
+      !! @param[in]  n     Number of equations (= number of B-spline coefficients)
+      !! @param[in]  k     Bandwidth of \f$ R_1 \f$ (= spline order \f$ k+1 \f$)
+      !! @param[in]  nest  Leading dimension of array `a`
+      !!
+      !! @return Solution vector \f$ c \f$ of length \f$ n \f$
+      !!
+      !! @see Dierckx, Ch. 4, §4.1.2 (pp. 55-58), Eq. 4.14
+      pure function fpback(a,z,n,k,nest) result(c)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: n,k,nest
+      !  ..array arguments..
+      real(FP_REAL), intent(in)  :: a(nest,k),z(n)
+      real(FP_REAL)              :: c(n)
+      !  ..local scalars..
+      real(FP_REAL) :: store
+      integer(FP_SIZE) :: i,i1,j,k1,l,m,jm1
+      !  ..
+      k1 = k-1
+
+      if (equal(a(n,1),zero)) then
+         c(n) = zero
+      else
+         c(n) = z(n)/a(n,1)
+      end if
+
+      i = n-1
+      if (i>0) then
+
+         jm1 = 1
+         rows: do j=2,n
+           store = z(i)
+           i1 = merge(jm1,k1,j<=k1)
+           m = i
+           do l=1,i1
+             m = m+1
+             store = store-c(m)*a(i,l+1)
+           end do
+           if (equal(a(i,1),zero)) then
+              c(i) = zero
+           else
+              c(i) = store/a(i,1)
+           end if
+           i = i-1
+           jm1 = j
+         end do rows
+
+      end if
+
+      end function fpback
+
+      !> @brief Is the triangular factor of the Givens reduction rank deficient?
+      !!
+      !! fpback and fpbacp keep the fit finite whatever the factor looks like: a zero diagonal
+      !! element leaves its coefficient at zero instead of dividing. This predicate is how a caller
+      !! turns that silent repair into a reported status, so it runs **once per fit**, on the factor
+      !! that produced the accepted coefficients - never inside the knot or smoothing iterations,
+      !! where the inline guards already do the work.
+      !!
+      !! @param[in] a     Triangular factor in band storage; `a(i,1)` is the diagonal
+      !! @param[in] n     Number of equations
+      !! @param[in] nest  Leading dimension of `a`
+      !! @return    `.true.` if any diagonal element is exactly zero
+      pure logical(FP_BOOL) function fp_rank_deficient(a,n,nest) result(singular)
+         integer(FP_SIZE), intent(in) :: n,nest
+         real(FP_REAL),    intent(in) :: a(nest,*)
+         integer(FP_SIZE) :: i
+         singular = FP_TRUE
+         do i=1,n
+            if (equal(a(i,1),zero)) return
+         end do
+         singular = FP_FALSE
+      end function fp_rank_deficient
+
+      !> @brief Solve a bordered upper triangular system by back-substitution.
+      !!
+      !! Computes the solution \f$ c \f$ of the system \f$ G \, c = z \f$ where
+      !! \f$ G \f$ is an \f$ n \times n \f$ upper triangular matrix of the form:
+      !!
+      !! \f[
+      !!     G = \begin{pmatrix} A & \cdot \\ 0 & B \end{pmatrix}
+      !!     \tag{6.6}
+      !! \f]
+      !!
+      !! with \f$ A \f$ an \f$ (n-k) \times (n-k) \f$ upper triangular band matrix
+      !! of bandwidth \f$ k_1 \f$, and \f$ B \f$ an \f$ n \times k \f$ dense matrix
+      !! accounting for the periodic boundary conditions.
+      !!
+      !! This arises in periodic spline fitting where the periodic B-splines
+      !! \f$ \tilde{N}_{i,k+1} \f$ wrap around the domain, coupling the first
+      !! and last \f$ k \f$ coefficients.
+      !!
+      !! ### Rank deficiency
+      !!
+      !! As in fpback, a zero pivot leaves its coefficient unconstrained; it is set to zero
+      !! instead of being divided out into a NaN.
+      !!
+      !! @param[in]  a     Upper triangular band matrix \f$ A \f$, stored as `a(nest, k1)`
+      !! @param[in]  b     Dense coupling matrix \f$ B \f$, stored as `b(nest, k)`
+      !! @param[in]  z     Right-hand side vector of length \f$ n \f$
+      !! @param[in]  n     Number of equations
+      !! @param[in]  k     Number of periodic coupling columns
+      !! @param[in]  k1    Bandwidth of the triangular part \f$ A \f$
+      !! @param[in]  nest  Leading dimension of arrays `a` and `b`
+      !!
+      !! @return Solution vector \f$ c \f$ of length \f$ n \f$
+      !!
+      !! @see Dierckx, Ch. 6, §6.1 (pp. 95-100), Eq. 6.6
+      pure function fpbacp(a,b,z,n,k,k1,nest) result(c)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: n,k,k1,nest
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: a(nest,k1),b(nest,k),z(n)
+      real(FP_REAL) :: c(n)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,i1,j,l,l0,l1,n2
+      real(FP_REAL) :: store
+      !  ..
+      n2 = n-k
+      l  = n
+      wrapped_rows: do i=1,k
+         store = z(l)
+         j = k+2-i
+         if (i/=1) then
+             l0 = l
+             do l1=j,k
+               l0 = l0+1
+               store = store-c(l0)*b(l,l1)
+             end do
+         endif
+         if (equal(b(l,j-1),zero)) then
+            c(l) = zero
+         else
+            c(l) = store/b(l,j-1)
+         end if
+         l = l-1
+         if (l==0) exit wrapped_rows
+      end do wrapped_rows
+
+      banded_rows: if (l>0) then
+
+         do i=1,n2
+            store = z(i)
+            l = n2
+            do j=1,k
+              l = l+1
+              store = store-c(l)*b(i,j)
+            end do
+            c(i) = store
+         end do
+
+         i = n2
+         if (equal(a(i,1),zero)) then
+            c(i) = zero
+         else
+            c(i) = c(i)/a(i,1)
+         end if
+
+         if (i>1) then
+            do j=2,n2
+               i = i-1
+               store = c(i)
+               i1 = k
+               if (j<=k) i1=j-1
+               l = i
+               do l0=1,i1
+                 l = l+1
+                 store = store-c(l)*a(i,l0+1)
+               end do
+               if (equal(a(i,1),zero)) then
+                  c(i) = zero
+               else
+                  c(i) = store/a(i,1)
+               end if
+            end do
+         end if
+
+      end if banded_rows
+
+      end function fpbacp
+
+
+      !> @brief Compute Fourier coefficients of cubic B-splines.
+      !!
+      !! Calculates the Fourier sine and cosine integrals of each cubic
+      !! B-spline \f$ N_{j,4}(x) \f$ over the active knot interval:
+      !!
+      !! \f[
+      !!     \text{ress}(j) = \int_{\lambda_4}^{\lambda_{n-3}} N_{j,4}(x) \sin(\omega x) \, dx
+      !! \f]
+      !! \f[
+      !!     \text{resc}(j) = \int_{\lambda_4}^{\lambda_{n-3}} N_{j,4}(x) \cos(\omega x) \, dx
+      !! \f]
+      !!
+      !! for \f$ j = 1, \ldots, n-4 \f$. Uses fpcsin to evaluate the weighted
+      !! integrals over each knot span.
+      !!
+      !! @param[in]  t     Knot vector, length `n`
+      !! @param[in]  n     Number of knots
+      !! @param[in]  par   Frequency \f$ \omega \f$
+      !! @param[out] ress  Sine integrals, length `n-4`
+      !! @param[out] resc  Cosine integrals, length `n-4`
+      !!
+      !! @see Dierckx, Ch. 3, §3.3 (Fourier coefficients)
+      !! @see fpcsin — weighted Fourier integrals of cubics
+      pure subroutine fpbfou(t,n,par,ress,resc)
+
+      !  calling sequence:
+      !     call fpbfou(t,n,par,ress,resc)
+      !
+      !  input parameters:
+      !    t    : real array,length n, containing the knots.
+      !    n    : integer(FP_SIZE), containing the number of knots.
+      !    par  : real, containing the value of the parameter par.
+      !
+      !  output parameters:
+      !    ress  : real array,length n, containing the integrals ress(j).
+      !    resc  : real array,length n, containing the integrals resc(j).
+      !
+      !  restrictions:
+      !    n >= 10, t(4) < t(5) < ... < t(n-4) < t(n-3).
+      !  ..
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: n
+      real(FP_REAL),    intent(in) :: par
+      !  ..array arguments..
+      real(FP_REAL),    intent(in) :: t(n)
+      real(FP_REAL),    intent(out) :: ress(n),resc(n)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ic,ipj,is,j,jj,jp1,jp4,k,li,lj,ll,nmj,nm3,nm7
+      real(FP_REAL) :: ak,beta,c1,c2,delta,fac,f1,f2,f3,sign,s1,s2,term
+      !  ..local arrays..
+      real(FP_REAL) :: co(5),si(5),hs(5),hc(5),rs(3),rc(3)
+      !  ..
+      !  initialization.
+      real(FP_REAL), parameter ::  eps = smallnum08
+      real(FP_REAL), parameter :: con1 = 0.5e-01_FP_REAL
+      real(FP_REAL), parameter :: con2 = 0.12e+03_FP_REAL
+      nm3 = n-3
+      nm7 = n-7
+
+      term  = merge(six/par,zero,not_equal(par,zero))
+      beta  = par*t(4)
+      co(1) = cos(beta)
+      si(1) = sin(beta)
+
+      ! calculate the integrals ress(j) and resc(j), j=1,2,3 by setting up a divided difference table.
+      left: do j=1,3
+          jp1     = j+1
+          jp4     = j+4
+          beta    = par*t(jp4)
+          co(jp1) = cos(beta)
+          si(jp1) = sin(beta)
+          call fpcsin(t(4),t(jp4),par,si(1),co(1),si(jp1),co(jp1),rs(j),rc(j))
+          i = 5-j
+          hs(i) = zero
+          hc(i) = zero
+          do jj=1,j
+             ipj = i+jj
+             hs(ipj) = rs(jj)
+             hc(ipj) = rc(jj)
+          end do
+          do jj=1,3
+             if (i<jj) i = jj
+             k = 5
+             li = jp4
+             do ll=i,4
+               lj = li-jj
+               fac = t(li)-t(lj)
+               hs(k) = (hs(k)-hs(k-1))/fac
+               hc(k) = (hc(k)-hc(k-1))/fac
+               k = k-1
+               li = li-1
+             end do
+          end do
+          ress(j) = hs(5)-hs(4)
+          resc(j) = hc(5)-hc(4)
+      end do left
+
+      !  calculate the integrals ress(j) and resc(j),j=4,5,...,n-7.
+      center: do j=4,nm7
+        jp4 = j+4
+        beta = par*t(jp4)
+        co(5) = cos(beta)
+        si(5) = sin(beta)
+        delta = t(jp4)-t(j)
+
+        ! the way of computing ress(j) and resc(j) depends on the value of beta = par*(t(j+4)-t(j)).
+        beta = delta*par
+
+        ! if |beta|>1 the integrals are calculated by setting up a divided difference table.
+        if(abs(beta)>one) then
+
+            hs(1:5) = si(1:5)
+            hc(1:5) = co(1:5)
+            do jj=1,3
+              k = 5
+              li = jp4
+              do ll=jj,4
+                lj = li-jj
+                fac = par*(t(li)-t(lj))
+                hs(k) = (hs(k)-hs(k-1))/fac
+                hc(k) = (hc(k)-hc(k-1))/fac
+                k = k-1
+                li = li-1
+              end do
+            end do
+            s2 = (hs(5)-hs(4))*term
+            c2 = (hc(5)-hc(4))*term
+        else
+            ! if |beta|<=1 the integrals are calculated by evaluating a series expansion.
+            hs(:4) = par*(t(j+1:j+4)-t(j))
+            hc(:4) = hs(:4)
+            f3 = con1*sum(hs(1:4))
+            c1 = fourth
+            s1 = f3
+            if(abs(f3)>eps) then
+                sign = one
+                fac  = con2
+                k    = 5
+                is   = 0
+
+                series_coef: do ic=1,20
+                   k = k+1
+                   ak = k
+                   fac = fac*ak
+                   f1 = zero
+                   f3 = zero
+                   do i=1,4
+                      f1 = f1+hc(i)
+                      f2 = f1*hs(i)
+                      hc(i) = f2
+                      f3 = f3+f2
+                   end do
+                   f3 = f3*six/fac
+                   if (is==0) then
+                       sign = -sign
+                       is = 1
+                       c1 = c1+f3*sign
+                   else
+                       is = 0
+                       s1 = s1+f3*sign
+                   end if
+                   if(abs(f3)<=eps) exit series_coef
+                end do series_coef
+            endif
+            s2 = delta*(co(1)*s1+si(1)*c1)
+            c2 = delta*(co(1)*c1-si(1)*s1)
+        endif
+
+        ress(j) = s2
+        resc(j) = c2
+        co(1:4) = co(2:5)
+        si(1:4) = si(2:5)
+      end do center
+      !  calculate the integrals ress(j) and resc(j),j=n-6,n-5,n-4 by setting
+      !  up a divided difference table.
+      right: do j=1,3
+        nmj = nm3-j
+        i = 5-j
+        call fpcsin(t(nm3),t(nmj),par,si(4),co(4),si(i-1),co(i-1),rs(j),rc(j))
+        hc(i:i+j) = [zero,rc(1:j)]
+        hs(i:i+j) = [zero,rs(1:j)]
+        do jj=1,3
+          if(i<jj) i = jj
+          k = 5
+          li = nmj
+          do ll=i,4
+            lj = li+jj
+            fac = t(lj)-t(li)
+            hs(k) = (hs(k-1)-hs(k))/fac
+            hc(k) = (hc(k-1)-hc(k))/fac
+            k = k-1
+            li = li+1
+          end do
+        end do
+        ress(nmj) = hs(4)-hs(5)
+        resc(nmj) = hc(4)-hc(5)
+      end do right
+
+      return
+      end subroutine fpbfou
+
+
+      !> @brief Evaluate a tensor-product spline on a grid (any dimension; bispev's kernel).
+      !!
+      !! Computes the values of a bivariate spline \f$ s(x, y) \f$ of degrees
+      !! \f$ k_x \f$ and \f$ k_y \f$ at the grid points
+      !! \f$ (x_i, y_j) \f$, \f$ i = 1, \ldots, m_x \f$, \f$ j = 1, \ldots, m_y \f$.
+      !!
+      !! The evaluation uses the two-step algorithm: first compute the B-spline
+      !! basis values in each direction, then assemble:
+      !!
+      !! \f[
+      !!     s(x, y) = \sum_{i} \left( \sum_{j} c_{i,j} \, M_{j, k_y+1}(y) \right)
+      !!               N_{i, k_x+1}(x)
+      !!     \tag{2.14-2.15}
+      !! \f]
+      !!
+      !! At `dims=2` this reproduces the classic bivariate contraction bit-for-bit: both the
+      !! per-axis basis-table build and the evaluation contraction are dimension-generic runtime loops
+      !! over the `dims` axes, with the innermost `dot_product` on the fastest (axis
+      !! `dims`, contiguous) coefficient axis as the FP-reassociation anchor. The
+      !! B-spline values and knot interval indices are stored per axis in workspace
+      !! arrays `w` and `lidx` (one column per axis) for reuse.
+      !!
+      !! @param[in]  dims  Number of axes (domain dimension)
+      !! @param[in]  t     Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]  n     Number of knots per axis, `n(dims)`
+      !! @param[in]  c     B-spline coefficient tensor, flat row-major (first axis varies slowest)
+      !! @param[in]  k     Spline degree per axis, `k(dims)`
+      !! @param[in]  xg    Per-axis evaluation grids; column \f$ d \f$ is `xg(1:m(d),d)`
+      !! @param[in]  m     Number of evaluation points per axis, `m(dims)`
+      !! @param[out] z     Spline values at grid points, flat row-major (first axis varies slowest)
+      !! @param[out] w     Per-axis B-spline basis values, `w(k(d)+1,m(d),d)` (basis-major, one page per axis)
+      !! @param[out] lidx  Per-axis knot interval indices, `lidx(m(d),d)` (one column per axis)
+      !!
+      !! @see bispev, Dierckx Ch. 2 §2.1.2 (pp. 28-30) Eq. 2.14-2.17; todo/fitpack_nd_grids.md (slice 1)
+      pure subroutine fpndsp(dims,t,n,c,k,xg,m,z,w,lidx)
+          integer(FP_DIM),  intent(in)  :: dims
+          integer(FP_SIZE), intent(in)  :: n(dims),k(dims),m(dims)
+          real(FP_REAL),    intent(in)  :: t(:,:),c(:),xg(:,:)
+          real(FP_REAL),    intent(out) :: z(:),w(:,:,:)
+          integer(FP_SIZE), intent(out) :: lidx(:,:)
+
+          !  ..local variables..
+          integer(FP_DIM)  :: d,a
+          integer(FP_SIZE) :: k1(dims),nk1(dims),cstride(dims),gidx(dims),lbase(dims),cidx(dims)
+          integer(FP_SIZE) :: l,mout,i,nkd,q,nsupp,coff0,coff
+          !  support odometer over axes 1..dims-1: multi-index cidx, basis partial products pw (O(dims))
+          real(FP_REAL)    :: arg,sp,tb,te,h(MAX_ORDER+1),pw(0:dims-1)
+
+          !  per-axis order and coefficient extents
+          k1  = k+1
+          nk1 = n-k-1                       ! coefficient count per axis (= nkx1, nky1 at dims=2)
+
+          !  per-axis basis tables: dimension-generic runtime loop over the axes
+          do d=1,dims
+             nkd = n(d)-k1(d)               ! nkx1 / nky1
+             tb  = t(k1(d),d)
+             te  = t(nkd+1,d)
+             l   = k1(d)
+             do i=1,m(d)
+                arg = xg(i,d)
+                if (arg<tb) arg = tb
+                if (arg>te) arg = te
+                l = fp_knot_interval(t(1:n(d),d), arg, l, nkd)
+                h = fpbspl(t(1:n(d),d), n(d), k(d), arg, l)
+                lidx(i,d) = l-k1(d)
+                w(1:k1(d),i,d) = h(1:k1(d))
+             end do
+          end do
+
+          !  ---- dimension-generic evaluation contraction ----
+          !  c is the coefficient tensor (row-major, axis-1 slowest); z is the output value grid (row-
+          !  major, axis-1 slowest). For each output point the value is the tensor contraction of the
+          !  k1(1)x...x k1(dims) coefficient support against the per-axis basis tables w. The innermost
+          !  dot_product runs over the FASTEST axis (axis dims, contiguous stride 1). The support on the
+          !  remaining axes 1..dims-1 is swept by a mixed-radix odometer (radix k1): the support index
+          !  cidx, the coefficient offset coff and the basis partial products pw(0:dims-1) are carried
+          !  incrementally -- O(dims) state, no integer div/mod and no recomputed offsets in the loop.
+          !  At dims=2 the terms and their accumulation order are identical to the original 2-D walk.
+          cstride = fp_grid_strides(dims,nk1)
+          nsupp   = product(k1(1:dims-1))
+          do mout=1,product(m)
+             gidx  = fp_grid_unravel(dims,mout-1,m)                     ! output grid multi-index
+             lbase = [(lidx(gidx(a),a)+1, a=1,dims)]                    ! first coefficient of the support
+             coff0 = fp_grid_index(dims,lbase,cstride)
+
+             !  seed the odometer at the support root (cidx = 1 on every contracted axis)
+             cidx(1:dims-1) = 1
+             coff  = coff0
+             pw(0) = one
+             do a=1,dims-1
+                pw(a) = pw(a-1)*w(cidx(a),gidx(a),a)
+             end do
+
+             sp = zero
+             do q=1,nsupp
+                sp = sp + pw(dims-1)*dot_product(c(coff+1:coff+k1(dims)),w(1:k1(dims),gidx(dims),dims))
+                if (q==nsupp) exit
+                !  advance: bump the fastest axis; on overflow reset it and carry to the next-slower axis
+                do a=dims-1,1,-1
+                   if (cidx(a)<k1(a)) then
+                      cidx(a) = cidx(a)+1
+                      coff    = coff + cstride(a)
+                      do d=a,dims-1               ! refresh partial products from the changed axis upward
+                         pw(d) = pw(d-1)*w(cidx(d),gidx(d),d)
+                      end do
+                      exit
+                   else
+                      cidx(a) = 1                 ! axis wrapped: rewind its offset, carry to a-1
+                      coff    = coff - (k1(a)-1)*cstride(a)
+                   end if
+                end do
+             end do
+             z(mout) = sp
+          end do
+          return
+      end subroutine fpndsp
+
+      !> @brief N-D generalization of bispev: evaluate a tensor-product spline on a grid.
+      !!
+      !! Public flat-workspace front-end to fpndsp (the evaluation kernel). Mirrors bispev: the
+      !! caller supplies flat real `wrk(lwrk)` / integer `iwrk(kwrk)` scratch, which are carved by
+      !! pointer bounds remapping into the padded per-axis basis table `w(maxk1,maxm,dims)` and the
+      !! interval-index matrix `lidx(maxm,dims)` that fpndsp expects (`maxm=maxval(m)`,
+      !! `maxk1=maxval(k)+1`). At `dims=2` this is bit-for-bit identical to bispev.
+      !!
+      !! Minimum workspace: `lwrk >= maxval(m)*(maxval(k)+1)*dims`, `kwrk >= maxval(m)*dims`.
+      !!
+      !! @param[in]  dims  Number of axes (domain dimension)
+      !! @param[in]  t     Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]  n     Number of knots per axis, `n(dims)`
+      !! @param[in]  c     B-spline coefficient tensor, flat row-major (first axis varies slowest)
+      !! @param[in]  k     Spline degree per axis, `k(dims)`
+      !! @param[in]  xg    Per-axis evaluation grids; column \f$ d \f$ is `xg(1:m(d),d)`
+      !! @param[in]  m     Number of evaluation points per axis, `m(dims)`
+      !! @param[out] z     Spline values at grid points, flat row-major (first axis varies slowest)
+      !! @param      wrk   Real workspace, `wrk(lwrk)` (target; carved into the basis table)
+      !! @param[in]  lwrk  Size of `wrk`
+      !! @param      iwrk  Integer workspace, `iwrk(kwrk)` (target; carved into the interval indices)
+      !! @param[in]  kwrk  Size of `iwrk`
+      !! @param[out] ier   FITPACK_OK on success, FITPACK_INPUT_ERROR on bad input/workspace
+      !!
+      !! @see bispev, fpndsp; Dierckx Ch. 2 §2.1.2 (pp. 28-30); todo/fitpack_nd_grids.md (slice 5)
+      pure subroutine ndspev(dims,t,n,c,k,xg,m,z,wrk,lwrk,iwrk,kwrk,ier)
+          integer(FP_DIM),  intent(in)            :: dims
+          integer(FP_SIZE), intent(in)            :: n(dims),k(dims),m(dims),lwrk,kwrk
+          real(FP_REAL),    intent(in)            :: t(:,:),c(:),xg(:,:)
+          real(FP_REAL),    intent(out)           :: z(:)
+          real(FP_REAL),    intent(inout), target :: wrk(lwrk)
+          integer(FP_SIZE), intent(inout), target :: iwrk(kwrk)
+          integer(FP_FLAG), intent(out)           :: ier
+
+          !  ..local scalars..
+          integer(FP_DIM)  :: d
+          integer(FP_SIZE) :: maxm,maxk1,lwest,kwest
+          !  ..workspace views (carved from wrk/iwrk; contiguous by construction)..
+          real(FP_REAL),    pointer, contiguous :: pw(:,:,:)
+          integer(FP_SIZE), pointer, contiguous :: plidx(:,:)
+
+          ier = FITPACK_INPUT_ERROR
+
+          !  workspace sizing: padded per-axis cuboid (the widest axis sets both leading extents)
+          maxm  = maxval(m)
+          maxk1 = maxval(k)+1
+          lwest = maxm*maxk1*dims
+          kwest = maxm*dims
+          if (lwrk<lwest .or. kwrk<kwest) return
+          if (any(m<1)) return
+
+          !  strict monotonicity of each evaluation grid (mirrors bispev's x/y checks)
+          do d=1,dims
+             if (m(d)>1 .and. any(xg(2:m(d),d)<xg(1:m(d)-1,d))) return
+          end do
+
+          ier = FITPACK_OK
+          pw(1:maxk1,1:maxm,1:dims) => wrk(1:lwest)
+          plidx(1:maxm,1:dims)      => iwrk(1:kwest)
+          call fpndsp(dims,t,n,c,k,xg,m,z,pw,plidx)
+          return
+
+      end subroutine ndspev
+
+      !> @brief Evaluate a tensor-product spline at scattered points (any dimension).
+      !!
+      !! Scattered-point counterpart of ndspev (which evaluates on a rectangular grid). A scattered
+      !! point is just a degenerate 1x...x1 grid, so each point is handed to the fpndsp kernel with a
+      !! singleton per-axis grid (one call per point). This keeps a single source of truth for the
+      !! tensor contraction (fpndsp); at `dims=2` it reduces to the classic bivariate scattered
+      !! evaluation. Self-manages its (singleton) basis scratch, so no work arrays are required.
+      !!
+      !! @param[in]  dims  Number of axes (domain dimension)
+      !! @param[in]  t     Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]  n     Number of knots per axis, `n(dims)`
+      !! @param[in]  c     B-spline coefficient tensor, flat row-major (first axis varies slowest)
+      !! @param[in]  k     Spline degree per axis, `k(dims)`
+      !! @param[in]  xg    Point coordinates, `xg(d,i)` = axis-\f$ d \f$ coordinate of point \f$ i \f$, passed
+      !!                   column-major (point \f$ i \f$ = contiguous column, matching curev/parcur). Declared
+      !!                   with a leading singleton node, `xg(1,dims,*)`, so the slice `xg(:,:,i)` is already
+      !!                   the `(1,dims)` grid fpndsp reads; callers pass a plain contiguous `(dims,m)` array.
+      !! @param[in]  m     Number of evaluation points, \f$ m \ge 1 \f$
+      !! @param[out] z     Spline values at the points, `z(m)`
+      !! @param[out] ier   FITPACK_OK on success, FITPACK_INPUT_ERROR on bad input
+      !!
+      !! @see ndspev — gridded variant; fpndsp — tensor-product evaluation kernel
+      pure subroutine ndspeu(dims,t,n,c,k,xg,m,z,ier)
+          integer(FP_DIM),  intent(in)  :: dims
+          integer(FP_SIZE), intent(in)  :: n(dims),k(dims),m
+          real(FP_REAL),    intent(in)  :: t(:,:),c(:),xg(1,dims,*)
+          real(FP_REAL),    intent(out) :: z(m)
+          integer(FP_FLAG), intent(out) :: ier
+
+          integer(FP_SIZE) :: i,mone(dims)
+          !  singleton-grid basis scratch fpndsp fills (one node per point)
+          real(FP_REAL)    :: w(MAX_ORDER+1,1,dims)
+          integer(FP_SIZE) :: lidx(1,dims)
+
+          ier = FITPACK_INPUT_ERROR
+          if (m<1) return
+          ier = FITPACK_OK
+
+          !  a scattered point is a 1x...x1 grid; xg(:,:,i) is already the (1,dims) singleton grid row
+          !  fpndsp reads (xg(node,axis)), so hand each point's slice straight to the kernel -- no copy.
+          mone = 1
+          do i=1,m
+             call fpndsp(dims,t,n,c,k,xg(:,:,i),mone,z(i:i),w,lidx)
+          end do
+          return
+      end subroutine ndspeu
+
+
+      !> @brief Evaluate the non-zero B-splines at a given point.
+      !!
+      !! Computes the \f$ k+1 \f$ non-zero B-splines of degree \f$ k \f$ at the point
+      !! \f$ x \f$ satisfying \f$ \lambda_l \leq x < \lambda_{l+1} \f$, using the
+      !! stable recurrence relation of de Boor and Cox:
+      !!
+      !! \f[
+      !!     N_{i,1}(x) = \begin{cases} 1 & \text{if } \lambda_i \leq x < \lambda_{i+1} \\
+      !!                                 0 & \text{otherwise} \end{cases}
+      !! \f]
+      !! \f[
+      !!     N_{i,l+1}(x) = \frac{x - \lambda_i}{\lambda_{i+l} - \lambda_i} N_{i,l}(x)
+      !!                   + \frac{\lambda_{i+l+1} - x}{\lambda_{i+l+1} - \lambda_{i+1}} N_{i+1,l}(x)
+      !!     \tag{1.24}
+      !! \f]
+      !!
+      !! The result array `h` contains \f$ N_{l-k,k+1}(x), \ldots, N_{l,k+1}(x) \f$
+      !! in positions `h(1:k+1)`. When knots have multiplicity (coincident knots),
+      !! zero weights are used in the recurrence (convention \f$ 0/0 = 0 \f$).
+      !!
+      !! @param[in] t  Knot vector \f$ \lambda_1, \ldots, \lambda_n \f$
+      !! @param[in] n  Length of the knot vector
+      !! @param[in] k  Spline degree
+      !! @param[in] x  Evaluation point, must satisfy \f$ \lambda_l \leq x < \lambda_{l+1} \f$
+      !! @param[in] l  Knot interval index, must satisfy \f$ k \leq l \leq n-k \f$
+      !!
+      !! @return Array of length `MAX_ORDER+1`; positions `1:k+1` contain the
+      !!         \f$ k+1 \f$ non-zero B-spline values.
+      !!
+      !! @note Requires \f$ k \leq l \leq n-k \f$; this is not checked.
+      !!
+      !! @see Dierckx, Ch. 1, §1.3 (pp. 8-11), Eq. 1.22-1.24, 1.30
+      pure function fpbspl(t,n,k,x,l) result(h)
+         integer(FP_SIZE), intent(in)  :: n,k,l
+         real(FP_REAL), intent(in)  :: x,t(n)
+         real(FP_REAL) :: h(MAX_ORDER+1)
+
+         ! Local variables
+         real(FP_REAL) :: f,hh(MAX_ORDER+1)
+         integer(FP_SIZE) :: i,j,li,lj
+
+         h(1) = one
+         do j=1,k
+           hh(1:j) = h(1:j)
+           h(1) = zero
+           do i=1,j
+             li = l+i
+             lj = li-j
+             if (not_equal(t(li),t(lj))) then
+                f = hh(i)/(t(li)-t(lj))
+                h(i)   = h(i)+f*(t(li)-x)
+                h(i+1) = f*(x-t(lj))
+             else
+                h(i+1) = zero
+             endif
+           end do
+         end do
+
+      end function fpbspl
+
+
+      !> Find knot interval index l such that t(l) <= x < t(l+1).
+      !> Uses hybrid search: linear for small ranges, binary for large.
+      !> This replaces the repeated pattern:
+      !>   do while (x >= t(l+1) .and. l /= l_max)
+      !>       l = l + 1
+      !>   end do
+      !> @brief Find the knot interval containing a given value.
+      !!
+      !! Returns the index \f$ l \f$ such that \f$ t_l \le x < t_{l+1} \f$, using linear search
+      !! for small ranges (or warm starts) and binary search otherwise.
+      !!
+      !! @param[in]  t        Knot array (non-decreasing).
+      !! @param[in]  x        Value to locate.
+      !! @param[in]  l_start  Left bound for the search.
+      !! @param[in]  l_max    Right bound for the search.
+      !! @return     Index of the interval containing `x`.
+      pure function fp_knot_interval(t, x, l_start, l_max) result(l)
+          real(FP_REAL),    intent(in) :: t(:)
+          real(FP_REAL),    intent(in) :: x
+          integer(FP_SIZE), intent(in) :: l_start
+          integer(FP_SIZE), intent(in) :: l_max
+          integer(FP_SIZE) :: l
+
+          integer(FP_SIZE), parameter :: LINEAR_THRESHOLD = 8
+          integer(FP_SIZE) :: lo, hi, mid
+
+          ! For small ranges, use linear search (also optimal for warm starts)
+          if (l_max - l_start <= LINEAR_THRESHOLD) then
+              l = l_start
+              do while (x >= t(l+1) .and. l < l_max)
+                  l = l + 1
+              end do
+              return
+          end if
+
+          ! Handle boundary cases
+          if (x < t(l_start+1)) then
+              l = l_start
+              return
+          end if
+          if (x >= t(l_max)) then
+              l = l_max
+              return
+          end if
+
+          ! Binary search: find largest l such that t(l+1) <= x, then l is the interval
+          lo = l_start
+          hi = l_max
+          do while (hi > lo)
+              mid = (lo + hi) / 2
+              if (t(mid+1) <= x) then
+                  lo = mid + 1
+              else
+                  hi = mid
+              end if
+          end do
+          l = lo
+      end function fp_knot_interval
+
+
+      !> @brief Verify knot positions against data points (Schoenberg-Whitney check).
+      !!
+      !! Checks that the knots \f$ \lambda_j \f$, \f$ j = 1, \ldots, n \f$, of a
+      !! spline of degree \f$ k \f$ satisfy all conditions required for a well-posed
+      !! least-squares problem with data points \f$ x_i \f$, \f$ i = 1, \ldots, m \f$.
+      !!
+      !! The conditions verified are:
+      !!
+      !! 1. \f$ k+1 \leq n-k-1 \leq m \f$
+      !! 2. \f$ \lambda_1 \leq \cdots \leq \lambda_{k+1} \f$ and
+      !!    \f$ \lambda_{n-k} \leq \cdots \leq \lambda_n \f$ (boundary knot monotonicity)
+      !! 3. \f$ \lambda_{k+2} < \lambda_{k+3} < \cdots < \lambda_{n-k} \f$ (interior knots
+      !!    strictly increasing)
+      !! 4. \f$ \lambda_{k+1} \leq x_1 \f$ and \f$ x_m \leq \lambda_{n-k} \f$
+      !! 5. The Schoenberg-Whitney conditions: there exists a subset of data points
+      !!    \f$ y_j \f$ such that
+      !!    \f[
+      !!        \lambda_j < y_j < \lambda_{j+k+1}, \quad j = 1, \ldots, n-k-1
+      !!        \tag{4.5}
+      !!    \f]
+      !!    guaranteeing full rank of the observation matrix.
+      !!
+      !! @param[in] x  Data abscissae, strictly increasing: \f$ x_1 < \cdots < x_m \f$
+      !! @param[in] m  Number of data points
+      !! @param[in] t  Knot vector \f$ \lambda_1, \ldots, \lambda_n \f$
+      !! @param[in] n  Number of knots
+      !! @param[in] k  Spline degree
+      !!
+      !! @return `FITPACK_OK` if all conditions hold, `FITPACK_INPUT_ERROR` otherwise.
+      !!
+      !! @see Dierckx, Ch. 4, §4.1.1 (pp. 53-55), Eq. 4.5, 4.17
+      pure integer(FP_FLAG) function fpchec(x,m,t,n,k) result(ier)
+         integer(FP_SIZE), intent(in)  :: m,n,k
+         real(FP_REAL), intent(in) :: x(m),t(n)
+
+         ! Local variables
+         integer(FP_SIZE) :: i,j,k1,k2,l,nk1,nk2,nk3
+         real(FP_REAL) :: tj,tl
+
+         ! Init sizes
+         k1 = k+1
+         k2 = k1+1
+         nk1 = n-k1
+         nk2 = nk1+1
+
+         ier = FITPACK_INPUT_ERROR
+
+         ! 1) k+1 <= n-k-1 <= m
+         if(nk1<k1 .or. nk1>m) return
+
+         ! 2) monotonicity
+         !    t(1) <= t(2) <= ... <= t(k+1)
+         !    t(n-k) <= t(n-k+1) <= ... <= t(n)
+
+         j = n
+         monotonic: do i=1,k
+            if(t(i)>t(i+1)) return
+            if(t(j)<t(j-1)) return
+            j = j-1
+         end do monotonic
+
+         ! 3) t(k+1) < t(k+2) < ... < t(n-k)
+         do i=k2,nk2
+            if(t(i)<=t(i-1)) return
+         end do
+
+         ! 4) t(k+1) <= x(i) <= t(n-k)
+         ! 5) schoenberg and whitney conditions: they must hold for at least one subset of data points, i.e.
+         !    there must be a subset of data points y(j) such that
+         !         t(j) < y(j) < t(j+k+1), j=1,2,...,n-k-1
+
+         if(x(1)<t(k1) .or. x(m)>t(nk2)) return
+         if(x(1)>=t(k2) .or. x(m)<=t(nk1)) return
+
+         i   = 1
+         l   = k2
+         nk3 = nk1-1
+
+         if (nk3>=2) then
+             do j=2,nk3
+                tj = t(j)
+                l  = l+1
+                tl = t(l)
+                do while (i<m .and. x(i)<=tj)
+                    i = i+1
+                    if(i>=m) return
+                end do
+                if (x(i)>=tl) return
+             end do
+         endif
+
+         ! All checks passed
+         ier = FITPACK_OK
+
+      end function fpchec
+
+
+      !> @brief Verify knot positions for a constrained spline (Schoenberg-Whitney check).
+      !!
+      !! Checks that the knots \f$ \lambda_j \f$, \f$ j = 1, \ldots, n \f$, of a
+      !! spline of degree \f$ k \f$ with \f$ i_b \f$ derivative constraints at
+      !! \f$ x_1 \f$ and \f$ i_e \f$ constraints at \f$ x_m \f$, satisfy all conditions
+      !! required for a well-posed least-squares problem:
+      !!
+      !! 1. \f$ k+1 \leq n-k-1 \leq m + \max(0, i_b - 1) + \max(0, i_e - 1) \f$
+      !! 2. Boundary knot monotonicity
+      !! 3. Interior knots strictly increasing
+      !! 4. \f$ \lambda_{k+1} \leq x_1 \f$ and \f$ x_m \leq \lambda_{n-k} \f$
+      !! 5. Schoenberg-Whitney conditions (Eq. 4.5) for the subset of
+      !!    unconstrained equations
+      !!
+      !! @param[in] x   Data abscissae, strictly increasing
+      !! @param[in] m   Number of data points
+      !! @param[in] t   Knot vector \f$ \lambda_1, \ldots, \lambda_n \f$
+      !! @param[in] n   Number of knots
+      !! @param[in] k   Spline degree
+      !! @param[in] ib  Number of derivative constraints at \f$ x_1 \f$
+      !! @param[in] ie  Number of derivative constraints at \f$ x_m \f$
+      !!
+      !! @return `FITPACK_OK` if all conditions hold, `FITPACK_INPUT_ERROR` otherwise.
+      !!
+      !! @see Dierckx, Ch. 8, §8.2 (pp. 141-146): constrained curve fitting
+      !! @see Dierckx, Ch. 4, §4.1.1 (pp. 53-55), Eq. 4.5
+      pure integer function fpched(x,m,t,n,k,ib,ie) result(ier)
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: m,n,k,ib,ie
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: x(m),t(n)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ib1,ie1,j,jj,k1,k2,l,nk1,nk2,nk3
+      real(FP_REAL) :: tj,tl
+      !  ..
+      k1 = k+1
+      k2 = k1+1
+      nk1 = n-k1
+      nk2 = nk1+1
+      ib1 = max(ib-1,0)
+      ie1 = max(ie-1,0)
+      ier = FITPACK_INPUT_ERROR
+
+      ! 1) k+1 <= n-k-1 <= m + max(0,ib-1) + max(0,ie-1)
+      if(nk1<k1 .or. nk1>(m+ib1+ie1)) return
+
+      ! 2) t(1)   <= t(2)     <= ... <= t(k+1)
+      !    t(n-k) <= t(n-k+1) <= ... <= t(n)
+      j = n
+      do i=1,k
+        if(t(i)>t(i+1)) return
+        if(t(j)<t(j-1)) return
+        j = j-1
+      end do
+
+      ! 3) t(k+1) < t(k+2) < ... < t(n-k)
+      do i=k2,nk2
+        if(t(i)<=t(i-1)) return
+      end do
+
+      ! 4) t(k+1) <= x(i) <= t(n-k)
+      if(x(1)<t(k1) .or. x(m)>t(nk2)) return
+
+      ! 5) the conditions specified by schoenberg and whitney must hold for at least one subset
+      !    of data points, i.e. there must be a subset of data points y(j) such that
+      !    t(j) < y(j) < t(j+k+1), j=1+ib1,2+ib1,...,n-k-1-ie1
+      !       with ib1 = max(0,ib-1), ie1 = max(0,ie-1)
+      if (x(1)>=t(k2) .or. x(m)<=t(nk1)) return
+      i  = 1
+      jj = 2+ib1
+      l = jj+k
+      nk3 = nk1-1-ie1
+      if(nk3>=jj) then
+          do j=jj,nk3
+            tj = t(j)
+            l = l+1
+            tl = t(l)
+            do
+              i = i+1
+              if (i>=m) return
+              if (x(i)>tj) exit
+            end do
+            if(x(i)>=tl) return
+          end do
+      endif
+
+      ! Success! all checks passed
+      ier = FITPACK_OK
+      return
+      end function fpched
+
+      !> @brief Verify knot positions for a periodic spline (Schoenberg-Whitney check).
+      !!
+      !! Checks that the knots \f$ \lambda_j \f$, \f$ j = 1, \ldots, n \f$, of a
+      !! periodic spline of degree \f$ k \f$ satisfy all conditions required for a
+      !! well-posed least-squares problem with data points \f$ x_i \f$:
+      !!
+      !! 1. \f$ k+1 \leq n-k-1 \leq m+k-1 \f$
+      !! 2. Boundary knot monotonicity
+      !! 3. Interior knots strictly increasing
+      !! 4. \f$ \lambda_{k+1} \leq x_1 \f$ and \f$ x_m \leq \lambda_{n-k} \f$
+      !! 5. Schoenberg-Whitney conditions for the periodic basis: a subset
+      !!    \f$ y_j \f$ satisfying \f$ \lambda_j < y_j < \lambda_{j+k+1} \f$ must
+      !!    exist, where values may wrap around with period
+      !!    \f$ T = \lambda_{n-k} - \lambda_{k+1} \f$
+      !!
+      !! @param[in] x  Data abscissae, strictly increasing
+      !! @param[in] m  Number of data points
+      !! @param[in] t  Knot vector \f$ \lambda_1, \ldots, \lambda_n \f$
+      !! @param[in] n  Number of knots
+      !! @param[in] k  Spline degree
+      !!
+      !! @return `FITPACK_OK` if all conditions hold, `FITPACK_INPUT_ERROR` otherwise.
+      !!
+      !! @see Dierckx, Ch. 6, §6.1 (pp. 95-100): periodic spline fitting
+      !! @see Dierckx, Ch. 4, §4.1.1 (pp. 53-55), Eq. 4.5
+      pure integer(FP_FLAG) function fpchep(x,m,t,n,k) result(ier)
+          !  ..scalar arguments..
+          integer(FP_SIZE), intent(in) :: m,n,k
+          !  ..array arguments..
+          real(FP_REAL), intent(in) :: x(m),t(n)
+          !  ..local scalars..
+          integer(FP_SIZE) :: i,i1,i2,j,j1,k1,k2,l,l1,l2,mm,m1,nk1,nk2
+          real(FP_REAL) :: per,tj,tl,xi
+          !  ..
+          k1  = k+1
+          k2  = k1+1
+          nk1 = n-k1
+          nk2 = nk1+1
+          m1  = m-1
+          ier = FITPACK_INPUT_ERROR
+
+          ! 1) k+1 <= n-k-1 <= m+k-1
+          if(nk1<k1 .or. n>m+2*k) return
+
+          ! 2) t(1) <= t(2) <= ... <= t(k+1)
+          !    t(n-k) <= t(n-k+1) <= ... <= t(n)
+          j = n
+          do i=1,k
+             if (t(i)>t(i+1)) return
+             if (t(j)<t(j-1)) return
+             j = j-1
+          end do
+
+          ! 3) t(k+1) < t(k+2) < ... < t(n-k)
+          do i=k2,nk2
+             if (t(i)<=t(i-1)) return
+          end do
+
+          ! 4) t(k+1) <= x(i) <= t(n-k)
+          if(x(1)<t(k1) .or. x(m)>t(nk2)) return
+
+          ! 5) the conditions specified by schoenberg and whitney must hold for at least one subset
+          !    of data points, i.e. there must be a subset of data points y(j) such that
+          !        t(j) < y(j) < t(j+k+1), j=k+1,...,n-k-1
+          l1 = k1
+          l2 = 1
+          outer: do l=1,m
+             xi = x(l)
+             do while (.not.(xi<t(l1+1) .or. l==nk1))
+                l1 = l1+1
+                l2 = l2+1
+                if (l2>k1) exit outer
+             end do
+          end do outer
+          if (l2<=k1) l = m
+
+          per = t(nk2)-t(k1)
+          subset_start: do i1=2,l
+             i = i1-1
+             mm = i+m1
+             subset_inner: do j=k1,nk1
+                tj = t(j)
+                j1 = j+k1
+                tl = t(j1)
+                xi = -huge(xi)
+                do while (xi<=tj)
+                    i = i+1
+                    if (i>mm) cycle subset_start
+                    i2 = i-m1
+
+                    if (i2<=0) then
+                      xi = x(i)
+                    else
+                      xi = x(i2)+per
+                    endif
+                end do
+                if(xi>=tl) cycle subset_start
+             end do subset_inner
+
+             ! A full Shoenberg-Whitney subset is found
+             ier = FITPACK_OK
+             return
+          end do subset_start
+
+          ! No subsets found: return with error
+
+      end function fpchep
+
+
+      !> @brief Core algorithm for closed (periodic) parametric curve fitting.
+      !!
+      !! Fits a \f$ d \f$-dimensional closed parametric spline curve where
+      !! \f$ s(u_1) = s(u_m) \f$ and all derivatives match at the closure point.
+      !! The periodicity constraint wraps the last \f$ k \f$ B-spline columns
+      !! into the first \f$ k \f$, creating the block-triangular structure
+      !! (Eq. 6.13):
+      !!
+      !! \f[
+      !!     \begin{pmatrix} R_{11}^* & R_{12}^* \\ 0 & R_{22}^* \end{pmatrix}
+      !!     \tag{6.13}
+      !! \f]
+      !!
+      !! which is factored using two-matrix Givens rotations
+      !! (fp_rotate_row_2mat_vec). The smoothing-parameter search follows
+      !! the same rational interpolation scheme as fpcurf.
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue
+      !! @param[in]     idim    Number of curve dimensions \f$ d \f$
+      !! @param[in]     m       Number of data points
+      !! @param[in]     u       Parameter values, length `m`
+      !! @param[in]     mx      Length of `x` (\f$ = m \cdot d \f$)
+      !! @param[in]     x       Data coordinates, interleaved, length `mx`
+      !! @param[in]     w       Data weights, length `m`
+      !! @param[in]     k       Spline degree
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nest    Max knots
+      !! @param[in]     tol     Tolerance for smoothing condition
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     k1      \f$ k + 1 \f$
+      !! @param[in]     k2      \f$ k + 2 \f$
+      !! @param[in,out] n       Number of knots
+      !! @param[in,out] t       Knot vector, length `nest`
+      !! @param[in]     nc      Length of coefficient array `c`
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fpint   Residual sums per knot interval
+      !! @param[in,out] z       Work: transformed RHS
+      !! @param[in,out] a1      Work: band matrix \f$ R_{11}^* \f$
+      !! @param[in,out] a2      Work: band matrix \f$ R_{12}^*/R_{22}^* \f$
+      !! @param[in,out] b       Work: smoothing matrix
+      !! @param[in,out] g1      Work: band matrix copy
+      !! @param[in,out] g2      Work: band matrix copy
+      !! @param[in,out] q       Work: B-spline values
+      !! @param[in,out] nrdata  Interior data-point counts
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 6, §6.1-6.2 (pp. 95-112), Eq. 6.1-6.13
+      !! @see fp_rotate_row_2mat_vec — two-matrix Givens rotation
+      pure subroutine fpclos(iopt,idim,m,u,mx,x,w,k,s,nest,tol, &
+                             maxit,k1,k2,n,t,nc,c,fp,fpint,z,a1,a2,b,g1,g2,q,nrdata,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)    :: s,tol
+      real(FP_REAL),    intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,idim,m,mx,k,nest,maxit,k1,k2,nc
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(inout) :: ier
+
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)    :: u(m),x(mx),w(m)
+      real(FP_REAL),    intent(inout) :: t(nest),c(nc),fpint(nest),z(nc),a1(nest,k1), &
+                                         a2(nest,k),b(nest,k2),g1(nest,k2),g2(nest,k1),q(m,k1)
+      integer(FP_SIZE), intent(inout) :: nrdata(nest)
+
+      !  ..local scalars..
+      real(FP_REAL) :: acc,cos,d1,fac,fpart,fpms,fpold,fp0,f1,f2,f3,p,per,pinv,p1,p2,p3,sin,store,&
+                     term,ui,wi,rn
+      integer(FP_SIZE) :: i,ik,it,iter,i1,i2,j,jj,jk,jper,j1,j2,kk,kk1,k3,l,l0,l1,l5,mm,m1,new,&
+                          nk1,nk2,nmax,nmin,nplus,npl1,nrint,n10,n11,n7,n8
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1),h1(DEGREE_5+2),h2(DEGREE_5+1),xi(MAX_IDIM)
+      logical(FP_BOOL) :: done,check1,check3,success
+
+      fpold = zero
+      fp0   = zero
+      nplus = 0
+      nmax  = 0
+      acc   = epsilon(zero)
+
+      ! **********************************************************************************************
+      !  part 1: determination of the number of knots and their position
+      ! **********************************************************************************************
+      !  given a set of knots we compute the least-squares closed curve sinf(u). if the sum
+      !  f(p=inf) <= s we accept the choice of knots.
+      !  if iopt=-1 sinf(u) is the requested curve
+      !  if iopt=0 or iopt=1 we check whether we can accept the knots:
+      !     if fp <=s we will continue with the current set of knots.
+      !     if fp > s we will increase the number of knots and compute the orresponding least-squares
+      !        curve until finally fp<=s.
+      !  the initial choice of knots depends on the value of s and iopt. if s=0 we have spline
+      !     interpolation; in that case the number of knots equals nmax = m+2*k.                                        c
+      !     if s > 0 and iopt=0 we first compute the least-squares polynomial curve of degree k;
+      !        n = nmin = 2*k+2. since s(u) must be periodic, s(u) reduces to a fixed point.                        c
+      !  if iopt=1 we start with the set of knots found at the last call of the routine, except for
+      !     the case that s > fp0; then we compute directly the least-squares polynomial curve.
+      ! **********************************************************************************************
+
+      m1   = m-1
+      kk   = k
+      kk1  = k1
+      k3   = 3*k+1
+      nmin = 2*k1
+
+      !  determine the length of the period of the splines.
+      per = u(m)-u(1)
+      if (iopt>=0) then
+
+          ! calculation of acc, the absolute tolerance for the root of f(p)=s.
+          acc = tol*s
+
+          ! determine nmax, the number of knots for periodic spline interpolation
+          nmax = m+2*k
+
+          interp_or_fit: if (s<=zero .and. nmax/=nmin) then
+
+              ! if s=0, s(u) is an interpolating curve.
+              n = nmax
+
+              ! test whether the required storage space exceeds the available one.
+              if (n>nest) then
+                  ier = FITPACK_INSUFFICIENT_STORAGE
+                  return
+              end if
+
+              ! find the position of the interior knots in case of interpolation.
+              call fpclos_reset_interp(idim,k,m,mx,n,nc,nest,kk,kk1,u,x,t,c,fp,per,fp0,s,fpint,nrdata,done)
+
+              if (done) then
+                  ier = FITPACK_INTERPOLATING_OK
+                  return
+              endif
+
+          else interp_or_fit
+
+              !  if s > 0 our initial choice depends on the value of iopt.
+              !  if iopt=0 or iopt=1 and s>=fp0, we start computing the least-squares
+              !  polynomial curve. (i.e. a constant point).
+              !  if iopt=1 and fp0>s we start computing the least-squares closed
+              !  curve according the set of knots found at the last call of the
+              !  routine.
+              if (iopt/=0 .and. n/=nmin) then
+                  fp0   = fpint(n)
+                  fpold = fpint(n-1)
+                  nplus = nrdata(n)
+              endif
+
+              !  the case that s(u) is a fixed point is treated separetely.
+              !  fp0 denotes the corresponding sum of squared residuals.
+              if (iopt==0 .or. (iopt/=0 .and. s>=fp0)) then
+                  fp0 = zero
+                  d1  = zero
+                  z(1:idim) = zero
+                  jj  = 0
+                  do it=1,m1
+                     wi = w(it)
+                     call fpgivs(wi,d1,cos,sin)
+                     do j=1,idim
+                         jj = jj+1
+                         fac = wi*x(jj)
+                         call fprota(cos,sin,fac,z(j))
+                         fp0 = fp0+fac**2
+                     end do
+                  end do
+
+                  z(1:idim) = z(1:idim)/d1
+
+                  ! test whether that fixed point is a solution of our problem.
+                  fpms = fp0-s
+                  is_constant: if (fpms<acc .or. nmax==nmin) then
+
+                      ier = FITPACK_LEASTSQUARES_OK
+
+                      !  the point (z(1),z(2),...,z(idim)) is a solution of our problem.
+                      !  a constant function is a spline of degree k with all b-spline
+                      !  coefficients equal to that constant.
+                      do i=1,k1
+                         rn = k1-i
+                         t(i) = u(1)-rn*per
+                         j = i+k1
+                         rn = i-1
+                         t(j) = u(m)+rn*per
+                      end do
+
+                      n = nmin
+                      forall(j=1:idim,i=1:k1) c(n*(j-1)+i) = z(j)
+
+                      fp = fp0
+                      fpint(n-1:n) = [zero,fp0]
+                      nrdata(n) = 0
+                      return
+
+                  end if is_constant
+
+                  fpold = fp0
+
+                  !  test whether the required storage space exceeds the available one.
+                  if (n>=nest) then
+                     ier = FITPACK_INSUFFICIENT_STORAGE
+                     return
+                  end if
+
+                  !  start computing the least-squares closed curve with one interior knot.
+                  nplus = 1
+                  n = nmin+1
+                  mm = (m+1)/2
+                  t(k2) = u(mm)
+                  nrdata(1) = mm-2
+                  nrdata(2) = m1-mm
+              endif
+
+          endif interp_or_fit
+
+      endif
+
+      !  main loop for the different sets of knots. m is a save upper
+      !  bound for the number of trials.
+      iter = 0
+      find_knots: do while (iter<m)
+
+          ! Increment iteration
+          iter = iter+1
+
+          ! find nrint, the number of knot intervals.
+          nrint = n-nmin+1
+
+          ! find the position of the additional knots which are needed for
+          !  the b-spline representation of s(u). if we take
+          !      t(k+1) = u(1), t(n-k) = u(m)
+          !      t(k+1-j) = t(n-k-j) - per, j=1,2,...k
+          !      t(n-k+j) = t(k+1+j) + per, j=1,2,...k
+          !  then s(u) will be a smooth closed curve if the b-spline
+          !  coefficients satisfy the following conditions
+          !      c((i-1)*n+n7+j) = c((i-1)*n+j), j=1,...k,i=1,2,...,idim (**)
+          !  with n7=n-2*k-1.
+          t(k1)  = u(1)
+          nk1    = n-k1
+          nk2    = nk1+1
+          t(nk2) = u(m)
+          do j=1,k
+              i1 = nk2+j
+              i2 = nk2-j
+              j1 = k1+j
+              j2 = k1-j
+              t(i1) = t(j1)+per
+              t(j2) = t(i2)-per
+          end do
+
+          !  compute the b-spline coefficients of the least-squares closed curve sinf(u). the
+          !  observation matrix a is built up row by row while taking into account condition (**)
+          !  and is reduced to triangular form by givens transformations.
+          !  at the same time fp=f(p=inf) is computed.
+          !  the n7 x n7 triangularised upper matrix a has the form
+          !            ! a1 '    !
+          !        a = !    ' a2 !
+          !            ! 0  '    !
+          !  with a2 a n7 x k matrix and a1 a n10 x n10 upper triangular matrix of bandwidth k+1 (
+          !  (n10 = n7-k).
+          !  initialization.
+          z(1:nc) = zero
+          a1(1:nk1,1:kk1) = zero
+          n7   = nk1-k
+          n10  = n7-kk
+          jper = 0
+          fp   = zero
+          l    = k1
+
+          get_coefs: do it=1,m1
+              ! fetch the current data point u(it),x(it)
+              ui = u(it)
+              wi = w(it)
+              xi(1:idim) = wi*x(idim*(it-1)+1:idim*it)
+
+              ! search for knot interval t(l) <= ui < t(l+1).
+              l = fp_knot_interval(t, ui, l, nk1)
+
+              ! evaluate the (k+1) non-zero b-splines at ui and store them in q.
+              h = fpbspl(t,n,k,ui,l)
+
+              q(it,1:k1) = h(1:k1)
+              h(1:k1)    = h(1:k1)*wi
+
+              ! test whether the b-splines nj,k+1(u),j=1+n7,...nk1 are all zero at ui
+              l5 = l-k1
+
+              all_zero: if (l5>=n10) then
+
+                  ! initialize the matrix a2.
+                  if (jper==0) then
+                      a2(1:n7,1:kk) = zero
+                      jk = n10+1
+                      do i=1,kk
+                         ik = jk
+                         do j=1,kk1
+                            if (ik<=0) exit
+                            a2(ik,i) = a1(ik,j)
+                            ik = ik-1
+                         end do
+                         jk = jk+1
+                      end do
+                      jper = 1
+                  endif
+
+                  ! if one of the b-splines nj,k+1(u),j=n7+1,...nk1 is not zero at ui we take account
+                  ! of condition (**) for setting up the new row of the observation matrix a. this row
+                  ! is stored in the arrays h1 (the part with respect to a1) and h2 (the part with
+                  ! respect to a2).
+                  h1(:kk1) = zero
+                  h2(:kk)  = zero
+                  j  = l5-n10
+                  do i=1,kk1
+                     j  = j+1
+                     l0 = j
+                     l1 = l0-kk
+
+                     do while (l1>max(0,n10))
+                       l0 = l1-n10
+                       l1 = l0-kk
+                     end do
+                     if (l1>0) then
+                        h1(l1) = h(i)
+                     else
+                        h2(l0) = h2(l0)+h(i)
+                     end if
+                  end do
+
+                  ! rotate the new row of the observation matrix into triangle
+                  ! by givens transformations.
+                  call fp_rotate_row_2mat_vec(h1, kk1, h2, kk, a1, a2, nest, xi, z, 1, n10, n, idim)
+
+              else all_zero
+
+                  ! rotation of the new row of the observation matrix into triangle in case
+                  ! the b-splines nj,k+1(u),j=n7+1,...n-k-1 are all zero at ui.
+                  call fp_rotate_row_vec(h, kk1, a1, nest, xi, z, l5, n, idim)
+
+              endif all_zero
+
+              ! add contribution of this row to the sum of squares of residual
+              ! right hand sides.
+              fp = fp + sum(xi(1:idim)**2)
+
+          end do get_coefs
+
+          fpint(n-1:n) = [fpold,fp0]
+          nrdata(n) = nplus
+
+          ! backward substitution to obtain the b-spline coefficients .
+          j1 = 1
+          do j2=1,idim
+             c(j1:j1+n7-1) = fpbacp(a1,a2,z(j1),n7,kk,kk1,nest)
+             j1 = j1+n
+          end do
+
+          ! calculate from condition (**) the remaining coefficients.
+          do i=1,k
+              j1 = i
+              do j=1,idim
+                  j2 = j1+n7
+                  c(j2) = c(j1)
+                  j1 = j1+n
+              end do
+          end do
+
+          ! test whether the approximation sinf(u) is an acceptable solution.
+          fpms = fp-s
+          if (iopt<0 .or. abs(fpms)<acc) return
+
+          ! if f(p=inf)<s accept the choice of knots.
+          if (fpms<zero) exit find_knots
+
+          ! if n=nmax, sinf(u) is an interpolating curve.
+          if (n==nmax) then
+             ier = FITPACK_INTERPOLATING_OK
+             return
+          end if
+
+          ! increase the number of knots.
+          ! if n=nest we cannot increase the number of knots because of the
+          ! storage capacity limitation.
+          if (n==nest) then
+              ier = FITPACK_INSUFFICIENT_STORAGE
+              return
+          end if
+
+          ! determine the number of knots nplus we are going to add.
+          rn    = nplus
+          npl1  = nplus*ITWO
+          if (fpold-fp>acc) npl1 = fp_knots_to_add(rn,fpms,fpold-fp) ! guard the division: skip it when fpold-fp<=acc
+          nplus = min(nplus*2,max(npl1,nplus/2,1))
+          fpold = fp
+
+          ! compute the sum of squared residuals for each knot interval
+          ! t(j+k) <= ui <= t(j+k+1) and store it in fpint(j),j=1,2,...nrint.
+          fpart = zero
+          i = 1
+          l = k1
+          jj = 0
+          do it=1,m1
+              if (u(it)>=t(l)) then
+                 new = 1
+                 l = l+1
+              endif
+              term = zero
+              l0 = l-k2
+              do j2=1,idim
+                 fac = zero
+                 j1 = l0
+                 do j=1,k1
+                   j1 = j1+1
+                   fac = fac+c(j1)*q(it,j)
+                 end do
+                 jj = jj+1
+                 term = term+(w(it)*(fac-x(jj)))**2
+                 l0 = l0+n
+              end do
+              fpart = fpart+term
+              if (new/=0) then
+                 if (l>k2) then
+                     store = term*half
+                     fpint(i) = fpart-store
+                     i = i+1
+                     fpart = store
+                 else
+                     fpint(nrint) = term
+                 end if
+                 new = 0
+              endif
+          end do
+          fpint(nrint) = fpint(nrint)+fpart
+
+          add_new_knots: do l=1,nplus
+              ! add a new knot
+              call fpknot(u,m,t,n,fpint,nrdata,nrint,nest,IONE)
+
+              ! if n=nmax we locate the knots as for interpolation
+              if (n==nmax) then
+                 call fpclos_reset_interp(idim,k,m,mx,n,nc,nest,kk,kk1,u,x,t,c,fp,per,fp0,s,fpint,nrdata,done)
+
+                 if (done) then
+                    ier = FITPACK_INTERPOLATING_OK
+                    return
+                 endif
+
+                 ! Restart iteration
+                 iter = 0
+                 cycle find_knots
+
+              endif
+
+              ! test whether we cannot further increase the number of knots.
+              if (n==nest) exit add_new_knots
+          end do add_new_knots
+
+      !  restart the computations with the new set of knots.
+      end do find_knots
+
+      ! *****
+      !  part 2: determination of the smoothing closed curve sp(u).
+      ! *****
+      !  we have determined the number of knots and their position.
+      !  we now compute the b-spline coefficients of the smoothing curve sp(u). the observation matrix
+      !  a is extended by the rows of matrix b expressing that the kth derivative discontinuities of
+      !  sp(u) at the interior knots t(k+2),...t(n-k-1) must be zero. the corresponding weights of
+      !  these additional rows are set to 1/p. iteratively we then have to determine the value of p
+      !  such that f(p), the sum of squared residuals be = s. we already know that the least-squares
+      !  polynomial curve corresponds to p=0, and that the least-squares periodic spline curve
+      !  corresponds to p=infinity. the iteration process which is proposed here, makes use of rational
+      !  interpolation. since f(p) is a convex and strictly decreasing function of p, it can be
+      !  approximated by a rational function r(p) = (u*p+v)/(p+w). three values of p(p1,p2,p3) with
+      !  corresponding values of f(p) (f1=f(p1)-s,f2=f(p2)-s,f3=f(p3)-s) are used to calculate the new
+      !  value of p such that r(p)=s. convergence is guaranteed by taking f1>0 and f3<zero
+      ! *****
+
+      !  evaluate the discontinuity jump of the kth derivative of the b-splines at the knots
+      !  t(l),l=k+2,...n-k-1 and store in b.
+      call fpdisc(t,n,k2,b,nest)
+
+      !  initial value for p.
+      p1  = zero
+      f1  = fp0-s
+      p3  = -one
+      f3  = fpms
+      n11 = n10-1
+      n8  = n7-1
+      p   = zero
+      l   = n7
+      do i=1,k
+         j = k+1-i
+         p = p+a2(l,j)
+         l = l-1
+         if (l==0) exit
+      end do
+      if (l>0) p = p + sum(a1(1:n10,1))
+      rn   = n7
+      p    = rn/p
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+
+      !  iteration process to find the root of f(p) = s.
+      find_root: do iter=1,maxit
+          !  form the matrix g  as the matrix a extended by the rows of matrix b.
+          !  the rows of matrix b with weight 1/p are rotated into
+          !  the triangularised observation matrix a.
+          !  after triangularisation our n7 x n7 matrix g takes the form
+          !            ! g1 '    !
+          !        g = !    ' g2 !
+          !            ! 0  '    !
+          !  with g2 a n7 x (k+1) matrix and g1 a n11 x n11 upper triangular
+          !  matrix of bandwidth k+2. ( n11 = n7-k-1)
+          pinv = one/p
+          ! store matrix a into g
+          c(:nc)         = z(:nc)
+          g1(1:n7,1:k1)  = a1(1:n7,1:k1)
+          g1(1:n7,k2)    = zero
+          g2(1:n7,1)     = zero
+          g2(1:n7,2:k1)  = a2(1:n7,1:k)
+
+          l = n10
+          do j=1,k1
+            if (l<=0) exit
+            g2(l,1) = a1(l,j)
+            l = l-1
+          end do
+
+          n8_rows: do it=1,n8
+             ! fetch a new row of matrix b and store it in the arrays h1 (the part
+             ! with respect to g1) and h2 (the part with respect to g2).
+             xi(:idim) = zero
+             h1(:k2) = zero
+             h2(:k1) = zero
+             if (it<=n11) then
+                 l = it
+                 l0 = it
+                 storeh2: do j=1,k2
+                    if (l0==n10) then
+                       l0 = 1
+                       do l1=j,k2
+                          h2(l0) = b(it,l1)*pinv
+                          l0 = l0+1
+                       end do
+                       exit storeh2
+                    end if
+                    h1(j) = b(it,j)*pinv
+                    l0 = l0+1
+                 end do storeh2
+
+             else ! it>n11
+
+                l = 1
+                i = it-n10
+                do j=1,k2
+                    i = i+1
+                    l0 = i
+                    l1 = l0-k1
+                    do while (l1>max(0,n11))
+                       l0 = l1-n11
+                       l1 = l0-k1
+                    end do
+                    if (l1>0) then
+                       h1(l1) = b(it,j)*pinv
+                    else
+                       h2(l0) = h2(l0)+b(it,j)*pinv
+                    endif
+                end do
+
+             endif
+
+             ! rotate this row into triangle by givens transformations
+             call fp_rotate_row_2mat_vec(h1, k2, h2, k1, g1, g2, nest, xi, c, l, n11, n, idim)
+        end do n8_rows
+
+        ! backward substitution to obtain the b-spline coefficients
+        j1 = 1
+        do j2=1,idim
+           c(j1:j1+n7-1) = fpbacp(g1,g2,c(j1),n7,k1,k2,nest)
+           j1 = j1+n
+        end do
+
+        ! calculate from condition (**) the remaining b-spline coefficients.
+        do i=1,k
+           j1 = i
+           do j=1,idim
+              j2 = j1+n7
+              c(j2) = c(j1)
+              j1 = j1+n
+           end do
+        end do
+
+        ! computation of f(p).
+        fp = zero
+        l  = k1
+        jj = 0
+        do it=1,m1
+           if (u(it)>=t(l)) l = l+1
+           l0 = l-k2
+           term = zero
+           do j2=1,idim
+             fac = zero
+             j1 = l0
+             do j=1,k1
+                j1 = j1+1
+                fac = fac+c(j1)*q(it,j)
+             end do
+             jj = jj+1
+             term = term+(fac-x(jj))**2
+             l0 = l0+n
+           end do
+           fp = fp+term*w(it)**2
+
+        end do
+
+        ! test whether the approximation sp(u) is an acceptable solution.
+        fpms = fp-s
+        if (abs(fpms)<acc) return
+
+        ! find the new value of p and carry out one more step.
+        call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+        if (.not.success) then
+           ier = FITPACK_S_TOO_SMALL
+           return
+        end if
+
+      end do find_root
+
+      ! Too many iterations
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fpclos
+
+      !> @brief Set up the initial knot configuration for closed-curve interpolation.
+      !!
+      !! When \f$ s = 0 \f$ (interpolation) and \f$ k \f$ is odd, places interior knots
+      !! at the data parameter values. For \f$ k = 1 \f$ (linear), directly sets the
+      !! B-spline coefficients from the data and returns the exact interpolant.
+      !! When \f$ k \f$ is even, knots are placed at midpoints of consecutive parameters.
+      !!
+      !! @param[in]     idim    Number of dimensions
+      !! @param[in]     k       Spline degree
+      !! @param[in]     m       Number of data points
+      !! @param[in]     mx      Length of data array `x` (= `m * idim`)
+      !! @param[in]     n       Number of knots
+      !! @param[in]     nc      Length of coefficient array `c`
+      !! @param[in]     nest    Maximum knots allowed
+      !! @param[in,out] kk      Adjusted degree for iteration
+      !! @param[in,out] kk1     Adjusted order for iteration
+      !! @param[in]     u       Parameter values, length `m`
+      !! @param[in]     x       Data coordinates, length `mx`
+      !! @param[in,out] t       Knot vector, length `nest`
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in]     per     Period \f$ = u_m - u_1 \f$
+      !! @param[in]     fp0     Upper bound for the smoothing factor
+      !! @param[in]     s       Smoothing factor
+      !! @param[in,out] fpint   Knot interval contributions, length `nest`
+      !! @param[in,out] nrdata  Data point counts per interval, length `nest`
+      !! @param[out]    done    `.true.` if the interpolant was fully determined
+      !!
+      !! @see Dierckx, Ch. 6, §6.1-6.2 (pp. 95-112): closed periodic spline fitting
+      pure subroutine fpclos_reset_interp(idim,k,m,mx,n,nc,nest,kk,kk1,u,x,t,c,fp,per,fp0,s,fpint,nrdata,done)
+         integer(FP_SIZE), intent(in)    :: idim,k,m,mx,n,nc,nest
+         integer(FP_SIZE), intent(inout) :: kk,kk1
+         real(FP_REAL),    intent(in)    :: u(m),x(mx),per,fp0,s
+         real(FP_REAL),    intent(inout) :: t(nest),c(nc),fp,fpint(nest)
+         integer(FP_SIZE), intent(inout) :: nrdata(nest)
+         logical(FP_BOOL), intent(out)   :: done
+
+         integer(FP_SIZE) :: i,j,j1,jj,m1
+
+         m1 = m-1
+         done = .false.
+
+         k_is_odd: if (mod(k,2)/=0) then
+
+             t(k+2:k+m1) = u(2:m1)
+
+             if (s<=zero) then
+                 kk  = k-1
+                 kk1 = k
+                 if (kk<=0) then
+                    t(1:2)     = [t(m)-per,u(1)]
+                    t(m+1:m+2) = [u(m),t(3)+per]
+
+                    jj = 0
+                    do i=1,m1
+                        j = i
+                        do j1=1,idim
+                            jj = jj+1
+                            c(j) = x(jj)
+                            j = j+n
+                        end do
+                    end do
+                    jj = 1
+                    j = m
+                    do j1=1,idim
+                      c(j) = c(jj)
+                      j    = j+n
+                      jj   = jj+n
+                    end do
+                    fp = zero
+                    fpint(n-1:n) = [zero,fp0]
+                    nrdata(n) = 0
+                    done = .true.
+                 endif
+             endif
+
+         else k_is_odd
+
+             t(k+2:k+m1) = half*(u(2:m1)+u(1:m1-1))
+
+         endif k_is_odd
+
+      end subroutine fpclos_reset_interp
+
+
+      !> @brief Fit a convexity-constrained cubic smoothing spline.
+      !!
+      !! Determines a cubic spline approximation \f$ s(x) \f$ that satisfies
+      !! the convexity (or concavity) constraints specified by \f$ v(i) \f$:
+      !!
+      !! - \f$ v(i) = 1 \f$: \f$ s''(x_i) \geq 0 \f$ (local convexity)
+      !! - \f$ v(i) = -1 \f$: \f$ s''(x_i) \leq 0 \f$ (local concavity)
+      !! - \f$ v(i) = 0 \f$: no constraint at \f$ x_i \f$
+      !!
+      !! while minimizing the weighted sum of squared residuals subject to
+      !! \f$ \sum (w_i (y_i - s(x_i)))^2 \leq S \f$. The algorithm uses the
+      !! Theil-Van de Panne quadratic programming procedure with a binary
+      !! tree (§7.2) to enumerate active-constraint sets.
+      !!
+      !! @param[in]     iopt    Option: -1 = least-squares, 0 = new smoothing,
+      !!                        1 = continue from previous
+      !! @param[in]     m       Number of data points
+      !! @param[in]     x       Data abscissae, length `m` (strictly increasing)
+      !! @param[in]     y       Data ordinates, length `m`
+      !! @param[in]     w       Data weights, length `m` (positive)
+      !! @param[in]     v       Convexity signs, length `m`
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nest    Max knots (workspace dimension)
+      !! @param[in]     maxtr   Max tree nodes
+      !! @param[in]     maxbin  Max active constraints
+      !! @param[in,out] n       Number of knots
+      !! @param[in,out] t       Knot vector, length `nest`
+      !! @param[in,out] c       B-spline coefficients, length `nest`
+      !! @param[in,out] sq      Weighted sum of squared residuals
+      !! @param[in,out] sx      Spline values at data points, length `m`
+      !! @param[in,out] bind    Active constraint flags, length `nest`
+      !! @param[in,out] e       Discontinuity coefficients, length `nest`
+      !! @param[in,out] wrk     Work array, length `lwrk`
+      !! @param[in]     lwrk    Length of `wrk`
+      !! @param[in,out] iwrk    Integer work array, length `kwrk`
+      !! @param[in]     kwrk    Length of `iwrk`
+      !! @param[out]    ier     Error flag
+      !!
+      !! @note Error flags in fpcoco/cocosp do not match the global error messages.
+      !!
+      !! @see Dierckx, Ch. 7, §7.2 (pp. 125-130)
+      !! @see fpcosp — core convexity-constrained fitting algorithm
+      pure subroutine fpcoco(iopt,m,x,y,w,v,s,nest,maxtr,maxbin,n,t,c,sq,sx,bind,e,wrk,lwrk,iwrk,kwrk,ier)
+
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)    :: s
+      real(FP_REAL),    intent(inout) :: sq
+      integer(FP_SIZE), intent(in)    :: iopt,m,nest,maxtr,maxbin,lwrk,kwrk
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      real(FP_REAL),    intent(in)    :: x(m),y(m),w(m),v(m)
+      real(FP_REAL),    intent(inout) :: t(nest),c(nest),sx(m),e(nest),wrk(lwrk)
+
+      logical(FP_BOOL), intent(inout) ::  bind(nest)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ia,ib,ic,iq,it,iu,iz,izz,i1,j,k,l,l1,m1,nmax,nr,n4,n6,n8,ji,jib,jjb,jl,jr,ju,mb,nm
+      real(FP_REAL) :: sql,sqmax,term,tj,xi
+      !  ..subroutine references..
+      !    fpcosp,fpbspl,fpadno,fpdeno,fpseno,fpfrno
+      !  ..
+      !  determine the maximal admissible number of knots.
+      nmax = m+4
+      ier  = FITPACK_OK
+      !  the initial choice of knots depends on the value of iopt.
+      !    if iopt=0 the program starts with the minimal number of knots so that can be guarantied
+      !    that the concavity/convexity constraints will be satisfied.
+      !    if iopt = 1 the program will continue from the point on where it left at the foregoing call.
+
+      if (iopt<=0) then
+          !  find the minimal number of knots.
+          !  a knot is located at the data point x(i), i=2,3,...m-1 if
+          !    1) v(i) ^= 0    and
+          !    2) v(i)*v(i-1) <= 0  or  v(i)*v(i+1) <= zero
+          m1 = m-1
+          n  = 4
+          do i=2,m1
+            if (equal(v(i),zero) .or. (v(i)*v(i-1)>zero .and. v(i)*v(i+1)>zero)) cycle
+            n = n+1
+            ! test whether the required storage space exceeds the available one.
+            if (n+4>nest) then
+                ier = FITPACK_TOO_MANY_KNOTS
+                return
+            end if
+            t(n) = x(i)
+          end do
+
+          !  find the position of the knots t(1),...t(4) and t(n-3),...t(n) which
+          !  are needed for the b-spline representation of s(x).
+          t(1:4)     = x(1)
+          t(n+1:n+4) = x(m)
+          n = n+4
+
+          !  test whether the minimum number of knots exceeds the maximum number.
+          if (n>nmax) then
+              ier = FITPACK_OVERLAPPING_KNOTS
+              return
+          endif
+
+      endif
+
+      !  main loop for the different sets of knots.
+      !  find corresponding values e(j) to the knots t(j+3),j=1,2,...n-6
+      !    e(j) will take the value -1,1, or 0 according to the requirement
+      !    that s(x) must be locally convex or concave at t(j+3) or that the
+      !    sign of s''(x) is unrestricted at that point.
+      update_knots: do it=1,2*nest
+
+          if (iopt<=0 .or. it>1) then
+
+              i  = 1
+              xi = x(1)
+              j  = 4
+              tj = t(4)
+              n6 = n-6
+              do l=1,n6
+                 do while (not_equal(xi,tj))
+                    i = i+1
+                    xi = x(i)
+                 end do
+                 e(l) = v(i)
+                 j = j+1
+                 tj = t(j)
+              end do
+
+              !  we partition the working space
+              nm  = n+maxbin
+              mb  = maxbin+1
+              ia  = 1
+              ib  = ia+4*n
+              ic  = ib+nm*maxbin
+              iz  = ic+n
+              izz = iz+n
+              iu  = izz+n
+              iq  = iu+maxbin
+              ji  = 1
+              ju  = ji+maxtr
+              jl  = ju+maxtr
+              jr  = jl+maxtr
+              jjb = jr+maxtr
+              jib = jjb+mb
+
+              !  given the set of knots t(j),j=1,2,...n, find the least-squares cubic
+              !  spline which satisfies the imposed concavity/convexity constraints.
+              call fpcosp(m,x,y,w,n,t,e,maxtr,maxbin,c,sq,sx,bind,nm,mb,wrk(ia), &
+                          wrk(ib),wrk(ic),wrk(iz),wrk(izz),wrk(iu),wrk(iq),iwrk(ji), &
+                          iwrk(ju),iwrk(jl),iwrk(jr),iwrk(jjb),iwrk(jib),ier)
+
+              !  if sq <= s or in case of abnormal exit from fpcosp, control is
+              !  repassed to the driver program.
+              if (sq<=s .or. .not.FITPACK_SUCCESS(ier)) return
+
+          endif
+
+          !  calculate for each knot interval t(l-1) <= xi <= t(l) the sum((wi*(yi-s(xi)))**2).
+          !  find the interval t(k-1) <= x <= t(k) for which this sum is maximal on the condition that
+          !  this interval contains at least one interior data point x(nr) and that s(x) is not given
+          !  there by a straight line.
+          sqmax = zero
+          sql   = zero
+          l     = 5
+          nr    = 0
+          i1    = 1
+          n4    = n-4
+          k     = l
+          get_error: do i=1,m
+             term = (w(i)*(sx(i)-y(i)))**2
+             if (x(i)>=t(l) .and. l<=n4) then
+                 term = term*half
+                 sql  = sql+term
+                 if (i-i1>1 .and. any(.not.bind(l-4:l-3)) .and. sql>sqmax) then
+                     k     = l
+                     sqmax = sql
+                     nr    = i1+(i-i1)/2
+                 endif
+                 l     = l+1
+                 i1    = i
+                 sql   = zero
+             endif
+             sql = sql+term
+          end do get_error
+
+          if (m-i1>1 .and. any(.not.bind(l-4:l-3)) .and. sql>sqmax) then
+              k = l
+              nr = i1+(m-i1)/2
+          endif
+
+          !  if no such interval is found, control is repassed to the driver program (ier = -1).
+          if (nr==0) then
+             ier = FITPACK_INTERPOLATING_OK
+             return
+          end if
+
+          !  if s(x) is given by the same straight line in two succeeding knot
+          !  intervals t(l-1) <= x <= t(l) and t(l) <= x <= t(l+1),delete t(l)
+          n8 = n-8
+          l1 = 0
+          if (n8>0) then
+              do i=1,n8
+                if (all(bind(i:i+2))) then
+                    l  = i+4-l1
+                    if (k>l) k = k-1
+                    n  = n-1
+                    l1 = l1+1
+                    t(l:n) = t(l+1:n+1)
+                endif
+              end do
+          endif
+
+          !  test whether we cannot further increase the number of knots.
+          if (n==nmax) then
+              ier = FITPACK_LEASTSQUARES_OK
+              return
+          elseif (n==nest) then
+              ier = -3 ! what is this?
+              return
+          end if
+
+          !  locate an additional knot at the point x(nr).
+          j = n
+          do i=k,n
+              t(j+1) = t(j)
+              j = j-1
+          end do
+          t(k) = x(nr)
+          n    = n+1
+
+      !  restart the computations with the new set of knots.
+      end do update_knots
+
+      ier = FITPACK_MAXIT
+
+      end subroutine fpcoco
+
+
+      !> @brief Core algorithm for constrained parametric curve fitting.
+      !!
+      !! Fits a \f$ d \f$-dimensional parametric spline curve
+      !! \f$ s(u) = (s_1(u), \ldots, s_d(u)) \f$ subject to derivative
+      !! constraints at the endpoints:
+      !!
+      !! \f[
+      !!     s_j^{(l)}(u_1) = x_j^{(l)}, \quad l = 0, \ldots, i_b - 1
+      !! \f]
+      !! \f[
+      !!     s_j^{(l)}(u_m) = x_j^{(l)}, \quad l = 0, \ldots, i_e - 1
+      !! \f]
+      !!
+      !! The algorithm first constructs a polynomial satisfying the constraints
+      !! (via fppocu), then iteratively refines the knot set and solves the
+      !! constrained least-squares system using Givens rotations.
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue
+      !! @param[in]     idim    Number of curve dimensions \f$ d \f$
+      !! @param[in]     m       Number of data points
+      !! @param[in]     u       Parameter values, length `m`
+      !! @param[in]     mx      Length of `x` (\f$ = m \cdot d \f$)
+      !! @param[in]     x       Data coordinates, interleaved, length `mx`
+      !! @param[in]     w       Data weights, length `m`
+      !! @param[in]     ib      Number of derivative constraints at start
+      !! @param[in]     ie      Number of derivative constraints at end
+      !! @param[in]     k       Spline degree
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nest    Max knots
+      !! @param[in]     tol     Tolerance for smoothing condition
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     k1      \f$ k + 1 \f$
+      !! @param[in]     k2      \f$ k + 2 \f$
+      !! @param[in,out] n       Number of knots
+      !! @param[in,out] t       Knot vector, length `nest`
+      !! @param[in]     nc      Length of coefficient array `c`
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fpint   Residual sums per knot interval
+      !! @param[in,out] z       Work: transformed RHS
+      !! @param[in,out] a       Work: band matrix
+      !! @param[in,out] b       Work: smoothing matrix
+      !! @param[in,out] g       Work: band matrix copy
+      !! @param[in,out] q       Work: B-spline values
+      !! @param[in,out] nrdata  Interior data-point counts
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 8, §8.2 (pp. 141-146)
+      !! @see fppocu — initial polynomial; fp_rotate_shifted_vec — smoothing rotation
+      pure subroutine fpcons(iopt,idim,m,u,mx,x,w,ib,ie,k,s,nest, &
+                             tol,maxit,k1,k2,n,t,nc,c,fp,fpint,z,a,b,g,q,nrdata,ier)
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)    :: s,tol
+      real(FP_REAL),    intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: ib,ie,iopt,idim,k,k1,k2,m,mx,maxit,nc,nest
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(inout) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: u(m),x(mx),w(m)
+      real(FP_REAL), intent(inout) :: t(nest),c(nc),fpint(nest),z(nc),a(nest,k1),b(nest,k2),g(nest,k2),q(m,k1)
+      integer(FP_SIZE), intent(inout) :: nrdata(nest)
+      !  ..local scalars..
+      real(FP_REAL) :: acc,fac,fpart,fpms,fpold,fp0,f1,f2,f3,p,pinv,p1,p2,p3,rn,store,term,ui,wi
+      integer(FP_SIZE) :: i,it,iter,j,jb,je,jj,j1,j2,j3,kbe,l,li,lj,l0,mb,me,mm,nk1,&
+                 nmax,nmin,nn,nplus,npl1,nrint,n8,mmin
+      logical(FP_BOOL) :: new,check1,check3,success
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1),xi(MAX_IDIM)
+
+      fpold = zero
+      fp0   = zero
+      nplus = 0
+      nmax  = 0
+      acc   = epsilon(zero)
+      fpms  = huge(zero)
+      nk1   = n-k1
+
+      !  ******************************************************************************************
+      !  part 1: determination of the number of knots and their position
+      !  ******************************************************************************************
+      !  given a set of knots we compute the least-squares curve sinf(u), and the corresponding sum of
+      !  squared residuals fp=f(p=inf).
+      !  if iopt=-1 sinf(u) is the requested curve.
+      !  if iopt=0 or iopt=1 we check whether we can accept the knots:
+      !    if fp <=s we will continue with the current set of knots.
+      !    if fp > s we will increase the number of knots and compute the corresponding least-squares
+      !       curve until finally fp<=s. the initial choice of knots depends on the value of s and iopt.
+      !    if s=0 we have spline interpolation; in that case the number of knots equals
+      !    nmax = m+k+1-max(0,ib-1)-max(0,ie-1)
+      !    if s > 0 and
+      !      iopt=0 we first compute the least-squares polynomial curve of degree k; n = nmin = 2*k+2
+      !      iopt=1 we start with the set of knots found at the last call of the routine, except for
+      !      the case that s > fp0; then we compute directly the polynomial curve of degree k.
+      !  ******************************************************************************************
+
+      !  determine nmin, the number of knots for polynomial approximation.
+      nmin = 2*k1
+
+      !  find which data points are to be considered.
+      mb = merge(ITWO,IONE,ib>0)
+      jb = merge(ib,IONE,ib>0)
+      me = merge(m-IONE,m,ie>0)
+      je = merge(ie,IONE,ie>0)
+
+      bootstrap: if (iopt>=0) then
+
+          !  calculation of acc, the absolute tolerance for the root of f(p)=s.
+          acc = tol*s
+
+          !  determine nmax, the number of knots for spline interpolation.
+          kbe  = k1-jb-je
+          mmin = kbe+2
+          mm   = m-mmin
+          nmax = nmin+mm
+
+          interpolating: if (s<=zero) then
+
+              !  if s=0, s(u) is an interpolating curve.
+              !  test whether the required storage space exceeds the available one.
+              n = nmax
+              if (nmax>nest) then
+                 ier = FITPACK_INSUFFICIENT_STORAGE
+                 return
+              endif
+
+              ! find the position of the interior knots in case of interpolation.
+              if (mm/=0) then
+                  i = k2
+                  j = 3-jb+k/2
+                  do l=1,mm
+                    t(i) = u(j)
+                    i = i+1
+                    j = j+1
+                  end do
+              endif
+
+          else interpolating
+
+              !  if s>0 our initial choice of knots depends on the value of iopt.
+              !  if iopt=0 or iopt=1 and s>=fp0, we start computing the least-squares
+              !  polynomial curve which is a spline curve without interior knots.
+              !  if iopt=1 and fp0>s we start computing the least squares spline curve
+              !  according to the set of knots found at the last call of the routine.
+              use_last_call: if (iopt/=0 .and. n/=nmin) then
+                  fp0   = fpint(n)
+                  fpold = fpint(n-1)
+                  nplus = nrdata(n)
+                  if (fp0<=s) then
+                      n = nmin
+                      fpold = zero
+                      nplus = 0
+                      nrdata(1) = m-2
+                  end if
+              else use_last_call
+                  n = nmin
+                  fpold = zero
+                  nplus = 0
+                  nrdata(1) = m-2
+              endif use_last_call
+
+          endif interpolating
+
+      endif bootstrap
+
+      ! main loop for the different sets of knots. m is a save upper bound
+      ! for the number of trials.
+      iter = 0
+      main_loop: do while (iter<m)
+
+         iter = iter+1
+
+         if (n==nmin) ier = FITPACK_LEASTSQUARES_OK
+
+         ! find nrint, tne number of knot intervals.
+         nrint = n-nmin+1
+         ! find the position of the additional knots which are needed for
+         ! the b-spline representation of s(u).
+         nk1        = n-k1
+         t(1:k1)    = u(1)
+         t(nk1+1:n) = u(m)
+
+         ! compute the b-spline coefficients of the least-squares spline curve
+         ! sinf(u). the observation matrix a is built up row by row and
+         ! reduced to upper triangular form by givens transformations.
+         ! at the same time fp=f(p=inf) is computed.
+         fp = zero
+
+         ! nn denotes the dimension of the splines
+         nn = nk1-ib-ie
+         ! initialize the b-spline coefficients and the observation matrix a.
+         z(1:nc) = zero
+         c(1:nc) = zero
+
+         if (me>=mb) then
+
+             if (nn>0) a(1:nn,1:k1) = zero
+
+             l = k1
+             jj = (mb-1)*idim
+
+             coefs: do it=mb,me
+
+                 ! fetch the current data point u(it),x(it).
+                 ui = u(it)
+                 wi = w(it)
+                 xi(1:idim) = wi*x(idim*(it-1)+1:idim*it)
+
+                 ! search for knot interval t(l) <= ui < t(l+1).
+                 l = fp_knot_interval(t, ui, l, nk1)
+
+                 ! evaluate the (k+1) non-zero b-splines at ui and store them in q.
+                 h = fpbspl(t,n,k,ui,l)
+                 q(it,1:k1) = h(1:k1)
+                 h(:k1) = wi*h(:k1)
+
+                 ! take into account that certain b-spline coefficients must be zero.
+                 lj = k1
+                 j = nk1-l-ie
+                 if (j<0) lj = lj+j
+
+                 li = 1
+                 j = l-k1-ib
+                 if (j<0) then
+                    li = li-j
+                    j = 0
+                 endif
+
+                 ! rotate the new row of the observation matrix into triangle.
+                 call fp_rotate_row_vec(h(li:), lj-li+1, a, nest, xi, z, j, n, idim)
+
+                 ! add contribution of this row to the sum of squares of residual right hand sides.
+                 fp = fp + sum(xi(1:idim)**2)
+
+             end do coefs
+
+             if (ier==FITPACK_LEASTSQUARES_OK) fp0 = fp
+             fpint(n-1:n) = [fpold,fp0]
+             nrdata(n)    = nplus
+
+             ! backward substitution to obtain the b-spline coefficients.
+             if (nn/=0) then
+                j1 = 1
+                do j2=1,idim
+                   j3 = j1+ib
+                   c(j3:j3+nn-1) = fpback(a,z(j1),nn,k1,nest)
+                   j1 = j1+n
+                end do
+             endif
+
+        endif ! me>=mb
+
+        ! test whether the approximation sinf(u) is an acceptable solution.
+        if (iopt<0) return ! was done already
+
+        fpms = fp-s; if (abs(fpms)<acc) return
+
+        ! if f(p=inf) < s accept the choice of knots.
+        if (fpms<zero) exit main_loop
+
+        ! if n = nmax, sinf(u) is an interpolating spline curve.
+        if (n==nmax) then
+            ier = FITPACK_INTERPOLATING_OK
+            return
+        end if
+
+        ! increase the number of knots.
+        ! if n=nest we cannot increase the number of knots because of
+        ! the storage capacity limitation.
+        if (n==nest) then
+            ier = FITPACK_INSUFFICIENT_STORAGE
+            return
+        end if
+
+        ! determine the number of knots nplus we are going to add.
+        if (ier==FITPACK_OK) then
+           npl1 = nplus*2
+           rn = nplus
+           if (fpold-fp>acc) npl1 = fp_knots_to_add(rn,fpms,fpold-fp)
+           nplus = min(nplus*2,max(npl1,nplus/2,1))
+        else
+           nplus = 1
+           ier   = FITPACK_OK
+        end if
+
+        ! Initialize iterate
+        fpold = fp
+
+        ! compute the sum of squared residuals for each knot interval
+        ! t(j+k) <= u(i) <= t(j+k+1) and store it in fpint(j),j=1,2,...nrint.
+        fpart = zero
+        i = 1
+        l = k2
+        new = .false.
+        jj = (mb-1)*idim
+        square_residuals: do it=mb,me
+            if (u(it)>=t(l) .and. l<=nk1) then
+               new = .true.
+               l = l+1
+            endif
+            term = zero
+            l0 = l-k2
+
+            do j2=1,idim
+                fac  = dot_product(c(l0+1:l0+k1),q(it,1:k1))
+                jj   = jj+1
+                term = term+(w(it)*(fac-x(jj)))**2
+                l0   = l0+n
+            end do
+            fpart = fpart+term
+            if (new) then
+                store = term*half
+                fpint(i) = fpart-store
+                i = i+1
+                fpart = store
+                new = .false.
+            endif
+        end do square_residuals
+
+        fpint(nrint) = fpart
+        add_new_knots: do l=1,nplus
+
+           ! add a new knot.
+           call fpknot(u,m,t,n,fpint,nrdata,nrint,nest,IONE)
+
+           ! if n=nmax we locate the knots as for interpolation
+           if (n==nmax) then
+               i = k2
+               j = 3-jb+k/2
+               do jj=1,mm
+                 t(i) = u(j)
+                 i = i+1
+                 j = j+1
+               end do
+
+               ! Restart main loop
+               iter = 0
+               cycle main_loop
+
+           end if
+
+           ! test whether we cannot further increase the number of knots.
+           if (n==nest) exit add_new_knots
+        end do add_new_knots
+      ! restart the computations with the new set of knots.
+      end do main_loop
+
+      !  test whether the least-squares kth degree polynomial curve is a
+      !  solution of our approximation problem.
+      if (ier==FITPACK_LEASTSQUARES_OK) return
+
+      ! *****
+      !  part 2: determination of the smoothing spline curve sp(u).
+      ! *****
+      !  we have determined the number of knots and their position.
+      !  we now compute the b-spline coefficients of the smoothing curve sp(u). the observation matrix a
+      !  is extended by the rows of matrix b expressing that the kth derivative discontinuities of sp(u)
+      !  at the interior knots t(k+2),...t(n-k-1) must be zero. the corresponding weights of these
+      !  additional rows are set to 1/p.
+      !  iteratively we then have to determine the value of p such that f(p), the sum of squared residuals
+      !  be = s. we already know that the least squares kth degree polynomial curve corresponds to p=0,
+      !  and that the least-squares spline curve corresponds to p=infinity. the iteration process which is
+      !  proposed here, makes use of rational interpolation. since f(p) is a convex and strictly
+      !  decreasing function of p, it can be approximated by a rational function r(p) = (u*p+v)/(p+w).
+      !  three values of p(p1,p2,p3) with corresponding values of f(p) (f1=f(p1)-s,f2=f(p2)-s,f3=f(p3)-s)
+      !  are used to calculate the new value of p such that r(p)=s. convergence is guaranteed by taking
+      !  f1>0 and f3<zero
+      ! *****
+
+      !  evaluate the discontinuity jump of the kth derivative of the b-splines at the knots
+      !  t(l),l=k+2,...n-k-1 and store in b.
+      call fpdisc(t,n,k2,b,nest)
+
+      !  initial value for p.
+      p1 = zero
+      f1 = fp0-s
+      p3 = -one
+      f3 = fpms
+      p  = sum(a(1:nn,1))
+      rn = nn
+      p  = rn/p
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+      n8 = n-nmin
+
+      !  iteration process to find the root of f(p) = s.
+      find_root: do iter=1,maxit
+      !  the rows of matrix b with weight 1/p are rotated into the
+      !  triangularised observation matrix a which is stored in g.
+        pinv = one/p
+        c = z
+        g(1:nn,1:k1) = a(1:nn,1:k1)
+        g(1:nn,  k2) = zero
+
+        b_rows: do it=1,n8
+           ! the row of matrix b is rotated into triangle by givens transformation
+           h(:k2) = b(it,:k2)*pinv
+           xi = zero
+
+           ! take into account that certain b-spline coefficients must be zero.
+           if (it<=ib) then
+              j1 = ib-it+2
+              j2 = k2-j1+1
+              h(1:j2)    = h(j1:k2)
+              h(j2+1:k2) = zero
+           endif
+
+           jj = max(1,it-ib)
+           call fp_rotate_shifted_vec(h, k2, g, nest, xi, c, jj, nn, n, idim)
+        end do b_rows
+
+        ! backward substitution to obtain the b-spline coefficients.
+        j1 = 1
+        do j2=1,idim
+            j3 = j1+ib
+            c(j3:j3+nn-1) = fpback(g,c(j1),nn,k2,nest)
+            if (ib>0) c(j1:j1+ib-1) = zero
+            j1 =j1+n
+        end do
+
+        ! computation of f(p).
+        fp = zero
+        l = k2
+        jj = (mb-1)*idim
+        get_fp: do it=mb,me
+            if (u(it)>=t(l) .and. l<=nk1) l = l+1
+            l0 = l-k2
+            term = zero
+            do j2=1,idim
+               fac = zero
+               j1 = l0
+               do j=1,k1
+                  j1 = j1+1
+                  fac = fac+c(j1)*q(it,j)
+               end do
+               jj = jj+1
+               term = term+(fac-x(jj))**2
+               l0 = l0+n
+            end do
+            fp = fp+term*w(it)**2
+        end do get_fp
+
+        ! SUCCESS! the approximation sp(u) is an acceptable solution.
+        fpms = fp-s; if (abs(fpms)<acc) return
+
+        ! find the new value of p and carry out one more step.
+        call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+        if (.not.success) then
+           ier = FITPACK_S_TOO_SMALL
+           return
+        end if
+
+      end do find_root
+
+      ! Maximum number of iterations reached
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fpcons
+
+      !> @brief Core algorithm for convexity-constrained cubic spline fitting.
+      !!
+      !! Given a fixed knot set, solves the constrained least-squares problem
+      !! using the Theil-Van de Panne active-set enumeration (§7.2). For each
+      !! candidate active-constraint set (tracked in a binary tree), solves
+      !! the equality-constrained system and checks feasibility and optimality
+      !! via the Lagrange multipliers.
+      !!
+      !! @param[in]     m       Number of data points
+      !! @param[in]     x       Data abscissae, length `m`
+      !! @param[in]     y       Data ordinates, length `m`
+      !! @param[in]     w       Data weights, length `m`
+      !! @param[in]     n       Number of knots
+      !! @param[in]     t       Knot vector, length `n`
+      !! @param[in]     e       Discontinuity jump coefficients, length `n`
+      !! @param[in]     maxtr   Max tree nodes
+      !! @param[in]     maxbin  Max active constraints
+      !! @param[in,out] c       B-spline coefficients, length `n`
+      !! @param[out]    sq      Weighted sum of squared residuals
+      !! @param[in,out] sx      Spline values at data points, length `m`
+      !! @param[in,out] bind    Active constraint flags, length `n`
+      !! @param[in]     nm      Dimension parameter
+      !! @param[in]     mb      Dimension parameter
+      !! @param[in,out] a       Work matrix `(n, 4)`
+      !! @param[in,out] b       Work matrix `(nm, maxbin)`
+      !! @param[in,out] const   Constraint vector, length `n`
+      !! @param[in,out] z       Work vector, length `n`
+      !! @param[in,out] zz      Work vector, length `n`
+      !! @param[in,out] u       Work vector, length `maxbin`
+      !! @param[in,out] q       Work matrix `(m, 4)`
+      !! @param[in,out] info    Tree info array, length `maxtr`
+      !! @param[in,out] up      Tree parent pointers, length `maxtr`
+      !! @param[in,out] left    Tree left-child pointers, length `maxtr`
+      !! @param[in,out] right   Tree right-child pointers, length `maxtr`
+      !! @param[in,out] jbind   Work array for constraint indices, length `mb`
+      !! @param[in,out] ibind   Work array for constraint indices, length `mb`
+      !! @param[out]    ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 7, §7.1-7.2 (pp. 115-130)
+      !! @see fpcoco — driver routine; fpadno, fpdeno, fpseno — tree operations
+      pure subroutine fpcosp(m,x,y,w,n,t,e,maxtr,maxbin,c,sq,sx,bind,nm,mb,a, &
+                             b,const,z,zz,u,q,info,up,left,right,jbind,ibind,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(out) :: sq
+      integer(FP_SIZE), intent(in)  :: m,n,maxtr,maxbin,nm,mb
+      integer(FP_FLAG), intent(out) :: ier
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)  :: x(m),y(m),w(m),t(n),e(n)
+      real(FP_REAL),    intent(inout) :: c(n),sx(m),a(n,4),b(nm,maxbin),const(n),z(n),zz(n),u(maxbin),q(m,4)
+      integer(FP_SIZE), intent(inout)   :: info(maxtr),up(maxtr),left(maxtr),right(maxtr)
+      integer(FP_SIZE), intent(inout)   :: ibind(mb),jbind(mb)
+      logical(FP_BOOL), intent(inout)   :: bind(n)
+      !  ..local scalars..
+      integer(FP_SIZE) :: count,i,i1,j,j1,j2,j3,k,kdim,k1,k2,k3,k4,k5,k6,l,l1,l2,l3,merk,nbind,violated,n1,n4,n6
+      real(FP_REAL) :: f,wi,xi
+      !  ..local array..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+      !  ..subroutine references..
+      !    fpbspl,fpadno,fpdeno,fpfrno,fpseno
+      !  ..
+
+      !  *****
+      !  if we use the b-spline representation of s(x) our approximation problem results in a quadratic
+      !  programming problem: find the b-spline coefficients c(j),j=1,2,...n-4 such that
+      !        (1) sumi((wi*(yi-sumj(cj*nj(xi))))**2),i=1,2,...m is minimal
+      !        (2) sumj(cj*n''j(t(l+3)))*e(l) <= 0, l=1,2,...n-6.
+      !  to solve this problem we use the theil-van de panne procedure.
+      !  if the inequality constraints (2) are numbered from 1 to n-6, this algorithm finds a subset of
+      !  constraints ibind(1)..ibind(nbind) such that the solution of the minimization problem (1) with
+      !  these constraints in equality form, satisfies all constraints. such a feasible solution is optimal
+      !  if the lagrange parameters associated with that problem with equality constraints are all positive.
+      !  *****
+
+      !  determine n6, the number of inequality constraints.
+      n6 = n-6
+      n4 = n-4
+
+      !  fix the parameters which determine these constraints.
+      forall (i=1:n6) const(i) = e(i)*(t(i+4)-t(i+1))/(t(i+5)-t(i+2))
+
+      !  initialize the triply linked tree which is used to find the subset of constraints
+      !  ibind(1),...ibind(nbind).
+      count    = 1
+      info(1)  = 0
+      left(1)  = 0
+      right(1) = 0
+      up(1)    = 1
+      merk     = 1
+
+      !  set up the normal equations  n'nc=n'y  where n denotes the m x (n-4) observation matrix with
+      !  elements ni,j = wi*nj(xi)  and y is the column vector with elements yi*wi.
+      !  from the properties of the b-splines nj(x),j=1,2,...n-4, it follows that  n'n  is a (n-4) x (n-4)
+      !  positive definite bandmatrix of bandwidth 7. the matrices n'n and n'y are built up in a and z.
+
+      !  initialization
+      z(1:n4) = zero
+      a(1:n4,1:4) = zero
+      l   = 4
+
+      rows: do i=1,m
+          ! fetch the current row of the observation matrix.
+          xi = x(i)
+          wi = w(i)**2
+
+          ! search for knot interval  t(l) <= xi < t(l+1)
+          l = fp_knot_interval(t, xi, l, n4)
+
+          ! evaluate the four non-zero cubic b-splines nj(xi),j=l-3,...l.
+          h = fpbspl(t,n,DEGREE_3,xi,l)
+
+          ! store in q these values h(1),h(2),...h(4).
+          q(i,1:4) = h(1:4)
+
+          ! add the contribution of the current row of the observation matrix n to the normal equations.
+          l3 = l-3
+          k1 = 0
+          add_row: do j1 = l3,l
+            k1 = k1+1
+            f = h(k1)
+            z(j1) = z(j1)+f*wi*y(i)
+            k2 = k1
+            j2 = 4
+            do j3 = j1,l
+              a(j3,j2) = a(j3,j2)+f*wi*h(k2)
+              k2 = k2+1
+              j2 = j2-1
+            end do
+          end do add_row
+      end do rows
+
+      !  since n'n is a symmetric matrix it can be factorized as
+      !        (3)  n'n = (r1)'(d1)(r1)
+      !  with d1 a diagonal matrix and r1 an (n-4) x (n-4)  unit upper triangular matrix of bandwidth 4.
+      !  matrices r1 and d1 are built up in a. at the same time we solve the systems of equations
+      !        (4)  (r1)'(z2) = n'y
+      !        (5)  (d1) (z1) = (z2)
+      !  the vectors z2 and z1 are kept in zz and z.
+      solve: do i=1,n4
+         k1 = max(5-i,1)
+         k2 = i-4+k1
+         k3 = k2
+
+         hundred: do j=k1,4
+            k4 = j-1
+            k5 = 4-j+k1
+            f  = a(i,j)
+            if (k1<=k4) then
+                k6 = k2
+                do k=k1,k4
+                  f = f-a(i,k)*a(k3,k5)*a(k6,4)
+                  k5 = k5+1
+                  k6 = k6+1
+                end do
+            end if
+            if (j<4) then
+               a(i,j) = f/a(k3,4)
+               k3 = k3+1
+            endif
+         end do hundred
+         a(i,4) = f
+         f = z(i)
+         if(i>1) then
+            k4 = i
+            do j=k1,3
+               k = k1+3-j
+               k4 = k4-1
+               f = f-a(i,k)*z(k4)*a(k4,4)
+            end do
+         endif
+         z (i) = f/a(i,4)
+         zz(i) = f
+      end do solve
+
+      !  start computing the least-squares cubic spline without taking account
+      !  of any constraint.
+      nbind    = 0
+      n1       = 1
+      ibind(1) = 0
+
+      !  main loop for the least-squares problems with different subsets of the constraints (2) in equality
+      !  form. the resulting b-spline coeff. c and lagrange parameters u are the solution of the system
+      !            ! n'n  b' ! ! c !   ! n'y !
+      !        (6) !         ! !   ! = !     !
+      !            !  b   0  ! ! u !   !  0  !
+      !  z1 is stored into array c.
+      least_squares: do
+
+          c(1:n4) = z(1:n4)
+
+          !  if there are no equality constraints, compute the coeff. c directly.
+          has_constraints: if (nbind>0) then
+              !  initialization
+              kdim = n4+nbind
+              b(1:kdim,1:nbind) = zero
+
+              !  matrix b is built up,expressing that the constraints nrs ibind(1),...
+              !  ibind(nbind) must be satisfied in equality form.
+              do i=1,nbind
+                 l        = ibind(i)
+                 b(l,i)   = e(l)
+                 b(l+1,i) = -(e(l)+const(l))
+                 b(l+2,i) = const(l)
+              end do
+
+              !  find the matrix (b1) as the solution of the system of equations
+              !        (7)  (r1)'(d1)(b1) = b'
+              !  (b1) is built up in the upper part of the array b(rows 1,...n-4).
+              make_b1: do k1=1,nbind
+                 l = ibind(k1)
+                 do i=l,n4
+                    f = b(i,k1)
+                    if (i/=1) then
+                        k2 = min(i-1,3)
+                        do k3=1,k2
+                          l1 = i-k3
+                          l2 = 4-k3
+                          f = f-b(l1,k1)*a(i,l2)*a(l1,4)
+                        end do
+                    endif
+                    b(i,k1) = f/a(i,4)
+                 end do
+              end do make_b1
+
+              !  factorization of the symmetric matrix  -(b1)'(d1)(b1)
+              !        (8)  -(b1)'(d1)(b1) = (r2)'(d2)(r2)
+              !  with (d2) a diagonal matrix and (r2) an nbind x nbind unit upper triangular matrix.
+              !  the matrices r2 and d2 are built up in the lower part of the array b (rows n-3,n-2,
+              !  ...n-4+nbind).
+              factor: do i=1,nbind
+                 i1 = i-1
+                 do j=i,nbind
+                    f = zero
+                    do k=1,n4
+                      f = f+b(k,i)*b(k,j)*a(k,4)
+                    end do
+                    k1 = n4+1
+                    if (i1/=0) then
+                       do k=1,i1
+                          f = f+b(k1,i)*b(k1,j)*b(k1,k)
+                          k1 = k1+1
+                       end do
+                    endif
+                    b(k1,j) = merge(-f/b(k1,i),-f,i/=j)
+                 end do
+              end do factor
+
+              !  according to (3),(7) and (8) the system of equations (6) becomes
+              !         ! (r1)'    0  ! ! (d1)    0  ! ! (r1)  (b1) ! ! c !   ! n'y !
+              !    (9)  !             ! !            ! !            ! !   ! = !     !
+              !         ! (b1)'  (r2)'! !   0   (d2) ! !   0   (r2) ! ! u !   !  0  !
+              !  backward substitution to obtain the b-spline coefficients c(j),j=1,..n-4 and the
+              !  lagrange parameters u(j),j=1,2,...nbind. first step of the backward substitution:
+              !  solve the system
+              !             ! (r1)'(d1)      0     ! ! (c1) !   ! n'y !
+              !        (10) !                      ! !      ! = !     !
+              !             ! (b1)'(d1)  (r2)'(d2) ! ! (u1) !   !  0  !
+              !  from (4) and (5) we know that this is equivalent to
+              !        (11)  (c1) = (z1)
+              !        (12)  (r2)'(d2)(u1) = -(b1)'(z2)
+
+              solve2: do i=1,nbind
+                 f  = dot_product(b(1:n4,i),zz(1:n4))
+                 i1 = i-1
+                 k1 = n4+1
+                 if (i1/=0) then ! [FP] this is probably unnecessary
+                    do j=1,i1
+                       f = f+u(j)*b(k1,i)*b(k1,j)
+                       k1 = k1+1
+                    end do
+                 end if
+                 u(i) = -f/b(k1,i)
+              end do solve2
+
+              !  second step of the backward substitution: solve the system
+              !             ! (r1)  (b1) ! ! c !   ! c1 !
+              !        (13) !            ! !   ! = !    !
+              !             !   0   (r2) ! ! u !   ! u1 !
+              k1 = nbind
+              k2 = kdim
+              !  find the lagrange parameters u.
+              finish2: do i=1,nbind
+                f = u(k1)
+                if (i/=1) then
+                   k3 = k1+1
+                   do j=k3,nbind
+                     f = f-u(j)*b(k2,j)
+                   end do
+                endif
+                u(k1) = f
+                k1 = k1-1
+                k2 = k2-1
+              end do finish2
+
+              !  find the b-spline coefficients c.
+              c(1:n4) = c(1:n4) - matmul(b(1:n4,1:nbind),u(1:nbind))
+
+          end if has_constraints
+
+          k1 = n4
+          do i=2,n4
+             k1 = k1-1
+             f  = c(k1)
+             k2 = max(5-i,1)
+             k3 = k1
+             l = 3
+             do j=k2,3
+               k3 = k3+1
+               f = f-a(k3,l)*c(k3)
+               l = l-1
+             end do
+             c(k1) = f
+          end do
+
+          !  test whether the solution of the least-squares problem with the constraints ibind(1),...
+          !  ibind(nbind) in equality form, satisfies all of the constraints (2).
+          k = 1
+
+          !  number counts the number of violated inequality constraints.
+          violated = 0
+
+          test_constraints: do j=1,n6
+            l = ibind(k)
+            k = k+1
+            if (j==l) cycle test_constraints
+            k = k-1
+            ! test whether constraint j is satisfied
+
+            f = e(j)*(c(j)-c(j+1))+const(j)*(c(j+2)-c(j+1))
+            if(f<=zero) cycle test_constraints
+
+            ! if constraint j is not satisfied, add a branch of length nbind+1 to the tree. the nodes
+            ! of this branch contain in their information field the number of the constraints ibind(1),
+            ! ...ibind(nbind) and j, arranged in increasing order.
+
+            violated = violated+1
+            k1 = k-1
+            if (k1>0) jbind(1:k1) = ibind(1:k1)
+            jbind(k) = j
+            if (l>0) jbind(k+1:nbind+1) = ibind(k:nbind)
+
+            call fpadno(maxtr,up,left,right,info,count,merk,jbind,n1,ier)
+
+            ! test whether the storage space which is required for the tree,
+            ! exceeds the available storage space.
+            if (ier/=0) then
+                ier = FITPACK_S_TOO_SMALL
+                return
+            end if
+          end do test_constraints
+
+          ! test whether the solution of the least-squares problem with equality constraints is a
+          ! feasible solution.
+          test_feasible: do
+
+              if (violated/=0) then
+
+                  ! test whether there are still cases with nbind constraints in equality form to be considered.
+                  violated = 0
+
+                  !  test whether there are still cases with nbind constraints in
+                  !  equality form to be considered.
+                  if (merk<=1) then
+                     nbind = n1
+                     !  test whether the number of knots where s''(x)=0 exceeds maxbin.
+                     if(nbind>maxbin) then
+                        ier = 1
+                        return
+                     end if
+                     n1 = n1+1
+                     ibind(n1) = 0
+                     !  search which cases with nbind constraints in equality form
+                     !  are going to be considered.
+                     call fpdeno(maxtr,up,left,right,nbind,merk)
+                     !  test whether the quadratic programming problem has a solution.
+                     if (merk==1) then
+                        ier = 3
+                        return
+                     end if
+                  endif
+
+                  ! find a new case with nbind constraints in equality form.
+                  call fpseno(maxtr,up,left,right,info,merk,ibind,nbind)
+
+                  exit test_feasible ! cycle least_squares
+
+             else
+
+                  !  test whether the feasible solution is optimal.
+                  ier = FITPACK_OK
+
+                  bind(1:n6) = .false.
+                  test_optimal: do i=1,nbind
+                      if (u(i)<=zero) then
+                          violated = 1
+                          exit test_optimal
+                      endif
+                      j = ibind(i)
+                      bind(j) = .true.
+                  end do test_optimal
+
+                  ! SUCCESS!
+                  exit least_squares
+
+             endif
+
+          end do test_feasible
+
+      end do least_squares
+
+      !  evaluate s(x) at the data points x(i) and calculate the weighted
+      !  sum of squared residual right hand sides sq.
+      sq = zero
+      l   = 4
+      evaluate_error: do i=1,m
+         l = fp_knot_interval(t, x(i), l, n4)
+         sx(i) = c(l-3)*q(i,1)+c(l-2)*q(i,2)+c(l-1)*q(i,3)+c(l)*q(i,4)
+         sq = sq+(w(i)*(y(i)-sx(i)))**2
+      end do evaluate_error
+
+      return
+
+      end subroutine fpcosp
+
+
+      !> @brief Compute weighted Fourier integrals of a cubic polynomial.
+      !!
+      !! Calculates the integrals:
+      !!
+      !! \f[
+      !!     \text{ress} = \int_a^b (b-x)^3 \sin(\omega x) \, dx, \quad
+      !!     \text{resc} = \int_a^b (b-x)^3 \cos(\omega x) \, dx
+      !! \f]
+      !!
+      !! given precomputed trigonometric values at the endpoints. Used by
+      !! fpbfou to compute Fourier coefficients of B-splines.
+      !!
+      !! @param[in]  a     Left endpoint
+      !! @param[in]  b     Right endpoint
+      !! @param[in]  par   Frequency \f$ \omega \f$
+      !! @param[in]  sia   \f$ \sin(\omega a) \f$
+      !! @param[in]  coa   \f$ \cos(\omega a) \f$
+      !! @param[in]  sib   \f$ \sin(\omega b) \f$
+      !! @param[in]  cob   \f$ \cos(\omega b) \f$
+      !! @param[out] ress  Sine integral result
+      !! @param[out] resc  Cosine integral result
+      !!
+      !! @see Dierckx, Ch. 3, §3.3 (Fourier integrals)
+      !! @see fpbfou — B-spline Fourier coefficient computation
+      pure elemental subroutine fpcsin(a,b,par,sia,coa,sib,cob,ress,resc)
+
+          !  ..scalar arguments..
+          real(FP_REAL), intent(in)  :: a,b,par,sia,coa,sib,cob
+          real(FP_REAL), intent(out) :: ress,resc
+
+          !  ..local scalars..
+          integer(FP_SIZE) :: i,j
+          real(FP_REAL) :: ab,ab4,ai,alfa,beta,b2,b4,fac,f1,f2
+          real(FP_REAL), parameter :: eps = smallnum10
+
+          ab   = b-a
+          ab4  = ab**4
+          alfa = ab*par
+          ! the way of calculating the integrals ress and resc depends on
+          ! the value of alfa = (b-a)*par.
+
+          if(abs(alfa)<=one) then
+             ! ress and resc are found by evaluating a series expansion.
+             fac = fourth
+             f1  = fac
+             f2  = zero
+             i   = 4
+             series: do j=1,5
+               i   = i+1
+               ai  = i
+               fac = fac*alfa/ai
+               f2  = f2+fac
+               if (abs(fac)<=eps) exit series
+               i   = i+1
+               ai  = i
+               fac = -fac*alfa/ai
+               f1  = f1+fac
+               if (abs(fac)<=eps) exit series
+             end do series
+             ress = ab4*(coa*f2+sia*f1)
+             resc = ab4*(coa*f1-sia*f2)
+
+          else
+             ! integration by parts.
+             beta = one/alfa
+             b2   = beta**2
+             b4   = six*b2**2
+             f1   = three*b2*(one-two*b2)
+             f2   = beta*(one-six*b2)
+             ress = ab4*(coa*f2+sia*f1+sib*b4)
+             resc = ab4*(coa*f1-sia*f2+cob*b4)
+             return
+          endif
+
+      end subroutine fpcsin
+
+
+      !> @brief Core algorithm for univariate spline curve fitting.
+      !!
+      !! Determines a smooth spline approximation \f$ s(x) \f$ of degree \f$ k \f$
+      !! on the interval \f$ [x_b, x_e] \f$ that satisfies the smoothing criterion:
+      !!
+      !! \f[
+      !!     F_g(p) = \sum_{i=1}^{m} \bigl( w_i (y_i - s(x_i)) \bigr)^2
+      !!     \leq S
+      !!     \tag{4.12}
+      !! \f]
+      !!
+      !! The algorithm iterates over three levels:
+      !!
+      !! 1. **Knot selection** (§5.3): adds knots at locations of maximum residual
+      !!    (Eq. 5.37-5.43) until the smoothing condition can be met.
+      !! 2. **Weighted least-squares** (§4.1): for each knot set, solves the
+      !!    banded system via QR with Givens rotations (Eq. 4.14-4.15).
+      !! 3. **Smoothing parameter search** (§5.2.4): finds \f$ p \f$ such that
+      !!    \f$ F_g(p) = S \f$ using rational interpolation (Eq. 5.30-5.32).
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue with more knots
+      !! @param[in]     x       Data abscissae, length `m` (strictly increasing)
+      !! @param[in]     y       Data ordinates, length `m`
+      !! @param[in]     w       Data weights, length `m` (positive)
+      !! @param[in]     m       Number of data points
+      !! @param[in]     xb      Left boundary of approximation interval
+      !! @param[in]     xe      Right boundary of approximation interval
+      !! @param[in]     k       Spline degree (\f$ 1 \leq k \leq 5 \f$)
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nest    Max number of knots (workspace bound)
+      !! @param[in]     tol     Tolerance for the smoothing condition
+      !! @param[in]     maxit   Maximum iterations for the \f$ p \f$-search
+      !! @param[in]     k1      \f$ k + 1 \f$ (spline order)
+      !! @param[in]     k2      \f$ k + 2 \f$ (smoothing bandwidth)
+      !! @param[in,out] n       Number of knots
+      !! @param[in,out] t       Knot vector, length `nest`
+      !! @param[out]    c       B-spline coefficients, length `nest`
+      !! @param[out]    fp      Weighted sum of squared residuals \f$ F_g(p) \f$
+      !! @param[in,out] fpint   Residual sums per knot interval, length `nest`
+      !! @param[in,out] z       Work: transformed RHS, length `nest`
+      !! @param[in,out] a       Work: band matrix, `(nest, k1)`
+      !! @param[in,out] b       Work: smoothing matrix, `(nest, k2)`
+      !! @param[in,out] g       Work: band matrix copy, `(nest, k2)`
+      !! @param[in,out] q       Work: B-spline values, `(m, k1)`
+      !! @param[in,out] nrdata  Interior data-point counts per interval, length `nest`
+      !! @param[out]    ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 4, §4.1-4.2 (pp. 53-65); Ch. 5, §5.2-5.3 (pp. 73-94)
+      pure subroutine fpcurf(iopt,x,y,w,m,xb,xe,k,s,nest,tol, &
+                             maxit,k1,k2,n,t,c,fp,fpint,z,a,b,g,q,nrdata,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in)    :: xb,xe,s,tol
+      real(FP_REAL),    intent(out)   :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,m,k,nest,maxit,k1,k2
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(out)   :: ier
+
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: x(m),y(m),w(m)
+      real(FP_REAL), intent(inout) :: t(nest),c(nest),fpint(nest),z(nest),a(nest,k1),b(nest,k2),&
+                                    g(nest,k2),q(m,k1)
+      integer(FP_SIZE), intent(inout) :: nrdata(nest)
+      !  ..local scalars..
+      real(FP_REAL) :: acc,fpart,fpms,fpold,fp0,f1,f2,f3,p,pinv,p1,p2,p3,rn,store,&
+                     term,wi,xi,yi
+      integer(FP_SIZE) :: i,it,iter,j,k3,l,l0,mk1,nk1,nmax,nmin,nplus,npl1,nrint,n8
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+      logical(FP_BOOL) :: new,check1,check3,success,accepted
+
+      ier      = FITPACK_OK
+      accepted = FP_FALSE
+      fpold = zero
+      fp0   = zero
+      nplus = 0
+      fpms  = huge(zero)
+      nk1   = n-k1
+
+      ! calculation of acc, the absolute tolerance for the root of f(p)=s.
+      acc  = tol*s
+
+      ! determine nmax, the number of knots for spline interpolation.
+      nmax = m+k1
+
+      ! *****
+      !  part 1: determination of the number of knots and their position
+      ! *****
+      !  given a set of knots we compute the least-squares spline sinf(x), and the corresponding sum
+      !  of squared residuals fp=f(p=inf).
+      !  if iopt=-1 sinf(x) is the requested approximation.
+      !  if iopt=0 or iopt=1 we check whether we can accept the knots:
+      !    if fp <=s we will continue with the current set of knots.
+      !    if fp > s we will increase the number of knots and compute the corresponding least-
+      !    squares spline until finally fp<=s.
+      !  the initial choice of knots depends on the value of s and iopt.
+      !    if s=0 we have spline interpolation; in that case the number of knots equals nmax = m+k+1.
+      !    if (s>0 and iopt=0) we first compute the least-squares polynomial curve of degree k;
+      !      n = nmin = 2*k+2
+      !    iopt=1 we start with the set of knots found at the last call of the routine, except for
+      !    the case that s > fp0; then we compute directly the least-squares polynomial of degree k.
+      ! *****
+
+      !  determine nmin, the number of knots for polynomial approximation.
+      nmin = 2*k1
+      bootstrap: if (iopt>=0) then
+
+          interpolating: if (s<=zero) then
+
+              !  if s=0, s(x) is an interpolating spline.
+              !  test whether the required storage space exceeds the available one.
+              n = nmax
+              if (nmax>nest) then
+                 ier = FITPACK_INSUFFICIENT_STORAGE
+                 return
+              end if
+
+              !  find the position of the interior knots in case of interpolation.
+              mk1 = m-k1
+              if (mk1/=0) then
+                  k3 = k/2
+                  i  = k2
+                  j  = k3+2
+                  do l=1,mk1
+                    t(i) = merge( x(j) , (x(j)+x(j-1))*half , k3*2/=k)
+                    i = i+1
+                    j = j+1
+                  end do
+              endif
+
+          else interpolating
+
+              !  if s>0 our initial choice of knots depends on the value of iopt.
+              !  if iopt=0 or iopt=1 and s>=fp0, we start computing the least-squares
+              !  polynomial of degree k which is a spline without interior knots.
+              !  if iopt=1 and fp0>s we start computing the least squares spline
+              !  according to the set of knots found at the last call of the routine.
+              use_last_call: if (iopt/=0 .and. n/=nmin) then
+                 fp0   = fpint(n)
+                 fpold = fpint(n-1)
+                 nplus = nrdata(n)
+                 if (fp0<=s) then
+                     n         = nmin
+                     fpold     = zero
+                     nplus     = 0
+                     nrdata(1) = m-2
+                 endif
+              else use_last_call
+                 n         = nmin
+                 fpold     = zero
+                 nplus     = 0
+                 nrdata(1) = m-2
+              endif use_last_call
+          endif interpolating
+
+      endif bootstrap
+
+      !  main loop for the different sets of knots. m is a save upper bound
+      !  for the number of trials.
+      iter = 0
+      main_loop: do while (iter<=m)
+
+        iter = iter+1
+
+        if (n==nmin) ier = FITPACK_LEASTSQUARES_OK
+
+        ! find nrint, tne number of knot intervals.
+        nrint = n-nmin+1
+
+        ! find the position of the additional knots which are needed for
+        ! the b-spline representation of s(x).
+        nk1        = n-k1
+        t(1:k1)    = xb
+        t(nk1+1:n) = xe
+
+        ! compute the b-spline coefficients of the least-squares spline
+        ! sinf(x). the observation matrix a is built up row by row and
+        ! reduced to upper triangular form by givens transformations.
+        ! at the same time fp=f(p=inf) is computed.
+        fp = zero
+
+        ! initialize the observation matrix a.
+        z(1:nk1)      = zero
+        a(1:nk1,1:k1) = zero
+        l = k1
+        coefs: do it=1,m
+
+            ! fetch the current data point x(it),y(it).
+            xi = x(it)
+            wi = w(it)
+            yi = y(it)*wi
+
+            ! search for knot interval t(l) <= xi < t(l+1).
+            l = fp_knot_interval(t, xi, l, nk1)
+
+            ! evaluate the (k+1) non-zero b-splines at xi and store them in q.
+            h = fpbspl(t,n,k,xi,l)
+
+            q(it,1:k1) = h(1:k1)
+            h(:k1) = wi*h(:k1)
+
+            ! rotate the new row of the observation matrix into triangle.
+            call fp_rotate_row(h, k1, a, yi, z, l-k1)
+
+            !  add contribution of this row to the sum of squares of residual
+            !  right hand sides.
+            fp = fp+yi*yi
+
+        end do coefs
+
+        if (ier==FITPACK_LEASTSQUARES_OK) fp0 = fp
+        fpint(n-1:n) = [fpold,fp0]
+        nrdata(n) = nplus
+
+        ! backward substitution to obtain the b-spline coefficients.
+        c(:nk1) = fpback(a,z,nk1,k1,nest)
+
+        ! test whether the approximation sinf(x) is an acceptable solution. the three acceptance
+        ! exits leave through the epilogue below, which screens the accepted factor once.
+        if (iopt<0) then
+            accepted = FP_TRUE
+            exit main_loop
+        end if
+
+        fpms = fp-s
+        if (abs(fpms)<acc) then
+            accepted = FP_TRUE
+            exit main_loop
+        end if
+
+        ! if f(p=inf) < s accept the choice of knots and go on to the smoothing spline.
+        if (fpms<zero) exit main_loop
+
+        ! if n = nmax, sinf(x) is an interpolating spline.
+        if (n==nmax) then
+            ier      = FITPACK_INTERPOLATING_OK
+            accepted = FP_TRUE
+            exit main_loop
+        end if
+
+        ! increase the number of knots.
+        ! if n=nest we cannot increase the number of knots because of the storage capacity limitation.
+        if (n==nest) then
+            ier = FITPACK_INSUFFICIENT_STORAGE
+            return
+        end if
+
+        ! determine the number of knots nplus we are going to add.
+        if (ier==FITPACK_OK) then
+            npl1 = nplus*2
+            rn = nplus
+            if (fpold-fp>acc) npl1 = fp_knots_to_add(rn,fpms,fpold-fp)
+            nplus = min(nplus*2,max(npl1,nplus/2,1))
+        else
+            nplus = 1
+            ier   = FITPACK_OK
+        endif
+
+        ! Initialize update
+        fpold = fp
+
+        ! compute the sum((w(i)*(y(i)-s(x(i))))**2) for each knot interval
+        ! t(j+k) <= x(i) <= t(j+k+1) and store it in fpint(j),j=1,2,...nrint.
+        fpart = zero
+        i = 1
+        l = k2
+        new = .false.
+        square_residuals: do it=1,m
+            if (x(it)>=t(l) .and. l<=nk1) then
+              new = .true.
+              l = l+1
+            endif
+            l0   = l-k2
+            term = dot_product(c(l0+1:l0+k1),q(it,1:k1))
+
+            term = (w(it)*(term-y(it)))**2
+            fpart = fpart+term
+
+            if (new) then
+                store = term*half
+                fpint(i) = fpart-store
+                i = i+1
+                fpart = store
+                new = .false.
+            endif
+        end do square_residuals
+
+        fpint(nrint) = fpart
+
+        add_new_knots: do l=1,nplus
+
+            ! add a new knot.
+            call fpknot(x,m,t,n,fpint,nrdata,nrint,nest,IONE)
+
+            ! if n=nmax we locate the knots as for interpolation.
+            if (n==nmax) then
+                mk1 = m-k1
+                if (mk1/=0) then
+                    k3 = k/2
+                    i  = k2
+                    j  = k3+2
+                    do l0=1,mk1
+                      t(i) = merge( x(j) , (x(j)+x(j-1))*half , k3*2/=k)
+                      i = i+1
+                      j = j+1
+                    end do
+                endif
+
+                ! Restart main loop
+                iter = 0
+                cycle main_loop
+
+            end if
+
+            ! test whether we cannot further increase the number of knots.
+            if (n==nest) exit add_new_knots
+
+        end do add_new_knots
+      !  restart the computations with the new set of knots.
+      end do main_loop
+
+      !  sinf(x) is the answer whenever the knot pass accepted it, and also when the least-squares
+      !  kth degree polynomial already solves our approximation problem. screen the factor that
+      !  produced those coefficients: a zero diagonal means the back substitution had to leave a
+      !  coefficient unconstrained, so the fit is not determined.
+      if (accepted .or. ier==FITPACK_LEASTSQUARES_OK) then
+          if (fp_rank_deficient(a,nk1,nest)) ier = FITPACK_S_TOO_SMALL
+          return
+      end if
+
+      ! *****
+      !  part 2: determination of the smoothing spline sp(x).
+      ! *****
+      !  we have determined the number of knots and their position.
+      !  we now compute the b-spline coefficients of the smoothing spline sp(x). the observation matrix a
+      !  is extended by the rows of matrix b expressing that the kth derivative discontinuities of sp(x)
+      !  at the interior knots t(k+2),...t(n-k-1) must be zero. the corresponding weights of these
+      !  additional rows are set to 1/p.
+      !  iteratively we then have to determine the value of p such that f(p), the sum of squared
+      !  residuals be = s. we already know that the least squares kth degree polynomial corresponds
+      !  to p=0, and that the least-squares spline corresponds to p=infinity. the iteration process
+      !  which is proposed here, makes use of rational interpolation. since f(p) is a convex and strictly
+      !  decreasing function of p, it can be approximated by a rational function r(p) = (u*p+v)/(p+w).
+      !  three values of p(p1,p2,p3) with corresponding values of f(p) (f1=f(p1)-s,f2=f(p2)-s,f3=f(p3)-s)
+      !  are used to calculate the new value of p such that r(p)=s. convergence is guaranteed by taking
+      !  f1>0 and f3<zero
+      ! *****
+
+      !  evaluate the discontinuity jump of the kth derivative of the
+      !  b-splines at the knots t(l),l=k+2,...n-k-1 and store in b.
+      call fpdisc(t,n,k2,b,nest)
+
+      !  initial value for p.
+      p1 = zero
+      f1 = fp0-s
+      p3 = -one
+      f3 = fpms
+      p  = sum(a(1:nk1,1))
+      rn = nk1
+      p  = rn/p
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+      n8 = n-nmin
+
+      !  iteration process to find the root of f(p) = s.
+      iter = 0
+      find_root: do while (iter<maxit)
+
+          iter = iter+1
+
+          !  the rows of matrix b with weight 1/p are rotated into the
+          !  triangularised observation matrix a which is stored in g.
+          pinv = one/p
+          c(1:nk1) = z(1:nk1)
+          g(1:nk1,1:k1) = a(1:nk1,1:k1)
+          g(1:nk1,  k2) = zero
+          b_rows: do it=1,n8
+              ! the row of matrix b is rotated into triangle by givens transformation
+              h(1:k2) = b(it,1:k2)*pinv
+              yi = zero
+              call fp_rotate_shifted(h, k2, g, nest, yi, c, it, nk1)
+          end do b_rows
+
+          ! backward substitution to obtain the b-spline coefficients.
+          c(:nk1) = fpback(g,c,nk1,k2,nest)
+
+          ! computation of f(p).
+          fp = zero
+          l = k2
+
+          get_fp: do it=1,m
+              if (x(it)>=t(l) .and. l<=nk1) l = l+1
+              l0   = l-k2
+              term = dot_product(c(l0+1:l0+k1),q(it,:))
+              fp   = fp+(w(it)*(term-y(it)))**2
+          end do get_fp
+
+          ! SUCCESS! the approximation sp(x) is an acceptable solution: screen its factor once.
+          fpms = fp-s
+          if (abs(fpms)<acc) then
+              if (fp_rank_deficient(g,nk1,nest)) ier = FITPACK_S_TOO_SMALL
+              return
+          end if
+
+          ! find the new value of p and carry out one more step.
+          call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+          if (.not.success) then
+             ier = FITPACK_S_TOO_SMALL
+             return
+          end if
+
+      end do find_root
+
+      ! Maximum number of iterations reached
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fpcurf
+
+
+      !> @brief Find the real zeros of a cubic polynomial.
+      !!
+      !! Computes all real roots of the cubic polynomial:
+      !!
+      !! \f[
+      !!     p(x) = a x^3 + b x^2 + c x + d
+      !! \f]
+      !!
+      !! Handles the degenerate cases (linear, quadratic) and uses the
+      !! standard trigonometric method for the irreducible case (three real
+      !! roots) and Cardano's formula otherwise.
+      !!
+      !! @param[in]  a  Coefficient of \f$ x^3 \f$
+      !! @param[in]  b  Coefficient of \f$ x^2 \f$
+      !! @param[in]  c  Coefficient of \f$ x \f$
+      !! @param[in]  d  Constant term
+      !! @param[out] x  Array of length 3 containing the real zeros
+      !! @param[out] n  Number of real zeros found (\f$ 0 \leq n \leq 3 \f$)
+      pure subroutine fpcuro(a,b,c,d,x,n)
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL),    intent(in) :: a,b,c,d
+      integer(FP_SIZE), intent(out) :: n
+      !  ..array argument..
+      real(FP_REAL), intent(out) :: x(3)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i
+      real(FP_REAL) :: a1,b1,c1,df,disc,d1,f,p3,q,r,step,u,u1,u2,y
+
+      !  set constants
+      real(FP_REAL), parameter :: ovfl = 1.0e4_FP_REAL
+      real(FP_REAL), parameter :: tent = 0.1_FP_REAL
+      real(FP_REAL), parameter :: pi3  = datan(one)/0.75_FP_REAL
+      real(FP_REAL), parameter :: e3   = tent/0.3_FP_REAL
+
+      a1 = abs(a)
+      b1 = abs(b)
+      c1 = abs(c)
+      d1 = abs(d)
+
+      if (max(b1,c1,d1)<a1*ovfl) then
+
+         !  p(x) is a third degree polynomial.
+         b1 = b/a*e3
+         c1 = c/a
+         d1 = d/a
+         q = c1*e3-b1*b1
+         r = b1*b1*b1+(d1-b1*c1)*half
+         disc = q*q*q+r*r
+         if (disc>zero) then
+
+            u = sqrt(disc)
+            u1 = -r+u
+            u2 = -r-u
+            n = 1
+            x(1) = sign(abs(u1)**e3,u1)+sign(abs(u2)**e3,u2)-b1
+
+         else
+
+            u  = sign(sqrt(abs(q)),r)
+            p3 = atan2(sqrt(-disc),abs(r))*e3
+            u2 = u+u
+            n  = 3
+            x(1) = -u2*cos(p3)-b1
+            x(2) = u2*cos(pi3-p3)-b1
+            x(3) = u2*cos(pi3+p3)-b1
+
+         end if
+
+      elseif(max(c1,d1)<b1*ovfl) then
+
+         !  p(x) is a second degree polynomial.
+         disc = c*c-four*b*d
+
+         if (disc<zero) then
+            n = 0
+            return
+         else
+            n = 2
+            u = sqrt(disc)
+            b1 = b+b
+            x(1) = (-c+u)/b1
+            x(2) = (-c-u)/b1
+         endif
+
+      elseif (d1<c1*ovfl) then
+
+         !  p(x) is a first degree polynomial.
+         n = 1
+         x(1) = -d/c
+
+      else
+
+         !  p(x) is a constant function.
+         n = 0
+         return
+
+      end if
+
+      ! apply a newton iteration to improve the accuracy of the roots.
+      do i=1,n
+         y    = x(i)
+         f    = ((a*y+b)*y+c)*y+d
+         df   = (three*a*y+two*b)*y+c
+         step = merge(f/df,zero,abs(f)<abs(df)*tent)
+         x(i) = y-step
+      end do
+
+      end subroutine fpcuro
+
+      !> @brief LU-decompose a cyclic tridiagonal matrix.
+      !!
+      !! Computes the LU decomposition of an \f$ n \times n \f$ cyclic
+      !! tridiagonal matrix arising from periodic spline fitting. The matrix
+      !! has the structure:
+      !!
+      !! \f[
+      !!     \begin{pmatrix}
+      !!     a_{1,2} & a_{1,3} &         &        &         & a_{1,1} \\
+      !!     a_{2,1} & a_{2,2} & a_{2,3} &        &         &         \\
+      !!             & \ddots  & \ddots  & \ddots &         &         \\
+      !!             &         & a_{n-1,1} & a_{n-1,2} & a_{n-1,3} \\
+      !!     a_{n,3} &         &         &        & a_{n,1} & a_{n,2}
+      !!     \end{pmatrix}
+      !! \f]
+      !!
+      !! The decomposition factors are stored in columns 4-6 of the array `a`.
+      !! The back-substitution is performed by fpcyt2.
+      !!
+      !! @param[in,out] a   Matrix stored as `a(nn,6)`. Columns 1-3 hold the
+      !!                    tridiagonal + cyclic entries; columns 4-6 receive
+      !!                    the LU factors.
+      !! @param[in]     n   Matrix dimension
+      !! @param[in]     nn  Leading dimension of `a`
+      !!
+      !! @see Dierckx, Ch. 6, §6.1 (pp. 95-100), Eq. 6.5-6.6
+      !! @see fpcyt2 — back-substitution using the LU factors
+      pure subroutine fpcyt1(a,n,nn)
+
+          !  ..scalar arguments..
+          integer(FP_SIZE), intent(in) :: n,nn
+          !  ..array arguments..
+          real(FP_REAL), intent(inout) :: a(nn,6)
+          !  ..local scalars..
+          real(FP_REAL) :: aa,beta,gamma,sum,teta,v
+          integer(FP_SIZE) :: i,n1,n2
+          !  ..
+          n2   = n-2
+          beta = one/a(1,2)
+          gamma = a(n,3)
+          teta = a(1,1)*beta
+          a(1,4) = beta
+          a(1,5) = gamma
+          a(1,6) = teta
+          sum = gamma*teta
+
+          internal_rows: do i=2,n2
+             v = a(i-1,3)*beta
+             aa = a(i,1)
+             beta = one/(a(i,2)-aa*v)
+             gamma = -gamma*v
+             teta = -teta*aa*beta
+             a(i,4) = beta
+             a(i,5) = gamma
+             a(i,6) = teta
+             sum = sum+gamma*teta
+          end do internal_rows
+
+          n1 = n-1
+          v = a(n2,3)*beta
+          aa = a(n1,1)
+          beta = one/(a(n1,2)-aa*v)
+          gamma = a(n,1)-gamma*v
+          teta = (a(n1,3)-teta*aa)*beta
+          a(n1,4) = beta
+          a(n1,5) = gamma
+          a(n1,6) = teta
+          a(n,4) = one/(a(n,2)-(sum+gamma*teta))
+
+      return
+      end subroutine fpcyt1
+
+
+      !> @brief Solve a cyclic tridiagonal system using LU factors from fpcyt1.
+      !!
+      !! Solves the \f$ n \times n \f$ linear system \f$ A \, c = b \f$ where
+      !! \f$ A \f$ is a cyclic tridiagonal matrix whose LU decomposition has
+      !! been computed by fpcyt1 and stored in columns 4-6 of the array `a`.
+      !!
+      !! @param[in]  a   LU-factored matrix from fpcyt1, dimension `(nn, 6)`
+      !! @param[in]  n   System dimension
+      !! @param[in]  b   Right-hand side vector, length `n`
+      !! @param[out] c   Solution vector, length `n`
+      !! @param[in]  nn  Leading dimension of `a`
+      !!
+      !! @see Dierckx, Ch. 6, §6.1 (pp. 95-100), Eq. 6.5-6.6
+      !! @see fpcyt1 — LU decomposition of the cyclic tridiagonal matrix
+      pure subroutine fpcyt2(a,n,b,c,nn)
+          !  ..scalar arguments..
+          integer(FP_SIZE), intent(in) :: n,nn
+          !  ..array arguments..
+          real(FP_REAL), intent(in)  :: a(nn,6),b(n)
+          real(FP_REAL), intent(out) :: c(n)
+          !  ..local scalars..
+          real(FP_REAL) :: cc,sum
+          integer(FP_SIZE) :: i,j,j1,n1
+          !  ..
+          c(1) = b(1)*a(1,4)
+          sum  = c(1)*a(1,5)
+          n1   = n-1
+          do i=2,n1
+             c(i) = (b(i)-a(i,1)*c(i-1))*a(i,4)
+             sum = sum+c(i)*a(i,5)
+          end do
+          cc    = (b(n)-sum)*a(n,4)
+          c(n)  = cc
+          c(n1) = c(n1)-cc*a(n1,6)
+          j = n1
+          do i=3,n
+             j1 = j-1
+             c(j1) = c(j1)-c(j)*a(j1,3)*a(j1,4)-cc*a(j1,6)
+             j = j1
+          end do
+          return
+
+      end subroutine fpcyt2
+
+
+      !> @brief Prune short branches from the constraint-set binary tree.
+      !!
+      !! Frees all branches whose length is less than `nbind` by setting their
+      !! `up` field to zero. This reclaims memory in the triply linked tree
+      !! used by the Theil-Van de Panne procedure (§7.2), keeping only
+      !! branches at the current search frontier.
+      !!
+      !! On exit, `merk` points to the terminal node of the leftmost branch
+      !! of length `nbind`, or is set to 1 if no such branch exists.
+      !!
+      !! @param[in]     maxtr  Size of the tree arrays
+      !! @param[in,out] up     Parent pointers; freed nodes get `up = 0`
+      !! @param[in]     left   Left-child pointers
+      !! @param[in]     right  Right-child pointers
+      !! @param[in]     nbind  Minimum branch length to retain
+      !! @param[out]    merk   Terminal node of the leftmost surviving branch,
+      !!                       or 1 if none
+      !!
+      !! @see Dierckx, Ch. 7, §7.2.4 (pp. 125-130)
+      !! @see fpadno, fpfrno, fpseno — companion tree operations
+      pure subroutine fpdeno(maxtr,up,left,right,nbind,merk)
+      !  ..
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)  :: maxtr,nbind
+      integer(FP_SIZE), intent(out) :: merk
+      !  ..array arguments..
+      integer(FP_SIZE), intent(inout) :: up(maxtr),left(maxtr),right(maxtr)
+
+      ! ..local scalars ..
+      integer(FP_SIZE) :: i,j,k,l,level,point
+
+      ! Begin from root node
+      i     = 1
+      level = 0
+
+      new_branch: do ! 10
+
+          ! Descend leftward until there are points
+          move_left: do
+              point = i
+              i = left(point)
+              if (i==0) exit move_left
+              level = level+1
+          end do move_left
+
+          ! Stopped at an intermediate level
+          if (level/=nbind)then
+
+              clear_node: do
+                  i = right(point)
+                  j = up(point)
+
+                  ! Free node
+                  up (point) = 0
+
+                  k = left(j)
+                  if (point/=k) then
+                      descend_right: do
+                         l = right(k)
+                         if (point==l) exit descend_right
+                         k = l
+                      end do descend_right
+                      right(k) = i
+                      point = k
+                      i = right(point)
+                      exit clear_node
+                  elseif (i/=0) then
+                      ! Attach this node to the right
+                      left(j) = i
+                      cycle new_branch
+                  else
+                      level = level-1
+                      if (level==0) exit new_branch
+                      point = j
+                      ! cycle clear_node
+                  endif
+              end do clear_node
+
+          endif ! level/=nbind
+
+          ! Move up until we find a right branch;
+          ! restart from that branch if found
+          move_up: do
+
+             i = right(point)
+             if (i/=0) exit move_up
+
+             ! Move up onw level
+             i     = up(point)
+             level = level-1
+             if (level==0) exit new_branch
+             ! Restart from upper level
+             point = i
+          end do move_up
+
+      end do new_branch
+
+      k = 1
+      l = left(k)
+      merk = 1
+      if (up(l)==0) return
+      find_merk: do while (k/=0)
+         merk = k
+         k = left(k)
+      end do find_merk
+      return
+      end subroutine fpdeno
+
+      !> @brief Compute the discontinuity jumps of the B-spline derivatives.
+      !!
+      !! Calculates the discontinuity jumps of the \f$ k \f$-th derivative of the
+      !! B-splines of degree \f$ k \f$ at the interior knots
+      !! \f$ \lambda_{k+2}, \ldots, \lambda_{n-k-1} \f$. These coefficients
+      !! \f$ a_{i,q} \f$ appear in the smoothness measure:
+      !!
+      !! \f[
+      !!     a_{i,q} = \frac{(-1)^{k+1} \, k! \, (\lambda_{i+k+1} - \lambda_i)}
+      !!     {\displaystyle\prod_{\substack{j=q-k \\ j \neq i}}^{q}
+      !!     (\lambda_{q+1} - \lambda_{j+1})}
+      !!     \tag{5.6}
+      !! \f]
+      !!
+      !! for \f$ q - k - 1 \leq i \leq q \f$, and zero otherwise. The output
+      !! matrix \f$ B \f$ stores these values for use in evaluating the smoothing
+      !! functional \f$ \sum_q [\sum_i c_i \, a_{i,q}]^2 \f$ (Eq. 5.5).
+      !!
+      !! @param[in]    t     Knot vector \f$ \lambda_1, \ldots, \lambda_n \f$
+      !! @param[in]    n     Length of the knot vector
+      !! @param[in]    k2    Spline order \f$ k + 1 \f$ (= degree + 1)
+      !! @param[out]   b     Discontinuity jump matrix, stored as `b(nest, k2)`.
+      !!                     Row \f$ q \f$ contains the \f$ k+1 \f$ non-zero jumps
+      !!                     at interior knot \f$ \lambda_{q+k+1} \f$.
+      !! @param[in]    nest  Leading dimension of array `b`
+      !!
+      !! @see Dierckx, Ch. 5, §5.2.2 (pp. 76-79), Eq. 5.5-5.6
+      pure subroutine fpdisc(t,n,k2,b,nest)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: n,k2,nest
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: t(n)
+      real(FP_REAL), intent(inout) :: b(nest,k2)
+      !  ..local scalars..
+      real(FP_REAL) :: an,fac,prod
+      integer(FP_SIZE) :: i,ik,j,jk,k,k1,l,lj,lk,lmk,lp,nk1,nrint
+      !  ..local array..
+      real(FP_REAL) :: h(2*(DEGREE_5+1))
+      !  ..
+      k1    = k2-1
+      k     = k1-1
+      nk1   = n-k1
+      nrint = nk1-k
+      an    = nrint
+      fac   = an/(t(nk1+1)-t(k1))
+      do l=k2,nk1
+         lmk = l-k1
+         do j=1,k1
+            ik = j+k1
+            lj = l+j
+            lk = lj-k2
+            h(j)  = t(l)-t(lk)
+            h(ik) = t(l)-t(lj)
+         end do
+         lp = lmk
+         do j=1,k2
+           jk = j
+           prod = h(j)
+           do i=1,k
+             jk = jk+1
+             prod = prod*h(jk)*fac
+           end do
+           lk = lp+k1
+           b(lmk,j) = (t(lk)-t(lp))/prod
+           lp = lp+1
+         end do
+      end do
+      return
+      end subroutine fpdisc
+
+
+      !> @brief Collect free nodes from the constraint-set binary tree.
+      !!
+      !! Scans the triply linked tree for free nodes (those with `up = 0`,
+      !! previously released by fpdeno) and makes them available for reuse.
+      !! If no free nodes are found, the error flag `ier` is set to 1.
+      !!
+      !! This routine is called by fpadno when the tree needs a new node but
+      !! the `count` pointer has exhausted the pre-allocated array.
+      !!
+      !! @param[in]     maxtr  Size of the tree arrays
+      !! @param[in,out] up     Parent pointers; `up(i) = 0` marks a free node
+      !! @param[in,out] left   Left-child pointers
+      !! @param[in,out] right  Right-child pointers
+      !! @param[in,out] info   Constraint index stored at each node
+      !! @param[in,out] point  Pointer to the collected free-node chain
+      !! @param[in,out] merk   Terminal node of the current branch
+      !! @param[in]     n1     Maximum branch length
+      !! @param[out]    count  Number of free nodes found
+      !! @param[out]    ier    Error flag: 0 = success, 1 = no free nodes
+      !!
+      !! @see Dierckx, Ch. 7, §7.2.4 (pp. 125-130)
+      !! @see fpadno, fpdeno, fpseno — companion tree operations
+      pure subroutine fpfrno(maxtr,up,left,right,info,point,merk,n1,count,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: maxtr,n1
+      integer(FP_SIZE), intent(inout) :: point,merk
+      integer(FP_SIZE), intent(out)   :: count
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      integer(FP_SIZE), intent(inout) :: up(maxtr),left(maxtr),right(maxtr),info(maxtr)
+      !  ..local scalars
+      integer(FP_SIZE) :: i,j,k,l,n,level
+      !  ..
+      ier    = 1
+      level  = 1
+      count  = 2
+      if (n1==2) return ! No free nodes
+
+      free_nodes_left: do while (level<=n1)
+         j = 0
+         i = 1
+         k = 0
+         l = 0
+
+         inner : do
+
+            march_left: do while (j/=level)
+               l = left(i)
+               if (l==0) exit march_left
+               i = l
+               j = j+1
+            end do march_left
+
+            do
+               if (i<count .or. l==0) then
+                   exit
+               elseif (i==count) then
+                   count = count+1
+                   exit
+               elseif (up(count)==0) then
+                   up   (count) = up   (i)
+                   left (count) = left (i)
+                   right(count) = right(i)
+                   info (count) = info (i)
+                   if( merk==i) merk  = count
+                   if(point==i) point = count
+                   if (k==0) then
+                      n = up(i)
+                      left(n) = count
+                   else
+                      right(k) = count
+                   endif
+                   l = left(i)
+                   do while (l/=0)
+                      up(l) = count
+                      l = right(l)
+                   end do
+                   up(i) = 0
+                   i = count
+                   count = count+1
+                   exit
+               else
+                   count = count+1
+               endif
+            end do
+
+            hundred10: do
+                l = right(i)
+                k = i
+
+                if (l==0) then
+                    l = up(i)
+                    j = j-1
+                    if (j==0) then
+                        exit inner
+                    else
+                        i = l
+                        ! cycle hundred10
+                    endif
+                else
+                    i = l
+                    exit hundred10
+                endif
+            end do hundred10
+
+         end do inner
+
+         level = level+1
+
+      end do free_nodes_left
+
+      if(count<=maxtr) ier = FITPACK_OK
+
+      end subroutine fpfrno
+
+      !> @brief Compute parameters of a Givens plane rotation.
+      !!
+      !! Given a pivot element \f$ e_i \f$ and a diagonal element \f$ r_i \f$, computes
+      !! the cosine \f$ c \f$ and sine \f$ s \f$ of a Givens rotation that eliminates
+      !! \f$ e_i \f$:
+      !!
+      !! \f[
+      !!     r'_i = \sqrt{r_i^2 + e_i^2}, \quad
+      !!     c = \frac{r_i}{r'_i}, \quad
+      !!     s = \frac{e_i}{r'_i}
+      !!     \tag{4.15}
+      !! \f]
+      !!
+      !! The rotation preserves orthogonality (\f$ c^2 + s^2 = 1 \f$) and is used
+      !! to triangularize the observation matrix \f$ E \f$ row by row during the
+      !! QR decomposition of the least-squares system.
+      !!
+      !! @param[in]     piv  Pivot element \f$ e_i \f$ to be eliminated
+      !! @param[in,out] ww   On entry, diagonal element \f$ r_i \f$.
+      !!                     On exit, updated value \f$ r'_i = \sqrt{r_i^2 + e_i^2} \f$.
+      !! @param[out]    cos  Cosine of rotation angle
+      !! @param[out]    sin  Sine of rotation angle
+      !!
+      !! @see Dierckx, Ch. 4, §4.1.2 (pp. 55-58), Eq. 4.15
+      elemental subroutine fpgivs(piv,ww,cos,sin)
+          real(FP_REAL), intent(in)    :: piv
+          real(FP_REAL), intent(inout) :: ww
+          real(FP_REAL), intent(out)   :: cos,sin
+          !  ..local scalars..
+          real(FP_REAL) :: dd,store
+
+          store = abs(piv)
+          !  evaluate only the taken branch: an if (not merge) avoids a spurious
+          !  divide-by-zero in the unselected expression (ww/piv or piv/ww) when
+          !  the other operand is zero, which would raise IEEE_INVALID under FPE traps.
+          if (store>=ww) then
+             dd = store*sqrt(one+(ww/piv)**2)
+          else
+             dd = ww   *sqrt(one+(piv/ww)**2)
+          end if
+          cos = ww/dd
+          sin = piv/dd
+          ww  = dd
+          return
+      end subroutine fpgivs
+
+
+      !> @brief Rotate an observation row into the upper triangular band matrix.
+      !!
+      !! Incorporates a new observation row \f$ h \f$ (containing the \f$ k+1 \f$
+      !! non-zero B-spline values) into the upper triangular band matrix \f$ R \f$
+      !! using a sequence of Givens plane rotations (Eq. 4.15). Each rotation
+      !! eliminates one element of \f$ h \f$ while updating the corresponding
+      !! diagonal and upper elements of \f$ R \f$, plus the scalar right-hand side:
+      !!
+      !! \f[
+      !!     \begin{pmatrix} c & s \\ -s & c \end{pmatrix}
+      !!     \begin{pmatrix} r_{j,j} \\ h_i \end{pmatrix}
+      !!     = \begin{pmatrix} r'_{j,j} \\ 0 \end{pmatrix}
+      !!     \tag{4.15}
+      !! \f]
+      !!
+      !! This is the standard-walk variant: \f$ h(i) \f$ pivots for
+      !! \f$ i = 1, \ldots, \texttt{band} \f$, targeting rows
+      !! \f$ j = \texttt{j\_start}+1, \ldots, \texttt{j\_start}+\texttt{band} \f$
+      !! of \f$ R \f$. Zero pivots are skipped.
+      !!
+      !! @param[in,out] h       Row to rotate, length `band`. Modified in place.
+      !! @param[in]     band    Number of elements in the row (typically \f$ k+1 \f$)
+      !! @param[in,out] a       Upper triangular band matrix \f$ R \f$. `a(j,1)` is
+      !!                        the diagonal; `a(j,2:)` stores the upper bandwidth.
+      !! @param[in,out] yi      Scalar RHS contribution; updated by each rotation
+      !! @param[in,out] z       RHS vector; positions `j_start+1 : j_start+band` updated
+      !! @param[in]     j_start Starting row index minus one (loop begins at `j_start+1`)
+      !!
+      !! @see Dierckx, Ch. 4, §4.1.2 (pp. 55-58), Eq. 4.15
+      !! @see fp_rotate_row_vec — vector-RHS variant for parametric fitting
+      pure subroutine fp_rotate_row(h, band, a, yi, z, j_start)
+          real(FP_REAL),    intent(inout) :: h(:)
+          integer(FP_SIZE), intent(in)    :: band
+          real(FP_REAL),    intent(inout) :: a(:,:)
+          real(FP_REAL),    intent(inout) :: yi
+          real(FP_REAL),    intent(inout) :: z(:)
+          integer(FP_SIZE), intent(in)    :: j_start
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: i, j
+
+          j = j_start
+          do i = 1, band
+              j = j + 1
+              piv = h(i)
+              if (equal(piv, zero)) cycle
+
+              ! Calculate parameters of Givens transformation
+              call fpgivs(piv, a(j,1), cos, sin)
+
+              ! Apply to right hand side
+              call fprota(cos, sin, yi, z(j))
+
+              ! Apply to remaining row elements and matrix
+              if (i < band) call fprota(cos, sin, h(i+1:band), a(j, 2:band-i+1))
+          end do
+      end subroutine fp_rotate_row
+
+      !> @brief Rotate an observation row into a band matrix with vector RHS.
+      !!
+      !! Vector-RHS variant of fp_rotate_row for parametric curve fitting. Rotates
+      !! a new observation row \f$ h \f$ into the upper triangular band matrix
+      !! \f$ R \f$ using Givens rotations (Eq. 4.15), simultaneously transforming
+      !! \f$ d \f$ right-hand side vectors stored column-wise in \f$ z(n, d) \f$.
+      !!
+      !! In parametric fitting, all \f$ d \f$ coordinate curves share the same knot
+      !! vector and B-spline basis, so a single triangularization of \f$ R \f$
+      !! applies the same rotations to each RHS column.
+      !!
+      !! @param[in,out] h       Row to rotate, length `band`. Modified in place.
+      !! @param[in]     band    Bandwidth (typically \f$ k+1 \f$)
+      !! @param[in,out] a       Upper triangular band matrix \f$ R \f$, dimension `(nest,*)`
+      !! @param[in]     nest    Leading dimension of `a`
+      !! @param[in,out] xi      Vector RHS contribution of length `idim`; updated by rotations
+      !! @param[in,out] z       RHS array `(n, idim)`, one column per coordinate dimension
+      !! @param[in]     j_start Starting row index minus one
+      !! @param[in]     n       Leading dimension of `z` (number of coefficients)
+      !! @param[in]     idim    Number of coordinate dimensions
+      !!
+      !! @see Dierckx, Ch. 4, §4.1.2 (pp. 55-58), Eq. 4.15
+      !! @see fp_rotate_row — scalar-RHS variant
+      pure subroutine fp_rotate_row_vec(h, band, a, nest, xi, z, j_start, n, idim)
+          integer(FP_SIZE), intent(in)    :: band       ! Bandwidth (k1 or kk1)
+          integer(FP_SIZE), intent(in)    :: nest       ! Leading dimension of a
+          integer(FP_SIZE), intent(in)    :: n          ! Leading dimension of z (number of knots)
+          integer(FP_SIZE), intent(in)    :: idim       ! Number of curve dimensions
+          integer(FP_SIZE), intent(in)    :: j_start    ! Starting row index minus 1
+          real(FP_REAL),    intent(inout) :: h(band)    ! Row to rotate
+          real(FP_REAL),    intent(inout) :: a(nest,*)  ! Upper triangular band matrix
+          real(FP_REAL),    intent(inout) :: xi(idim)   ! Vector RHS contribution
+          real(FP_REAL),    intent(inout) :: z(n,idim)  ! RHS array, one column per dimension
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: i, j
+
+          j = j_start
+          do i = 1, band
+              j = j + 1
+              piv = h(i)
+              if (equal(piv, zero)) cycle
+
+              ! Calculate parameters of Givens transformation
+              call fpgivs(piv, a(j,1), cos, sin)
+
+              ! Apply to all idim right-hand sides (elemental fprota)
+              call fprota(cos, sin, xi, z(j, 1:idim))
+
+              ! Apply to remaining row elements and matrix
+              if (i < band) call fprota(cos, sin, h(i+1:band), a(j, 2:band-i+1))
+          end do
+      end subroutine fp_rotate_row_vec
+
+      !> @brief Rotate a smoothing-matrix row into a band matrix using shifted pivots.
+      !!
+      !! Shifted-pivot variant of the Givens rotation for incorporating rows of the
+      !! smoothing matrix \f$ P \f$ into the triangularized observation matrix.
+      !! Unlike fp_rotate_row (which walks \f$ h(i) \f$ for \f$ i = 1, \ldots, b \f$),
+      !! this routine always pivots on \f$ h(1) \f$ and shifts \f$ h \f$ left after
+      !! each rotation step:
+      !!
+      !! \f[
+      !!     h \leftarrow (h_2, h_3, \ldots, h_b, 0)
+      !! \f]
+      !!
+      !! The effective bandwidth shrinks as \f$ j \to \texttt{j\_end} \f$. This
+      !! pattern arises because the smoothing matrix \f$ P \f$ (Eq. 5.5) has
+      !! bandwidth \f$ k+2 \f$ and its rows are offset relative to \f$ R \f$.
+      !!
+      !! @param[in,out] h       Row to rotate, length `band`. Shifted left at each step.
+      !! @param[in]     band    Bandwidth (typically \f$ k+2 \f$)
+      !! @param[in,out] a       Upper triangular band matrix \f$ R^* \f$, dimension `(nest,*)`
+      !! @param[in]     nest    Leading dimension of `a`
+      !! @param[in,out] yi      Scalar RHS contribution; updated by rotations
+      !! @param[in,out] z       RHS vector; positions `j_start : j_end` updated
+      !! @param[in]     j_start First row index in \f$ R^* \f$
+      !! @param[in]     j_end   Last row index in \f$ R^* \f$
+      !!
+      !! @see Dierckx, Ch. 5, §5.2.2 (pp. 76-79), Eq. 5.5, 5.14-5.16
+      !! @see fp_rotate_shifted_vec — vector-RHS variant for parametric fitting
+      pure subroutine fp_rotate_shifted(h, band, a, nest, yi, z, j_start, j_end)
+          integer(FP_SIZE), intent(in)    :: band, nest, j_start, j_end
+          real(FP_REAL),    intent(inout) :: h(band), a(nest,*), yi, z(*)
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: noff, j
+
+          do j = j_start, j_end
+              piv = h(1)
+              noff = min(j_end - j, band - 1)
+              if (equal(piv, zero)) then
+                  if (noff <= 0) return
+              else
+                  call fpgivs(piv, a(j,1), cos, sin)
+                  call fprota(cos, sin, yi, z(j))
+                  if (noff == 0) return
+                  call fprota(cos, sin, h(2:noff+1), a(j, 2:noff+1))
+              endif
+              h(1:noff+1) = [h(2:noff+1), zero]
+          end do
+      end subroutine fp_rotate_shifted
+
+      !> @brief Rotate a smoothing-matrix row into a band matrix with vector RHS.
+      !!
+      !! Shifted-pivot, vector-RHS variant of the Givens rotation. Combines the
+      !! shifted-pivot pattern of fp_rotate_shifted (always pivot on \f$ h(1) \f$,
+      !! shift left) with the multi-dimensional RHS of fp_rotate_row_vec. Used by
+      !! smoothing iterations in parametric fitting (fpcons, fppara) where the
+      !! smoothing-matrix rows \f$ P \f$ (Eq. 5.5, bandwidth \f$ k+2 \f$) are
+      !! rotated into the already-triangularized observation matrix \f$ R \f$, with
+      !! \f$ d \f$ coordinate curves sharing the same knot vector.
+      !!
+      !! @param[in,out] h       Row to rotate, length `band`. Shifted left at each step.
+      !! @param[in]     band    Bandwidth (typically \f$ k+2 \f$)
+      !! @param[in,out] a       Upper triangular band matrix \f$ R^* \f$, dimension `(nest,*)`
+      !! @param[in]     nest    Leading dimension of `a`
+      !! @param[in,out] xi      Vector RHS contribution of length `idim`
+      !! @param[in,out] z       RHS array `(n, idim)`, one column per coordinate dimension
+      !! @param[in]     j_start First row index in \f$ R^* \f$
+      !! @param[in]     j_end   Last row index in \f$ R^* \f$
+      !! @param[in]     n       Leading dimension of `z`
+      !! @param[in]     idim    Number of coordinate dimensions
+      !!
+      !! @see Dierckx, Ch. 5, §5.2.2 (pp. 76-79), Eq. 5.5, 5.14-5.16
+      !! @see fp_rotate_shifted — scalar-RHS variant
+      pure subroutine fp_rotate_shifted_vec(h, band, a, nest, xi, z, j_start, j_end, n, idim)
+          integer(FP_SIZE), intent(in)    :: band, nest, n, idim, j_start, j_end
+          real(FP_REAL),    intent(inout) :: h(band), a(nest,*), xi(idim), z(n,idim)
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: i2, j
+
+          do j = j_start, j_end
+              piv = h(1)
+              call fpgivs(piv, a(j,1), cos, sin)
+              call fprota(cos, sin, xi, z(j, 1:idim))
+              if (j < j_end) then
+                  i2 = min(j_end - j, band - 1) + 1
+                  call fprota(cos, sin, h(2:i2), a(j, 2:i2))
+                  h(1:i2) = [h(2:i2), zero]
+              endif
+          end do
+      end subroutine fp_rotate_shifted_vec
+
+      !> @brief Rotate a split observation row into the block-triangular periodic system
+      !!        with vector RHS.
+      !!
+      !! Two-matrix Givens rotation for periodic spline fitting. The periodic B-spline
+      !! constraint wraps the last \f$ k \f$ columns of the observation matrix into
+      !! the first \f$ k \f$, producing a block-triangular structure:
+      !!
+      !! \f[
+      !!     \begin{pmatrix} R_{11}^* & R_{12}^* \\ 0 & R_{22}^* \end{pmatrix}
+      !!     \tag{6.13}
+      !! \f]
+      !!
+      !! Each observation row is split as \f$ [h_1 \mid h_2] \f$ and rotated in
+      !! two phases:
+      !!
+      !! - **Phase 1**: Rotate \f$ h_1 \f$ through \f$ R_{11}^* \f$ using shifted
+      !!   pivots (always \f$ h_1(1) \f$), simultaneously applying cross-rotations
+      !!   to \f$ h_2 \f$ and \f$ R_{12}^* \f$.
+      !! - **Phase 2**: Rotate remaining \f$ h_2 \f$ through \f$ R_{22}^* \f$
+      !!   using standard walk (diagonal at \f$ R_{22}^*(j,j) \f$).
+      !!
+      !! @param[in,out] h1       First block of the observation row, length `band1`.
+      !!                         Shifted left during Phase 1.
+      !! @param[in]     band1    Length of `h1` (main bandwidth)
+      !! @param[in,out] h2       Second block (wraparound columns), length `band2`
+      !! @param[in]     band2    Length of `h2` (typically \f$ k \f$)
+      !! @param[in,out] a1       Band matrix \f$ R_{11}^* \f$, dimension `(nest,*)`
+      !! @param[in,out] a2       Band matrix \f$ R_{12}^* / R_{22}^* \f$, dimension `(nest,*)`
+      !! @param[in]     nest     Leading dimension of `a1` and `a2`
+      !! @param[in,out] xi       Vector RHS contribution of length `idim`
+      !! @param[in,out] z        RHS array `(n, idim)`, one column per coordinate dimension
+      !! @param[in]     j1_start First row index for Phase 1
+      !! @param[in]     j1_end   Last row index for Phase 1
+      !! @param[in]     n        Leading dimension of `z`
+      !! @param[in]     idim     Number of coordinate dimensions
+      !!
+      !! @see Dierckx, Ch. 6, §6.1.1 (pp. 95-100), Eq. 6.10, 6.13, Fig. 6.1
+      !! @see fp_rotate_row_2mat — scalar-RHS variant
+      pure subroutine fp_rotate_row_2mat_vec(h1, band1, h2, band2, a1, a2, nest, &
+                                              xi, z, j1_start, j1_end, n, idim)
+          integer(FP_SIZE), intent(in)    :: band1, band2, nest, n, idim, j1_start, j1_end
+          real(FP_REAL),    intent(inout) :: h1(band1), h2(band2)
+          real(FP_REAL),    intent(inout) :: a1(nest,*), a2(nest,*)
+          real(FP_REAL),    intent(inout) :: xi(idim), z(n,idim)
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: i2, ij, j
+
+          ! Phase 1: rotate h1 through a1 with shifting, cross-rotating h2/a2
+          do j = j1_start, j1_end
+              piv = h1(1)
+              if (equal(piv, zero)) then
+                  ! Zero pivot: shift h1 left without rotation
+                  h1(1:band1-1) = h1(2:band1)
+                  h1(band1) = zero
+                  cycle
+              end if
+              call fpgivs(piv, a1(j,1), cos, sin)
+              call fprota(cos, sin, xi, z(j, 1:idim))
+              call fprota(cos, sin, h2(1:band2), a2(j, 1:band2))
+              if (j < j1_end) then
+                  i2 = min(j1_end - j, band1 - 1) + 1
+                  call fprota(cos, sin, h1(2:i2), a1(j, 2:i2))
+                  h1(1:i2) = [h1(2:i2), zero]
+              endif
+          end do
+
+          ! Phase 2: rotate h2 through a2 (diagonal at a2(ij,j))
+          do j = 1, band2
+              ij = j1_end + j
+              if (ij <= 0) cycle
+              piv = h2(j)
+              if (equal(piv, zero)) cycle
+              call fpgivs(piv, a2(ij,j), cos, sin)
+              call fprota(cos, sin, xi, z(ij, 1:idim))
+              if (j < band2) then
+                  call fprota(cos, sin, h2(j+1:band2), a2(ij, j+1:band2))
+              endif
+          end do
+      end subroutine fp_rotate_row_2mat_vec
+
+      !> @brief Rotate a split observation row into the block-triangular periodic system
+      !!        with scalar RHS.
+      !!
+      !! Scalar-RHS variant of fp_rotate_row_2mat_vec. Identical two-phase algorithm
+      !! for the periodic block-triangular system (Eq. 6.13) but with a scalar
+      !! right-hand side \f$ y_i / z(j) \f$ instead of the vector
+      !! \f$ \xi(d) / z(j, 1{:}d) \f$.
+      !!
+      !! @param[in,out] h1       First block of the observation row, length `band1`.
+      !!                         Shifted left during Phase 1.
+      !! @param[in]     band1    Length of `h1`
+      !! @param[in,out] h2       Second block (wraparound columns), length `band2`
+      !! @param[in]     band2    Length of `h2`
+      !! @param[in,out] a1       Band matrix \f$ R_{11}^* \f$, dimension `(nest,*)`
+      !! @param[in,out] a2       Band matrix \f$ R_{12}^* / R_{22}^* \f$, dimension `(nest,*)`
+      !! @param[in]     nest     Leading dimension of `a1` and `a2`
+      !! @param[in,out] yi       Scalar RHS contribution; updated by rotations
+      !! @param[in,out] z        RHS vector; entries at rows `j1_start : j1_end+band2` updated
+      !! @param[in]     j1_start First row index for Phase 1
+      !! @param[in]     j1_end   Last row index for Phase 1
+      !!
+      !! @see Dierckx, Ch. 6, §6.1.1 (pp. 95-100), Eq. 6.10, 6.13
+      !! @see fp_rotate_row_2mat_vec — vector-RHS variant
+      pure subroutine fp_rotate_row_2mat(h1, band1, h2, band2, a1, a2, nest, &
+                                          yi, z, j1_start, j1_end)
+          integer(FP_SIZE), intent(in)    :: band1, band2, nest, j1_start, j1_end
+          real(FP_REAL),    intent(inout) :: h1(band1), h2(band2)
+          real(FP_REAL),    intent(inout) :: a1(nest,*), a2(nest,*)
+          real(FP_REAL),    intent(inout) :: yi, z(*)
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: i2, ij, j
+
+          ! Phase 1: rotate h1 through a1 with shifting, cross-rotating h2/a2
+          do j = j1_start, j1_end
+              piv = h1(1)
+              if (equal(piv, zero)) then
+                  ! Zero pivot: shift h1 left without rotation
+                  h1(1:band1-1) = h1(2:band1)
+                  h1(band1) = zero
+                  cycle
+              end if
+              call fpgivs(piv, a1(j,1), cos, sin)
+              call fprota(cos, sin, yi, z(j))
+              call fprota(cos, sin, h2(1:band2), a2(j, 1:band2))
+              if (j < j1_end) then
+                  i2 = min(j1_end - j, band1 - 1) + 1
+                  call fprota(cos, sin, h1(2:i2), a1(j, 2:i2))
+                  h1(1:i2) = [h1(2:i2), zero]
+              endif
+          end do
+
+          ! Phase 2: rotate h2 through a2 (diagonal at a2(ij,j))
+          do j = 1, band2
+              ij = j1_end + j
+              if (ij <= 0) cycle
+              piv = h2(j)
+              if (equal(piv, zero)) cycle
+              call fpgivs(piv, a2(ij,j), cos, sin)
+              call fprota(cos, sin, yi, z(ij))
+              if (j < band2) then
+                  call fprota(cos, sin, h2(j+1:band2), a2(ij, j+1:band2))
+              endif
+          end do
+      end subroutine fp_rotate_row_2mat
+
+      !> @brief Rotate a row into a band matrix with contiguous-block RHS.
+      !!
+      !! Standard-walk Givens rotation for grid-based surface fitting. Rotates
+      !! row \f$ h \f$ into the upper triangular band matrix \f$ A \f$, applying
+      !! the same rotations to a block right-hand side: the vector `right(1:nrhs)`
+      !! and the column `q(1:nrhs, irot)` of a 2D RHS matrix.
+      !!
+      !! This arises from the Kronecker product decomposition of the bivariate
+      !! system (Eq. 10.4-10.8), where the one-dimensional triangularizations
+      !! \f$ A_x \f$ and \f$ A_{uu} \f$ operate on contiguous blocks of the
+      !! tensor-product RHS.
+      !!
+      !! @param[in,out] h          Row to rotate, length `band`. Modified in place.
+      !! @param[in]     band       Bandwidth
+      !! @param[in,out] a          Upper triangular band matrix, dimension `(na,*)`
+      !! @param[in]     na         Leading dimension of `a`
+      !! @param[in,out] right      Block RHS vector of length `nrhs`; updated by rotations
+      !! @param[in,out] q          2D RHS matrix `(nrhs,*)`; column `irot` updated
+      !! @param[in]     nrhs       Number of RHS entries per rotation
+      !! @param[in]     irot_start Starting row index minus one
+      !!
+      !! @see Dierckx, Ch. 10, §10.2 (pp. 170-172), Eq. 10.4-10.8
+      !! @see fp_rotate_row_stride — stride (row-access) RHS variant
+      pure subroutine fp_rotate_row_block(h, band, a, na, right, q, nrhs, irot_start)
+          integer(FP_SIZE), intent(in)    :: band, na, nrhs, irot_start
+          real(FP_REAL),    intent(inout) :: h(band), a(na,*), right(nrhs), q(nrhs,*)
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: i, irot
+
+          irot = irot_start
+          do i = 1, band
+              irot = irot + 1
+              piv = h(i)
+              if (equal(piv, zero)) cycle
+              call fpgivs(piv, a(irot,1), cos, sin)
+              call fprota(cos, sin, right(1:nrhs), q(1:nrhs, irot))
+              if (i < band) call fprota(cos, sin, h(i+1:band), a(irot, 2:band-i+1))
+          end do
+      end subroutine fp_rotate_row_block
+
+      !> @brief Rotate a row into a band matrix with stride (row-access) RHS.
+      !!
+      !! Standard-walk Givens rotation for grid-based surface fitting. Rotates
+      !! row \f$ h \f$ into the upper triangular band matrix \f$ A \f$, applying
+      !! the same rotations to the vector `right(1:nrhs)` and the **row**
+      !! `c(irot, 1:nrhs)` of a 2D RHS matrix `c(ldc,*)`.
+      !!
+      !! Unlike fp_rotate_row_block (which accesses RHS by columns), this routine
+      !! accesses RHS by rows — the stride pattern needed for the \f$ A_y \f$ and
+      !! \f$ A_{vv} \f$ triangularizations and the tensor-product back-substitution
+      !! (Eq. 10.8) in the Kronecker product decomposition.
+      !!
+      !! @param[in,out] h          Row to rotate, length `band`. Modified in place.
+      !! @param[in]     band       Bandwidth
+      !! @param[in,out] a          Upper triangular band matrix, dimension `(na,*)`
+      !! @param[in]     na         Leading dimension of `a`
+      !! @param[in,out] right      Block RHS vector of length `nrhs`; updated by rotations
+      !! @param[in,out] c          2D RHS matrix `(ldc,*)`; row `irot` updated
+      !! @param[in]     ldc        Leading dimension of `c`
+      !! @param[in]     nrhs       Number of RHS entries per rotation
+      !! @param[in]     irot_start Starting row index minus one
+      !!
+      !! @see Dierckx, Ch. 10, §10.2 (pp. 170-172), Eq. 10.4-10.8
+      !! @see fp_rotate_row_block — contiguous-block (column-access) RHS variant
+      pure subroutine fp_rotate_row_stride(h, band, a, na, right, c, ldc, nrhs, irot_start)
+          integer(FP_SIZE), intent(in)    :: band, na, ldc, nrhs, irot_start
+          real(FP_REAL),    intent(inout) :: h(band), a(na,*), right(nrhs), c(ldc,*)
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: i, irot
+
+          irot = irot_start
+          do i = 1, band
+              irot = irot + 1
+              piv = h(i)
+              if (equal(piv, zero)) cycle
+              call fpgivs(piv, a(irot,1), cos, sin)
+              call fprota(cos, sin, right(1:nrhs), c(irot, 1:nrhs))
+              if (i < band) call fprota(cos, sin, h(i+1:band), a(irot, 2:band-i+1))
+          end do
+      end subroutine fp_rotate_row_stride
+
+      !> @brief Rotate a split row into the block-triangular periodic system with stride RHS.
+      !!
+      !! Combines the two-matrix periodic decomposition (Eq. 6.13) with the stride
+      !! (row-access) RHS pattern needed for grid-based surface fitting. Rotates the
+      !! split row \f$ [h_1 \mid h_2] \f$ into \f$ [R_{11}^* \mid R_{12}^*; 0 \mid R_{22}^*] \f$
+      !! in two phases, applying rotations to `right(1:nrhs)` and `c(j, 1:nrhs)`.
+      !!
+      !! Used by \f$ A_{vv} \f$ periodic grid rotations and periodic tensor-product
+      !! triangularization (fpgrdi, fpgrsp, fptrpe).
+      !!
+      !! @param[in,out] h1         First block of the row, length `band1`. Shifted left.
+      !! @param[in]     band1      Length of `h1`
+      !! @param[in,out] h2         Second block (wraparound), length `band2`
+      !! @param[in]     band2      Length of `h2`
+      !! @param[in,out] a1         Band matrix \f$ R_{11}^* \f$, dimension `(na,*)`
+      !! @param[in,out] a2         Band matrix \f$ R_{12}^* / R_{22}^* \f$, dimension `(na,*)`
+      !! @param[in]     na         Leading dimension of `a1` and `a2`
+      !! @param[in,out] right      Block RHS vector of length `nrhs`; updated by rotations
+      !! @param[in,out] c          2D RHS matrix `(ldc,*)`; rows updated by rotations
+      !! @param[in]     ldc        Leading dimension of `c`
+      !! @param[in]     nrhs       Number of RHS entries per rotation
+      !! @param[in]     j1_start   First row index for Phase 1
+      !! @param[in]     j1_end     Last row index for Phase 1
+      !!
+      !! @see Dierckx, Ch. 10, §10.2 (pp. 170-172), Eq. 10.4-10.8
+      !! @see Dierckx, Ch. 6, §6.1.1 (pp. 95-100), Eq. 6.10, 6.13
+      !! @see fp_rotate_row_2mat_vec — parametric (column-access) variant
+      pure subroutine fp_rotate_2mat_stride(h1, band1, h2, band2, a1, a2, na, &
+                                             right, c, ldc, nrhs, j1_start, j1_end)
+          integer(FP_SIZE), intent(in)    :: band1, band2, na, ldc, nrhs, j1_start, j1_end
+          real(FP_REAL),    intent(inout) :: h1(band1), h2(band2)
+          real(FP_REAL),    intent(inout) :: a1(na,*), a2(na,*)
+          real(FP_REAL),    intent(inout) :: right(nrhs), c(ldc,*)
+
+          real(FP_REAL) :: cos, sin, piv
+          integer(FP_SIZE) :: i2, ij, j
+
+          ! Phase 1: rotate h1 through a1 with shifting, cross-rotating h2/a2
+          do j = j1_start, j1_end
+              piv = h1(1)
+              i2 = min(j1_end - j, band1 - 1)
+              if (not_equal(piv, zero)) then
+                  call fpgivs(piv, a1(j,1), cos, sin)
+                  call fprota(cos, sin, right(1:nrhs), c(j, 1:nrhs))
+                  call fprota(cos, sin, h2(1:band2), a2(j, 1:band2))
+                  if (i2 > 0) call fprota(cos, sin, h1(2:i2+1), a1(j, 2:i2+1))
+              endif
+              h1(1:i2+1) = [h1(2:i2+1), zero]
+          end do
+
+          ! Phase 2: rotate h2 through a2 (diagonal at a2(ij,j))
+          do j = 1, band2
+              ij = j1_end + j
+              if (ij <= 0) cycle
+              piv = h2(j)
+              if (equal(piv, zero)) cycle
+              call fpgivs(piv, a2(ij,j), cos, sin)
+              call fprota(cos, sin, right(1:nrhs), c(ij, 1:nrhs))
+              if (j < band2) call fprota(cos, sin, h2(j+1:band2), a2(ij, j+1:band2))
+          end do
+      end subroutine fp_rotate_2mat_stride
+
+      !> @brief Compute spline coefficients on a polar/spherical grid via Kronecker product.
+      !!
+      !! Grid-based variant of the Kronecker product decomposition (Eq. 10.4-10.8)
+      !! adapted for polar and spherical coordinates. Handles the periodic
+      !! \f$ v \f$-direction using two-matrix rotations (fp_rotate_2mat_stride)
+      !! and incorporates origin/pole boundary conditions via the `iop0`/`iop1`
+      !! flags. The `dz` parameter provides prescribed values at \f$ u = 0 \f$
+      !! and/or \f$ u = 1 \f$.
+      !!
+      !! Uses `lback = .true.` for back-substitution only (coefficients from
+      !! a previous triangularization).
+      !!
+      !! @param[in,out] ifsu    Flag: 0 = recompute \f$ S_{pu} \f$
+      !! @param[in,out] ifsv    Flag: 0 = recompute \f$ S_{pv} \f$
+      !! @param[in,out] ifbu    Flag: 0 = recompute \f$ B_u \f$
+      !! @param[in,out] ifbv    Flag: 0 = recompute \f$ B_v \f$
+      !! @param[in]     lback   `.true.` = back-substitution only
+      !! @param[in]     u       Radial grid values, length `mu`
+      !! @param[in]     mu      Number of radial grid points
+      !! @param[in]     v       Angular grid values, length `mv`
+      !! @param[in]     mv      Number of angular grid points
+      !! @param[in]     z       Data values, length `mz`
+      !! @param[in]     mz      Length of `z`
+      !! @param[in]     dz      Boundary values at origin/edge
+      !! @param[in]     iop0    Boundary condition at \f$ u = 0 \f$
+      !! @param[in]     iop1    Boundary condition at \f$ u = 1 \f$
+      !! @param[in]     tu      Radial knot vector
+      !! @param[in]     nu      Number of radial knots
+      !! @param[in]     tv      Angular knot vector
+      !! @param[in]     nv      Number of angular knots
+      !! @param[out]    p       Smoothing parameter (output)
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in]     nc      Length of `c`
+      !! @param[out]    sq      Sum of squared residuals
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fpu     Residual sums per radial interval
+      !! @param[in,out] fpv     Residual sums per angular interval
+      !! @param[in]     mm      Work dimension
+      !! @param[in]     mvnu    Work dimension
+      !! @param[in,out] spu     Radial B-spline observation matrix
+      !! @param[in,out] spv     Angular B-spline observation matrix
+      !! @param[in,out] right   Work: RHS vector
+      !! @param[in,out] q       Work: RHS matrix
+      !! @param[in,out] au      Work: radial band matrix
+      !! @param[in,out] av1     Work: angular band matrix (main block)
+      !! @param[in,out] av2     Work: angular band matrix (periodic block)
+      !! @param[in,out] bu      Work: radial discontinuity jumps
+      !! @param[in,out] bv      Work: angular discontinuity jumps
+      !! @param[in,out] aa      Work: boundary constraint matrix
+      !! @param[in,out] bb      Work: boundary constraint matrix
+      !! @param[in,out] cc      Work: boundary constraint matrix
+      !! @param[in,out] cosi    Work: cosine integrals
+      !! @param[in,out] nru     Work: radial knot interval indices
+      !! @param[in,out] nrv     Work: angular knot interval indices
+      !!
+      !! @see Dierckx, Ch. 10, §10.2 (pp. 170-172), Eq. 10.4-10.8
+      !! @see fp_rotate_2mat_stride — periodic grid Givens rotation
+      pure subroutine fpgrdi(ifsu,ifsv,ifbu,ifbv,lback,u,mu,v, &
+                             mv,z,mz,dz,iop0,iop1,tu,nu,tv,nv,p,c,nc,sq,fp,fpu,fpv,mm, &
+                             mvnu,spu,spv,right,q,au,av1,av2,bu,bv,aa,bb,cc,cosi,nru,nrv)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(out)   :: sq
+      real(FP_REAL), intent(inout) :: fp  ! computed if .not.lback
+      real(FP_REAL), intent(out)   :: p
+      integer(FP_SIZE),  intent(inout) :: ifsu,ifsv,ifbu,ifbv
+      logical(FP_BOOL),  intent(in)    :: lback
+      integer(FP_SIZE),  intent(in)    :: mu,mv,mz,iop0,iop1,nu,nv,nc,mm,mvnu
+      !  ..array arguments..
+      real(FP_REAL), intent(inout) :: fpu(nu),fpv(nv)   ! if .not.lback
+      real(FP_REAL), intent(inout) :: bu(nu,5),bv(nv,5) ! ifbu,ifbv
+      real(FP_REAL), intent(in)    :: u(mu),v(mv),z(mz),dz(3),tu(nu),tv(nv)
+      real(FP_REAL), intent(inout) :: spu(mu,4),spv(mv,4),cosi(nv,2),au(nu,5),av1(nv,6),av2(nv,4),right(mm), &
+                                    aa(2,mv),bb(2,nv),c(nc),cc(nv),q(mvnu)
+      integer(FP_SIZE), intent(inout) :: nru(mu),nrv(mv)
+      !  ..local scalars..
+      real(FP_REAL) :: arg,dz1,dz2,dz3,fac,fac0,pinv,term
+
+      integer(FP_SIZE) :: i,ii,ij,ik,irot,it,iz,i0,i1,i2,j,jk,jper,j0,k,k1,&
+                 l,l0,l1,mvv,ncof,nrold,nroldu,nroldv,number,numu,numu1,numv,&
+                 numv1,nuu,nu4,nu7,nu8,nu9,nv11,nv4,nv7,nv8,n1
+
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1),h1(DEGREE_3+2),h2(DEGREE_3+1)
+
+      !  let
+      !               |   (spu)    |            |   (spv)    |
+      !        (au) = | ---------- |     (av) = | ---------- |
+      !               | (1/p) (bu) |            | (1/p) (bv) |
+      !
+      !                                | z  ' 0 |
+      !                            q = | ------ |
+      !                                | 0  ' 0 |
+      !
+      !  with c      : the (nu-4) x (nv-4) matrix which contains the b-spline
+      !                coefficients.
+      !       z      : the mu x mv matrix which contains the function values.
+      !       spu,spv: the mu x (nu-4), resp. mv x (nv-4) observation matrices
+      !                according to the least-squares problems in the u-,resp.
+      !                v-direction.
+      !       bu,bv  : the (nu-7) x (nu-4),resp. (nv-7) x (nv-4) matrices
+      !                containing the discontinuity jumps of the derivatives
+      !                of the b-splines in the u-,resp.v-variable at the knots
+      !  the b-spline coefficients of the smoothing spline are then calculated
+      !  as the least-squares solution of the following over-determined linear
+      !  system of equations
+      !
+      !    (1)  (av) c (au)' = q
+      !
+      !  subject to the constraints
+      !
+      !    (2)  c(i,nv-3+j) = c(i,j), j=1,2,3 ; i=1,2,...,nu-4
+      !
+      !    (3)  if iop0 = 0  c(1,j) = dz(1)
+      !            iop0 = 1  c(1,j) = dz(1)
+      !                      c(2,j) = dz(1)+(dz(2)*cosi(1,j)+dz(3)*cosi(2,j))*
+      !                               tu(5)/3. = cc(j) , j=1,2,...nv-4
+      !
+      !    (4)  if iop1 = 1  c(nu-4,j) = 0, j=1,2,...,nv-4.
+      !
+      !  initialization
+      nu4  = nu-4
+      nu7  = nu-7
+      nu8  = nu-8
+      nu9  = nu-9
+      nv4  = nv-4
+      nv7  = nv-7
+      nv8  = nv-8
+      nv11 = nv-11
+      nuu  = nu4-iop0-iop1-1
+      pinv = merge(one/p,one,p>zero)
+
+      !  it depends on the value of the flags ifsu,ifsv,ifbu,ifbv and iop0 and
+      !  on the value of p whether the matrices (spu), (spv), (bu), (bv) and
+      !  (cosi) still must be determined.
+      if (ifsu==0) then
+
+          !  calculate the non-zero elements of the matrix (spu) which is the ob-
+          !  servation matrix according to the least-squares spline approximation
+          !  problem in the u-direction.
+          l  = 4
+          l1 = 5
+          number = 0
+
+          do it=1,mu
+            arg = u(it)
+            l0 = l
+            l = fp_knot_interval(tu, arg, l, nu4)
+            number = number + (l - l0)
+            l1 = l + 1
+            h = fpbspl(tu,nu,DEGREE_3,arg,l)
+            spu(it,1:4) = h(1:4)
+            nru(it) = number
+          end do
+          ifsu = 1
+
+      endif
+
+      !  calculate the non-zero elements of the matrix (spv) which is the ob-
+      !  servation matrix according to the least-squares spline approximation
+      !  problem in the v-direction.
+      if (ifsv==0) then
+          l  = 4
+          l1 = 5
+          number = 0
+          do it=1,mv
+             arg = v(it)
+             l0 = l
+             l = fp_knot_interval(tv, arg, l, nv4)
+             number = number + (l - l0)
+             l1 = l + 1
+             h = fpbspl(tv,nv,DEGREE_3,arg,l)
+             spv(it,1:4) = h(1:4)
+             nrv(it) = number
+          end do
+          ifsv = 1
+
+          if (iop0/=0) then
+              !  calculate the coefficients of the interpolating splines for cos(v) and sin(v).
+              cosi(:nv4,:) = zero
+              if (nv7>=4) then
+                  do i=1,nv7
+                     l = i+3
+                     arg = tv(l)
+                     h = fpbspl(tv,nv,DEGREE_3,arg,l)
+                     av1(i,1:3) = h(1:3)
+                     cosi(i,1) = cos(arg)
+                     cosi(i,2) = sin(arg)
+                  end do
+                  call fpcyt1(av1,nv7,nv)
+                  do j=1,2
+                     call fpcyt2(av1,nv7,cosi(1:nv7,j),right,nv)
+                     cosi(:nv4,j) = [right(nv7),right(1:nv7),right(1:2)]
+                  end do
+              endif
+          endif
+      end if
+
+      if (p>zero) then
+          !  calculate the non-zero elements of the matrix (bu).
+          if (ifbu==0 .and. nu8/=0) then
+             call fpdisc(tu,nu,DEGREE_5,bu,nu)
+             ifbu = 1
+          endif
+          !  calculate the non-zero elements of the matrix (bv).
+          if (ifbv==0 .and. nv8/=0) then
+             call fpdisc(tv,nv,DEGREE_5,bv,nv)
+             ifbv = 1
+          endif
+      endif
+      !  substituting (2),(3) and (4) into (1), we obtain the overdetermined system
+      !         (5)  (avv) (cr) (auu)' = (qq)
+      !  from which the nuu*nv7 remaining coefficients
+      !         c(i,j) , i=2+iop0,3+iop0,...,nu-4-iop1 ; j=1,2,...,nv-7 ,
+      !  the elements of (cr), are then determined in the least-squares sense.
+      !  simultaneously, we compute the resulting sum of squared residuals sq.
+
+      dz1 = dz(1)
+      aa (1,1:mv) = dz1
+      if (nv8/=0 .and. p>zero) bb(1,1:nv8) = zero
+      mvv = mv
+      if (iop0/=0) then
+          fac = tu(5)/three
+          dz2 = dz(2)*fac
+          dz3 = dz(3)*fac
+          cc(1:nv4) = dz1+dz2*cosi(:nv4,1)+dz3*cosi(1:nv4,2)
+          
+          forall (i=1:mv) aa(2,i) = dot_product(spv(i,1:4),cc(nrv(i)+1:nrv(i)+4))
+
+          if (nv8/=0 .and. p>zero) then
+             forall(i=1:nv8) bb(2,i) = pinv*dot_product(cc(i:i+4),bv(i,1:5))
+             mvv = mvv+nv8
+          endif
+      endif
+
+      !  we first determine the matrices (auu) and (qq). then we reduce the
+      !  matrix (auu) to upper triangular form (ru) using givens rotations.
+      !  we apply the same transformations to the rows of matrix qq to obtain
+      !  the (mv+nv8) x nuu matrix g.
+      !  we store matrix (ru) into au and g into q.
+      l = mvv*nuu
+      !  initialization.
+      sq = zero
+      q(1:l) = zero
+      au(1:nuu,1:5) = zero
+      l     = 0
+      nrold = 0
+      n1    = nrold+1
+      auu_iterations: do it=1,mu
+         number = nru(it)
+
+         ! find the appropriate column of q.
+         inner: do
+
+            right(1:mvv) = zero
+
+            if (nrold/=number) then
+
+               if (p<=zero) then
+                  nrold = n1
+                  n1 = n1+1
+                  cycle inner
+               endif
+
+               ! fetch a new row of matrix (bu).
+               h(1:5) = bu(n1,1:5)*pinv
+               i0 = 1
+               i1 = 5
+            else
+               ! fetch a new row of matrix (spu).
+               h(1:4) = spu(it,1:4)
+
+               ! find the appropriate column of q.
+               right(1:mv) = z(l+1:l+mv)
+               l = l+mv
+
+               i0 = 1
+               i1 = 4
+
+            endif
+            if (nu7-number == iop1) i1 = i1-1
+            j0 = n1
+
+            ! take into account that we eliminate the constraints (3)
+            do while (j0-1<=iop0)
+               fac0 = h(i0)
+                            right(1:mv)        = right(1:mv)       -fac0*aa(j0,1:mv)
+               if (mv/=mvv) right(mv+1:mv+nv8) = right(mv+1:mv+nv8)-fac0*bb(j0,1:nv8)
+               j0 = j0+1
+               i0 = i0+1
+            end do
+
+            irot = max(0,nrold-iop0-1)
+
+            ! rotate the new row of matrix (auu) into triangle.
+            if (i0<=i1) call fp_rotate_row_block(h(i0), i1-i0+1, au, nu, right, q, mvv, irot)
+
+            ! we update the sum of squared residuals
+            sq = sq+sum(right(:mvv)**2)
+
+            if (nrold==number) cycle auu_iterations
+            nrold = n1
+            n1 = n1+1
+        end do inner
+      end do auu_iterations
+
+      !  we determine the matrix (avv) and then we reduce it to upper triangular form (rv) using
+      !  givens rotations. we apply the same transformations to the columns of matrix g to obtain
+      !  the (nv-7) x (nu-5-iop0-iop1) matrix h. we store matrix (rv) into av1 and av2, h into c.
+      !  the nv7 x nv7 upper triangular matrix (rv) has the form
+      !              | av1 '     |
+      !       (rv) = |     ' av2 |
+      !              |  0  '     |
+      !  with (av2) a nv7 x 4 matrix and (av1) a nv11 x nv11 upper triangular matrix of bandwidth 5.
+      ncof = nuu*nv7
+
+      !  initialization.
+      c  (1:ncof)    = zero
+      av1(1:nv4,1:5) = zero
+      av2(1:nv4,1:4) = zero
+      jper = 0
+      nrold = 0
+      avv_iterations: do it=1,mv
+         number = nrv(it)
+
+         avv_inner: do
+
+         if (nrold/=number) then
+
+            if (p<=zero) then
+               nrold = nrold+1
+               cycle avv_inner
+            end if
+
+            ! fetch a new row of matrix (bv).
+            n1 = nrold+1
+            h(1:5) = bv(n1,1:5)*pinv
+
+            ! find the appropriate row of g.
+            if (mv/=mvv) then
+               l = mv+n1
+               right(1:nuu) = q(l:l+(nuu-1)*mvv:mvv)
+            else
+               right(1:nuu) = zero
+            endif
+
+         else
+
+            ! fetch a new row of matrix (spv)
+            h(1:5) = [spv(it,1:4),zero]
+
+            ! find the appropriate row of g.
+            right(1:nuu) = q(it:it+(nuu-1)*mvv:mvv)
+
+         endif
+
+         ! test whether there are non-zero values in the new row of (avv)
+         ! corresponding to the b-splines n(j,v),j=nv7+1,...,nv4.
+         if (nrold>=nv11) then
+
+             if (jper==0) then
+                ! initialize the matrix (av2).
+                jk = nv11+1
+                do i=1,4
+                   ik = jk
+                   do j=1,5
+                      if (ik<=0) exit
+                      av2(ik,i) = av1(ik,j)
+                      ik = ik-1
+                   end do
+                   jk = jk+1
+                end do
+                jper = 1
+             endif
+
+             ! if one of the non-zero elements of the new row corresponds to one of the b-splines n(j;v),
+             ! j=nv7+1,...,nv4, we take account of condition (2) for setting up this row of (avv). the row
+             ! is stored in h1  the part with respect to av1) and h2 (the part with respect to av2).
+             h1 = zero
+             h2 = zero
+             do i=1,5
+                j  = nrold-nv11+i
+                l0 = j
+                l1 = l0-4
+                do while (l1>max(0,nv11))
+                   l0 = l1-nv11
+                   l1 = l0-4
+                end do
+                if (l1<=0) then
+                   h2(l0) = h2(l0) + h(i)
+                else ! (l1<=nv11)
+                   h1(l1) = h(i)
+                endif
+             end do
+
+             ! rotate the new row of (avv) into triangle.
+             call fp_rotate_2mat_stride(h1, 5, h2, 4, av1, av2, nv, &
+                                        right, c, nv7, nuu, 1, nv11)
+
+         else
+
+             ! rotation into triangle of the new row of (avv), in case the elements
+             ! corresponding to the b-splines n(j;v),j=nv7+1,...,nv4 are all zero.
+             call fp_rotate_row_stride(h, 5, av1, nv, right, c, nv7, nuu, nrold)
+
+         endif
+
+         ! we update the sum of squared residuals
+         sq = sq+sum(right(:nuu)**2)
+
+         if (nrold==number) exit avv_inner
+         nrold = nrold+1
+         end do avv_inner
+      end do avv_iterations
+
+      !  test whether the b-spline coefficients must be determined.
+      spline_coefs: if (.not.lback) then
+
+          !  backward substitution to obtain the b-spline coefficients as the solution of the linear
+          !  system    (rv) (cr) (ru)' = h.
+
+          !  first step: solve the system  (rv) (c1) = h.
+          k = 1
+          do i=1,nuu
+             c(k:k+nv7-1) = fpbacp(av1,av2,c(k),nv7,DEGREE_4,DEGREE_5,nv)
+             k = k+nv7
+          end do
+
+          !  second step: solve the system  (cr) (ru)' = (c1).
+          k = 0
+          do j=1,nv7
+            k = k+1
+            right(:nuu) = c(k:k+(nuu-1)*nv7:nv7)
+            right(:nuu) = fpback(au,right,nuu,DEGREE_5,nu)
+            c(k:k+(nuu-1)*nv7:nv7) = right(:nuu)
+          end do
+
+          !  calculate from the conditions (2)-(3)-(4), the remaining b-spline coefficients.
+          ncof = nu4*nv4
+
+          j = 0
+
+          i = nv4 ! i = "last" element pointer
+          q (1:nv4) = dz1
+          if (iop0/=0) then
+             i=2*nv4
+             q(nv4+1:2*nv4) = cc(1:nv4)
+          end if
+
+
+          if (nuu/=0) then
+             do l=1,nuu
+                ii = i
+                do k=1,nv7
+                   i = i+1
+                   j = j+1
+                   q(i) = c(j)
+                end do
+                do k=1,3
+                   ii = ii+1
+                   i  = i+1
+                   q(i) = q(ii)
+                end do
+             end do
+          endif
+
+          if (iop1/=0) q(i+1:i+nv4) = zero
+
+          c(1:ncof) = q(1:ncof)
+
+          !  calculate the quantities
+          !    res(i,j) = (z(i,j) - s(u(i),v(j)))**2 , i=1,2,..,mu; j=1,2,..,mv
+          !    fp = sumi=1,mu(sumj=1,mv(res(i,j)))
+          !    fpu(r) = sum''i(sumj=1,mv(res(i,j))) , r=1,2,...,nu-7, tu(r+3) <= u(i) <= tu(r+4)
+          !    fpv(r) = sumi=1,mu(sum''j(res(i,j))) , r=1,2,...,nv-7, tv(r+3) <= v(j) <= tv(r+4)
+          fp  = zero
+          fpu = zero
+          fpv = zero
+          iz = 0
+          nroldu = 0
+          !  main loop for the different grid points.
+          do i1=1,mu
+             numu = nru(i1)
+             numu1 = numu+1
+             nroldv = 0
+             do i2=1,mv
+                numv = nrv(i2)
+                numv1 = numv+1
+                iz = iz+1
+                !  evaluate s(u,v) at the current grid point by making the sum of the
+                !  cross products of the non-zero b-splines at (u,v), multiplied with
+                !  the appropriate b-spline coefficients.
+                term = zero
+                k1 = numu*nv4+numv
+                do l1=1,4
+                   fac  = spu(i1,l1)
+                   term = term + fac*dot_product(spv(i2,1:4),c(k1+1:k1+4))
+                   k1 = k1+nv4
+                end do
+                !  calculate the squared residual at the current grid point.
+                term = (z(iz)-term)**2
+                !  adjust the different parameters.
+                fp = fp+term
+                fpu(numu1) = fpu(numu1)+term
+                fpv(numv1) = fpv(numv1)+term
+                fac = term*half
+
+                if(numv/=nroldv) then
+                   fpv(numv1) = fpv(numv1)-fac
+                   fpv(numv)  = fpv(numv)+fac
+                endif
+                nroldv = numv
+                if (numu/=nroldu) then
+                   fpu(numu1) = fpu(numu1)-fac
+                   fpu(numu)  = fpu(numu)+fac
+                endif
+              end do
+              nroldu = numu
+          end do
+      endif spline_coefs
+
+      end subroutine fpgrdi
+
+
+      !> @brief Compute parametric surface spline coefficients on a grid.
+      !!
+      !! Grid-based Kronecker product decomposition (Eq. 10.9-10.12) for
+      !! \f$ d \f$-dimensional parametric surfaces. Computes the least-squares
+      !! spline \f$ s_\infty(u,v) \f$ and the per-interval residual sums
+      !! `fpu(j)` and `fpv(j)` needed for knot-placement decisions. Handles
+      !! optional periodicity in \f$ u \f$ and/or \f$ v \f$ via the `ipar` flags,
+      !! using two-matrix variants for periodic directions.
+      !!
+      !! @param[in,out] ifsu    Flag: 0 = recompute \f$ S_{pu} \f$
+      !! @param[in,out] ifsv    Flag: 0 = recompute \f$ S_{pv} \f$
+      !! @param[in,out] ifbu    Flag: 0 = recompute \f$ B_u \f$
+      !! @param[in,out] ifbv    Flag: 0 = recompute \f$ B_v \f$
+      !! @param[in]     idim    Number of surface dimensions \f$ d \f$
+      !! @param[in]     ipar    Periodicity flags (packed)
+      !! @param[in]     u       \f$ u \f$-grid values, length `mu`
+      !! @param[in]     mu      Number of \f$ u \f$-grid points
+      !! @param[in]     v       \f$ v \f$-grid values, length `mv`
+      !! @param[in]     mv      Number of \f$ v \f$-grid points
+      !! @param[in]     z       Data values, length `mz`
+      !! @param[in]     mz      Length of `z`
+      !! @param[in]     tu      \f$ u \f$-knot vector
+      !! @param[in]     nu      Number of \f$ u \f$-knots
+      !! @param[in]     tv      \f$ v \f$-knot vector
+      !! @param[in]     nv      Number of \f$ v \f$-knots
+      !! @param[in]     p       Smoothing parameter
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in]     nc      Length of `c`
+      !! @param[in,out] fp      Total weighted sum of squared residuals
+      !! @param[in,out] fpu     Residual sums per \f$ u \f$-interval
+      !! @param[in,out] fpv     Residual sums per \f$ v \f$-interval
+      !! @param[in]     mm      Work dimension
+      !! @param[in]     mvnu    Work dimension
+      !! @param[in,out] spu     \f$ u \f$-B-spline observation matrix
+      !! @param[in,out] spv     \f$ v \f$-B-spline observation matrix
+      !! @param[in,out] right   Work: RHS vector
+      !! @param[in,out] q       Work: RHS matrix
+      !! @param[in,out] au      Work: \f$ u \f$-band matrix (main)
+      !! @param[in,out] au1     Work: \f$ u \f$-band matrix (periodic)
+      !! @param[in,out] av      Work: \f$ v \f$-band matrix (main)
+      !! @param[in,out] av1     Work: \f$ v \f$-band matrix (periodic)
+      !! @param[in,out] bu      Work: \f$ u \f$-discontinuity jumps
+      !! @param[in,out] bv      Work: \f$ v \f$-discontinuity jumps
+      !! @param[in,out] nru     Work: \f$ u \f$-knot interval indices
+      !! @param[in,out] nrv     Work: \f$ v \f$-knot interval indices
+      !!
+      !! @see Dierckx, Ch. 10, §10.3 (pp. 173-178), Eq. 10.9-10.12
+      !! @see fptrnp, fptrpe — tensor-product triangularization
+      pure subroutine fpgrpa(ifsu,ifsv,ifbu,ifbv,idim,ipar,u,mu,v,mv,z,mz,tu,nu,tv,nv,p,c,nc,fp,fpu,fpv, &
+                             mm,mvnu,spu,spv,right,q,au,au1,av,av1,bu,bv,nru,nrv)
+
+      !  ..
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(inout) :: ifsu ! (spu) needs to be determined if /=0 [todo: make logical]
+      integer(FP_SIZE), intent(inout) :: ifsv ! (spv) needs to be determined
+      integer(FP_SIZE), intent(inout) :: ifbu ! (bu)  needs to be determined
+      integer(FP_SIZE), intent(inout) :: ifbv ! (bv)  needs to be determined
+      integer(FP_SIZE), intent(in) :: idim,mu,mv,mz,nu,nv,nc,mm,mvnu ! sizes
+
+      !  ..array arguments..
+      real(FP_REAL), intent(inout) :: c(nc*idim),right(mm*idim),q(mvnu),au(nu,5),av(nv,5),au1(nu,4),av1(nv,4)
+      real(FP_REAL), intent(in) :: u(mu),v(mv),z(mz*idim),tu(nu),tv(nv)
+      integer(FP_SIZE), intent(in) :: ipar(2)
+
+      real(FP_REAL), intent(in)  :: p
+      real(FP_REAL), intent(out) :: fp,fpu(nu),fpv(nv)
+
+      ! Only modified if ifsu, ifsv
+      real(FP_REAL), intent(inout) :: spu(mu,4),spv(mv,4)
+      integer(FP_SIZE), intent(inout) :: nru(mu),nrv(mv)
+
+      ! Only modified if ifbu,ifbv
+      real(FP_REAL), intent(inout) :: bu(nu,5),bv(nv,5)
+
+      !  ..local scalars..
+      real(FP_REAL) :: arg,fac,term,value
+      integer(FP_SIZE) :: i,id,ii,it,iz,i1,i2,j,jz,k,k1,k2,l,l1,l2,mvv,k0,muu,ncof,nroldu,nroldv,number,nmd, &
+                 numu,numu1,numv,numv1,nuu,nvv,nu4,nu7,nu8,nv4,nv7,nv8,n33
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+      !  ..subroutine references..
+      !    fpback,fpbspl,fpdisc,fpbacp,fptrnp,fptrpe
+      !  ..
+      !  let
+      !               |   (spu)    |            |   (spv)    |
+      !        (au) = | ---------- |     (av) = | ---------- |
+      !               | (1/p) (bu) |            | (1/p) (bv) |
+      !
+      !                                | z  ' 0 |
+      !                            q = | ------ |
+      !                                | 0  ' 0 |
+      !
+      !  with c      : the (nu-4) x (nv-4) matrix which contains the b-spline coefficients.
+      !       z      : the mu x mv matrix which contains the function values.
+      !       spu,spv: the mu x (nu-4), resp. mv x (nv-4) observation matrices according to the
+      !                least-squares problems in the u-,resp. v-direction.
+      !       bu,bv  : the (nu-7) x (nu-4),resp. (nv-7) x (nv-4) matrices containing the discontinuity
+      !                jumps of the derivatives of the b-splines in the u-,resp.v-variable at the knots
+      !
+      !  the b-spline coefficients of the smoothing spline are then calculated as the least-squares
+      !  solution of the following over-determined linear system of equations
+      !
+      !    (1)  (av) c (au)' = q
+      !
+      !  subject to the constraints
+      !
+      !    (2)  c(nu-3+i,j) = c(i,j), i=1,2,3 ; j=1,2,...,nv-4
+      !            if(ipar(1)/=0)
+      !
+      !    (3)  c(i,nv-3+j) = c(i,j), j=1,2,3 ; i=1,2,...,nu-4
+      !            if(ipar(2)/=0)
+      !
+
+      !  initialization
+      nu4 = nu-4
+      nu7 = nu-7
+      nu8 = nu-8
+      nv4 = nv-4
+      nv7 = nv-7
+      nv8 = nv-8
+      muu = mu - merge(1,0,ipar(1)/=0)
+      mvv = mv - merge(1,0,ipar(2)/=0)
+
+      !  it depends on the value of the flags ifsu,ifsv,ifbu  and ibvand
+      !  on the value of p whether the matrices (spu), (spv), (bu) and (bv)
+      !  still must be determined.
+      compute_spu: if (ifsu==0) then
+          !  calculate the non-zero elements of the matrix (spu) [mu x nu-4] which is the observation
+          !  matrix according to the least-squares spline approximation problem in the u-direction.
+          l  = 4
+          l1 = 5
+          number = 0
+          spu_rows: do it=1,muu
+            arg = u(it)
+            do while (arg>=tu(l1) .and. l/=nu4)
+               l  = l1
+               l1 = l+1
+               number = number+1
+            end do
+            h = fpbspl(tu,nu,DEGREE_3,arg,l)
+            spu(it,1:4) = h(1:4)
+            nru(it) = number
+          end do spu_rows
+
+          ! Set (spu) known
+          ifsu = 1
+      endif compute_spu
+
+      !  calculate the non-zero elements of the matrix (spv) [mv x nv-4] which is the observation
+      !  matrix according to the least-squares spline approximation problem in the v-direction.
+      compute_spv: if (ifsv==0) then
+          l  = 4
+          l1 = 5
+          number = 0
+          spv_rows: do it=1,mvv
+            arg = v(it)
+            do while (arg>=tv(l1) .and. l/=nv4)
+               l = l1
+               l1 = l+1
+               number = number+1
+            end do
+            h = fpbspl(tv,nv,DEGREE_3,arg,l)
+            spv(it,1:4) = h(1:4)
+            nrv(it) = number
+          end do spv_rows
+
+          ! Set (spv) known
+          ifsv = 1
+      endif compute_spv
+
+      if (p>zero) then
+
+         ! calculate the non-zero elements of the matrix (bu).
+         if (ifbu==0 .and. nu8/=0) then
+            call fpdisc(tu,nu,DEGREE_5,bu,nu)
+            ifbu = 1
+         endif
+
+         ! calculate the non-zero elements of the matrix (bv).
+         if (ifbv==0 .and. nv8/=0) then
+            call fpdisc(tv,nv,DEGREE_5,bv,nv)
+            ifbv = 1
+         endif
+
+      endif
+
+      !  substituting (2)  and (3) into (1), we obtain the overdetermined system
+      !         (4)  (avv) (cr) (auu)' = (qq)
+      !  from which the nuu*nvv remaining coefficients
+      !         c(i,j) , i=1,...,nu-4-3*ipar(1) ; j=1,...,nv-4-3*ipar(2) ,
+      !  the elements of (cr), are then determined in the least-squares sense.
+      !  we first determine the matrices (auu) and (qq). then we reduce the matrix (auu) to upper
+      !  triangular form (ru) using givens rotations.
+      !  we apply the same transformations to the rows of matrix qq to obtain the (mv) x nuu matrix g.
+      !  we store matrix (ru) into au (and au1 if ipar(1)=1) and g into q.
+      if (ipar(1)==0) then
+         nuu = nu4
+         call fptrnp(mu,mv,idim,nu,nru,spu,p,bu,z,au,q,right)
+      else
+         nuu = nu7
+         call fptrpe(mu,mv,idim,nu,nru,spu,p,bu,z,au,au1,q,right)
+      endif
+
+      !  we determine the matrix (avv) and then we reduce this matrix to upper triangular form (rv)
+      !  using givens rotations. we apply the same transformations to the columns of matrix g to obtain
+      !  the (nvv) x (nuu) matrix h. we store matrix (rv) into av (and av1 if ipar(2)=1) and h into c.
+      if (ipar(2)==0) then
+         nvv = nv4
+         call fptrnp(mv,nuu,idim,nv,nrv,spv,p,bv,q,av,c,right)
+      else
+         nvv = nv7
+         call fptrpe(mv,nuu,idim,nv,nrv,spv,p,bv,q,av,av1,c,right)
+      endif
+
+      !  backward substitution to obtain the b-spline coefficients as the solution of the linear system
+      !   (rv) (cr) (ru)' = h.
+      !  first step: solve the system  (rv) (c1) = h.
+      ncof = nuu*nvv
+      k = 1
+      do ii=1,idim
+          do i=1,nuu
+             if (ipar(2)/=0) then
+                c(k:k+nvv-1) = fpbacp(av,av1,c(k),nvv,DEGREE_4,DEGREE_5,nv)
+             else
+                c(k:k+nvv-1) = fpback(av,c(k),nvv,DEGREE_5,nv)
+             end if
+             k = k+nvv
+          end do
+      end do
+
+      !  second step: solve the system  (cr) (ru)' = (c1).
+      do ii=1,idim
+          k = (ii-1)*ncof
+          do j=1,nvv
+            k = k+1
+            l = k
+            do i=1,nuu
+                right(i) = c(l)
+                l = l+nvv
+            end do
+            if (ipar(1)/=0) then
+                right(:nuu) = fpbacp(au,au1,right,nuu,DEGREE_4,DEGREE_5,nu)
+            else
+                right(:nuu) = fpback(au,right,nuu,DEGREE_5,nu)
+            end if
+            l = k
+            do i=1,nuu
+                c(l) = right(i)
+                l = l+nvv
+            end do
+          end do
+      end do
+
+      !  calculate from the conditions (2)-(3), the remaining b-spline coefficients.
+      if (ipar(2)/=0) then
+          i = 0
+          j = 0
+          do id=1,idim
+              do l=1,nuu
+                 ii = i
+                 do k=1,nvv
+                    i = i+1
+                    j = j+1
+                    q(i) = c(j)
+                 end do
+                 do k=1,3
+                    ii = ii+1
+                    i = i+1
+                    q(i) = q(ii)
+                 end do
+              end do
+          end do
+          ncof = nv4*nuu
+          nmd  = ncof*idim
+          c(1:nmd) = q(1:nmd)
+      endif
+
+      if (ipar(1)/=0) then
+          i = 0
+          j = 0
+          n33 = 3*nv4
+          do id=1,idim
+             ii = i
+             do k=1,ncof
+                i = i+1
+                j = j+1
+                q(i) = c(j)
+             end do
+             do k=1,n33
+                ii = ii+1
+                i = i+1
+                q(i) = q(ii)
+             end do
+          end do
+          ncof = nv4*nu4
+          nmd  = ncof*idim
+          c(1:nmd) = q(1:nmd)
+      endif
+
+      !  calculate the quantities
+      !    res(i,j) = (z(i,j) - s(u(i),v(j)))**2 , i=1,2,..,mu;j=1,2,..,mv
+      !    fp = sumi=1,mu(sumj=1,mv(res(i,j)))
+      !    fpu(r) = sum''i(sumj=1,mv(res(i,j))) , r=1,2,...,nu-7
+      !                  tu(r+3) <= u(i) <= tu(r+4)
+      !    fpv(r) = sumi=1,mu(sum''j(res(i,j))) , r=1,2,...,nv-7
+      !                  tv(r+3) <= v(j) <= tv(r+4)
+      fp = zero
+      fpu(1:nu) = zero
+      fpv(1:nv) = zero
+      nroldu = 0
+
+      !  main loop for the different grid points.
+      u_points: do i1=1,muu
+         numu   = nru(i1)
+         numu1  = numu+1
+         nroldv = 0
+         iz     = (i1-1)*mv
+
+         v_points: do i2=1,mvv
+            numv  = nrv(i2)
+            numv1 = numv+1
+            iz    = iz+1
+
+            ! evaluate s(u,v) at the current grid point by making the sum of the cross products of the
+            ! non-zero b-splines at (u,v), multiplied with the appropriate b-spline coefficients.
+            term = zero
+            k0 = numu*nv4+numv
+            jz = iz
+            do id=1,idim
+               k1 = k0
+               value = zero
+               do l1=1,4
+                  k2 = k1
+                  fac = spu(i1,l1)
+                  do l2=1,4
+                     k2 = k2+1
+                     value = value+fac*spv(i2,l2)*c(k2)
+                  end do
+                  k1 = k1+nv4
+               end do
+               ! calculate the squared residual at the current grid point.
+               term = term+(z(jz)-value)**2
+               jz = jz+mz
+               k0 = k0+ncof
+            end do
+
+            ! adjust the different parameters.
+            fp = fp+term
+            fpu(numu1) = fpu(numu1)+term
+            fpv(numv1) = fpv(numv1)+term
+            fac = term*half
+
+            if (numv/=nroldv) then
+               fpv(numv1) = fpv(numv1)-fac
+               fpv(numv)  = fpv(numv) +fac
+            endif
+            nroldv = numv
+            if (numu/=nroldu) then
+               fpu(numu1) = fpu(numu1)-fac
+               fpu(numu)  = fpu(numu) +fac
+            endif
+         end do v_points
+         nroldu = numu
+      end do u_points
+      return
+      end subroutine fpgrpa
+
+
+      !> @brief Tensor-product least-squares gridded solver for `dims` dimensions.
+      !!
+      !! For data on a rectangular grid \f$ \{x_i\} \times \{y_j\} \f$, solves
+      !! the smoothing least-squares system using the Kronecker product structure
+      !! (Eq. 10.4-10.8):
+      !!
+      !! \f[
+      !!     A_y \, C \, A_x^T = Q
+      !!     \tag{10.4}
+      !! \f]
+      !!
+      !! where the augmented observation matrices are:
+      !!
+      !! \f[
+      !!     A_x = \begin{pmatrix} S_{px} \\ \frac{1}{\sqrt{p}} B_x \end{pmatrix}, \quad
+      !!     A_y = \begin{pmatrix} S_{py} \\ \frac{1}{\sqrt{p}} B_y \end{pmatrix}
+      !!     \tag{10.5}
+      !! \f]
+      !!
+      !! The per-axis QR factorizations are performed independently using
+      !! fp_rotate_row_block (column-access RHS) for the leading axes `1..dims-1` and
+      !! fp_rotate_row_stride (row-access RHS) for the final axis, followed by per-axis
+      !! back-substitution; residual sums `fpint` per knot interval are also computed for
+      !! knot-placement decisions. This is the dimension-generic form: each pass reduces
+      !! one axis, with the partially-reduced right-hand side held in a row-major
+      !! "ping-pong" buffer that, after pass `i`, stores (coefficients along axes `1..i`)
+      !! x (data along axes `i+1..dims`). At `dims=2` it is bit-for-bit identical to
+      !! fpgrre: the leading pass is the single `A_x` block reduction (RHS width `my`),
+      !! the final pass the `A_y` stride reduction, the back-substitution solves `R_dims`
+      !! then descends to `R_1`, and the residual contraction is the same per-cell walk
+      !! (the support sweep is a mixed-radix odometer whose innermost `dot_product` runs
+      !! over the fastest axis — the floating-point reassociation anchor). The per-axis
+      !! band/observation/discontinuity arrays are merged into rank-3 arrays with a
+      !! uniform leading dimension (`lda`/`ldb`), passed as the explicit leading-dim
+      !! argument to fp_rotate_*, fpback and fpdisc so every addressed element coincides
+      !! with the original's separately-sized matrices — no copies, no value change.
+      !!
+      !! @param[in]     dims    Number of axes (domain dimension)
+      !! @param[in,out] ifs     Per-axis flag: 0 = recompute observation matrix \f$ S_p \f$ (orig ifsx,ifsy)
+      !! @param[in,out] ifb     Per-axis flag: 0 = recompute discontinuity matrix \f$ B \f$ (orig ifbx,ifby)
+      !! @param[in]     xg      Per-axis grid values; column \f$ d \f$ is `xg(1:m(d),d)`
+      !! @param[in]     m       Number of grid points per axis, `m(dims)`
+      !! @param[in]     z       Gridded data, flat row-major `z(*)` (axis 1 slowest)
+      !! @param[in]     k       Degree per axis, `k(dims)`
+      !! @param[in]     t       Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]     n       Number of knots per axis, `n(dims)`
+      !! @param[in]     p       Smoothing parameter
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in]     nc      Length of `c`
+      !! @param[in,out] fp      Total weighted sum of squared residuals
+      !! @param[in,out] fpint   Residual sums per knot interval, per axis (orig fpx,fpy)
+      !! @param[in]     mm      Work dimension: widest gathered RHS fiber
+      !! @param[in]     mynx    Work dimension: two ping-pong buffers (\f$ my \cdot (nx-kx-1) \f$ at dims=2)
+      !! @param[in,out] sp      Per-axis B-spline observation matrices (orig spx,spy)
+      !! @param[in,out] right   Work: RHS vector for row rotations, length `mm`
+      !! @param[in,out] q       Work: ping-pong RHS buffer (two halves at dims>2), length `mynx`
+      !! @param[in,out] a       Per-axis band matrices, uniform leading dim (orig ax,ay)
+      !! @param[in,out] b       Per-axis discontinuity-jump matrices, uniform leading dim (orig bx,by)
+      !! @param[in,out] nr      Per-axis knot interval indices (orig nrx,nry)
+      !!
+      !! @see fpgrre, Dierckx Ch. 10 §10.2 (pp. 170-172) Eq. 10.4-10.8; fp_rotate_row_block,
+      !!      fp_rotate_row_stride — grid Givens rotations; todo/fitpack_nd_grids.md (slice 1, §2/§9)
+      pure subroutine fpgrre(dims,ifs,ifb,xg,m,z,k,t,n,p,c,nc,fp,fpint, &
+                                mm,mynx,sp,right,q,a,b,nr)
+
+      !  ..scalar arguments..
+      integer(FP_DIM),  intent(in)    :: dims
+      real(FP_REAL),    intent(in)    :: p
+      real(FP_REAL),    intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: nc,mm,mynx
+      integer(FP_SIZE), intent(in)    :: m(dims),k(dims),n(dims)
+      integer(FP_SIZE), intent(inout) :: ifs(dims),ifb(dims)
+      !  ..array arguments..
+      !  z(*): flat row-major data tensor (axis 1 slowest, axis dims fastest). The datum at
+      !  (i1,...,id) is z(fp_grid_index+1); at dims=2 z((i1-1)*my+i2) matches the legacy z(my,mx) bytes.
+      real(FP_REAL),    intent(in)              :: z(*)
+      real(FP_REAL),    intent(in),  contiguous :: xg(:,:),t(:,:)
+      real(FP_REAL),    intent(inout)           :: c(nc),right(mm),q(mynx)
+      real(FP_REAL),    intent(inout), contiguous :: fpint(:,:),sp(:,:,:),a(:,:,:),b(:,:,:)
+      integer(FP_SIZE), intent(inout), contiguous :: nr(:,:)
+      !  ..local scalars..
+      real(FP_REAL) :: arg,fac,pinv,term,sp_val
+      integer(FP_DIM)  :: d,a_ax,dd
+      integer(FP_SIZE) :: i,j,l,l1,irot,it,ncof,nrold,number,n1,lda,ldb
+      !  forward-solve / ping-pong bookkeeping
+      integer(FP_SIZE) :: pp,ibase,obase,ibuf,obuf,hhalf,td_trail,pd_lead
+      !  back-substitution bookkeeping
+      integer(FP_SIZE) :: nlead,ntrail,pl,tl,base
+      !  residual-contraction odometer
+      integer(FP_SIZE) :: coff0,coff,nsupp,mout,qq,num,nrold_d
+      !  ..per-axis sizes / state..
+      integer(FP_SIZE) :: k1(dims),k2(dims),nk1(dims),iband(dims),cstr(dims)
+      integer(FP_SIZE) :: gidx(dims),cidx(dims),lbase(dims)
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1),pw(0:dims-1)
+
+      !  per-axis order and coefficient extents
+      k1  = k+1
+      k2  = k+2
+      nk1 = n-k1                      ! nk1x, nk1y at dims=2
+      lda = size(a,1,kind=FP_SIZE)    ! uniform leading dim of the band matrices
+      ldb = size(b,1,kind=FP_SIZE)    ! uniform leading dim of the discontinuity matrices
+      pinv = merge(one/p,one,p>zero)
+
+      !  ---- per-axis observation matrices (sp) : dimension-generic loop over the axes ----
+      !  it depends on the flags ifs(d) (and on p for ifb(d)) whether sp(:,:,d) and b(:,:,d)
+      !  still must be determined. Building d=1 then d=2 reproduces the original spx-then-spy order.
+      do d=1,dims
+         if (ifs(d)==0) then
+            l  = k1(d)
+            l1 = k2(d)
+            number = 0
+            do it=1,m(d)
+               arg = xg(it,d)
+               do while (arg>=t(l1,d) .and. l/=nk1(d))
+                  l  = l1
+                  l1 = l+1
+                  number = number+1
+               end do
+               h = fpbspl(t(1:n(d),d),n(d),k(d),arg,l)
+               sp(1:k1(d),it,d) = h(1:k1(d))
+               nr(it,d) = number
+            end do
+            ifs(d) = 1
+         end if
+      end do
+
+      !  ---- per-axis discontinuity matrices (b) ----
+      if (p>zero) then
+         do d=1,dims
+            if (ifb(d)==0 .and. n(d)/=2*k1(d)) then
+               call fpdisc(t(1:n(d),d),n(d),k2(d),b(:,:,d),ldb)
+               ifb(d) = 1
+            end if
+         end do
+      end if
+
+      !  ======================================================================================
+      !  Dimension-generic alternating-direction solve (row-major buffers, axis 1 slowest). Pass d
+      !  reduces axis d into a ping-pong buffer holding coeffs along axes 1..d, data along d+1..dims.
+      !  Passes 1..dims-1 use the block rotation; the final pass uses the stride rotation, writing c.
+      !  At dims=2 this is the literal A_x then A_y reduction, bit-for-bit.
+      !  ======================================================================================
+      cstr  = fp_grid_strides(dims,nk1)            ! cstr(d) = product(nk1(d+1:dims)); cstr(dims)=1
+      hhalf = mynx/2                               ! ping-pong half size (only dims>2 uses both halves)
+
+      forward: do d=1,dims
+         td_trail = product(m(d+1:dims))           ! trailing (not-yet-reduced) data axes; =1 at d=dims
+         pd_lead  = product(nk1(1:d-1))            ! leading (already-reduced) coeff axes; =1 at d=1
+         iband(d) = k1(d)
+
+         if (d<dims) then
+
+            !  ---- block reduction of axis d: RHS = the td_trail contiguous trailing entries ----
+            !  triangularize a(:,:,d), rotating the trailing data block into the next buffer (z at d=1).
+            obuf = merge(0_FP_SIZE, hhalf, mod(d,2)==1)
+            q(obuf+1:obuf+pd_lead*nk1(d)*td_trail) = zero
+            do pp=1,pd_lead                        ! one independent reduction per leading slab
+               a(1:nk1(d),1:k2(d),d) = zero
+               nrold    = 0
+               iband(d) = k1(d)
+               obase = obuf + (pp-1)*nk1(d)*td_trail
+               do it=1,m(d)
+                  number = nr(it,d)
+                  inner_block: do
+                     if (nrold==number) then
+                        h(iband(d)) = zero
+                        h(1:k1(d))  = sp(1:k1(d),it,d)
+                        if (d==1) then
+                           ibase = (it-1)*td_trail
+                           right(1:td_trail) = z(ibase+1:ibase+td_trail)
+                        else
+                           ibuf  = merge(0_FP_SIZE, hhalf, mod(d-1,2)==1)
+                           ibase = ibuf + (pp-1)*m(d)*td_trail + (it-1)*td_trail
+                           right(1:td_trail) = q(ibase+1:ibase+td_trail)
+                        end if
+                        irot = number
+                     elseif (p<=zero) then
+                        nrold = nrold+1
+                        cycle inner_block
+                     else
+                        iband(d)   = k2(d)
+                        n1         = nrold+1
+                        h(1:k2(d)) = b(n1,1:k2(d),d)*pinv
+                        right(1:td_trail) = zero
+                        irot = nrold
+                     end if
+                     call fp_rotate_row_block(h, iband(d), a(:,:,d), lda, right, q(obase+1), td_trail, irot)
+                     if (nrold==number) exit inner_block
+                     nrold = nrold+1
+                  end do inner_block
+               end do
+            end do
+
+         else
+
+            !  ---- stride reduction of the final axis: RHS = the pd_lead leading coeff combos ----
+            !  triangularize a(:,:,dims), rotating the last buffer's columns into the coeff tensor c.
+            ncof = product(nk1)
+            c(1:ncof) = zero
+            a(1:nk1(dims),1:k2(dims),dims) = zero
+            nrold    = 0
+            iband(dims) = k1(dims)
+            ibuf = merge(0_FP_SIZE, hhalf, mod(dims-1,2)==1)
+            do it=1,m(dims)
+               number = nr(it,dims)
+               inner_stride: do
+                  if (nrold==number) then
+                     h(iband(dims)) = zero
+                     h(1:k1(dims))  = sp(1:k1(dims),it,dims)
+                     do j=1,pd_lead
+                        right(j) = q(ibuf + (j-1)*m(dims) + it)
+                     end do
+                     irot = number
+                  elseif (p<=zero) then
+                     nrold = nrold+1
+                     cycle inner_stride
+                  else
+                     iband(dims)   = k2(dims)
+                     n1            = nrold+1
+                     h(1:k2(dims)) = b(n1,1:k2(dims),dims)*pinv
+                     right(1:pd_lead) = zero
+                     irot = nrold
+                  end if
+                  call fp_rotate_row_stride(h, iband(dims), a(:,:,dims), lda, right, c, nk1(dims), pd_lead, irot)
+                  if (nrold==number) exit inner_stride
+                  nrold = nrold+1
+               end do inner_stride
+            end do
+
+         end if
+      end do forward
+
+      !  ---- back-substitution: per-axis triangular solves, axis dims down to 1 (R_d^{-1} don't
+      !  commute in FP, so reverse of the forward order). Each line along axis d: in place if
+      !  contiguous, else gather/solve/scatter. At dims=2 the literal (R_y) then (R_x) solve.
+      do d=dims,1,-1
+         nlead  = product(nk1(1:d-1))
+         ntrail = cstr(d)
+         do pl=1,nlead
+            do tl=1,ntrail
+               base = (pl-1)*nk1(d)*ntrail + (tl-1)
+               if (ntrail==1) then
+                  c(base+1:base+nk1(d)) = fpback(a(:,:,d),c(base+1),nk1(d),iband(d),lda)
+               else
+                  forall (i=1:nk1(d)) right(i) = c(base+(i-1)*ntrail+1)
+                  right(1:nk1(d)) = fpback(a(:,:,d),right,nk1(d),iband(d),lda)
+                  forall (i=1:nk1(d)) c(base+(i-1)*ntrail+1) = right(i)
+               end if
+            end do
+         end do
+      end do
+
+      !  ---- residual: fp and the per-axis interval sums fpint(:,d) (orig fpx,fpy) ----
+      !  walk the grid row-major; contract each cell's coeff support against sp via a mixed-radix
+      !  odometer (innermost dot_product over the fastest axis), then accumulate fp and half-split
+      !  each axis's boundary residual on its interval transitions. Bit-for-bit with grid_x/grid_y
+      !  at dims=2.
+      fp = zero
+      fpint(:,1:dims) = zero
+      nsupp = product(k1(1:dims-1))
+      grid_points: do mout=1,product(m)
+         gidx  = fp_grid_unravel(dims,mout-1,m)                ! output grid multi-index
+         lbase = [(nr(gidx(a_ax),a_ax)+1, a_ax=1,dims)]        ! first coefficient of the support
+         coff0 = fp_grid_index(dims,lbase,cstr)                ! = numx*nk1y+numy at dims=2
+
+         cidx(1:dims-1) = 1
+         coff  = coff0
+         pw(0) = one
+         do a_ax=1,dims-1
+            pw(a_ax) = pw(a_ax-1)*sp(cidx(a_ax),gidx(a_ax),a_ax)
+         end do
+
+         sp_val = zero
+         do qq=1,nsupp
+            sp_val = sp_val + pw(dims-1)*dot_product(sp(1:k1(dims),gidx(dims),dims),c(coff+1:coff+k1(dims)))
+            if (qq==nsupp) exit
+            do a_ax=dims-1,1,-1
+               if (cidx(a_ax)<k1(a_ax)) then
+                  cidx(a_ax) = cidx(a_ax)+1
+                  coff       = coff + cstr(a_ax)
+                  do dd=a_ax,dims-1
+                     pw(dd) = pw(dd-1)*sp(cidx(dd),gidx(dd),dd)
+                  end do
+                  exit
+               else
+                  cidx(a_ax) = 1
+                  coff       = coff - (k1(a_ax)-1)*cstr(a_ax)
+               end if
+            end do
+         end do
+
+         term = (z(mout)-sp_val)**2
+         fp   = fp + term
+         fac  = term*half
+         do d=1,dims
+            num = nr(gidx(d),d)
+            fpint(num+1,d) = fpint(num+1,d) + term
+            !  did axis d's interval change vs the previous cell? (avoid reading nr(0,d) at the origin)
+            if (gidx(d)>=2) then
+               nrold_d = nr(gidx(d)-1,d)
+            else
+               nrold_d = 0_FP_SIZE
+            end if
+            if (num/=nrold_d) then
+               fpint(num+1,d) = fpint(num+1,d) - fac
+               fpint(num,  d) = fpint(num,  d) + fac
+            end if
+         end do
+      end do grid_points
+      return
+      end subroutine fpgrre
+
+      !> @brief Compute spherical grid spline coefficients via Kronecker product.
+      !!
+      !! Spherical-coordinate variant of fpgrdi for data on a
+      !! \f$ \theta \times \phi \f$ grid. Handles pole-continuity constraints
+      !! at \f$ \theta = 0 \f$ and \f$ \theta = \pi \f$ via the `iop0`/`iop1`
+      !! flags, and the periodic \f$ \phi \f$-direction using two-matrix
+      !! rotations. The `dr` parameter provides prescribed pole values.
+      !!
+      !! @param[in,out] ifsu    Flag: 0 = recompute \f$ S_{pu} \f$
+      !! @param[in,out] ifsv    Flag: 0 = recompute \f$ S_{pv} \f$
+      !! @param[in,out] ifbu    Flag: 0 = recompute \f$ B_u \f$
+      !! @param[in,out] ifbv    Flag: 0 = recompute \f$ B_v \f$
+      !! @param[in]     lback   `.true.` = back-substitution only
+      !! @param[in]     u       Co-latitude grid values \f$ \theta \f$, length `mu`
+      !! @param[in]     mu      Number of \f$ \theta \f$-grid points
+      !! @param[in]     v       Longitude grid values \f$ \phi \f$, length `mv`
+      !! @param[in]     mv      Number of \f$ \phi \f$-grid points
+      !! @param[in]     r       Data values, length `mr`
+      !! @param[in]     mr      Length of `r`
+      !! @param[in]     dr      Pole boundary values
+      !! @param[in]     iop0    Boundary condition at north pole (\f$ \theta = 0 \f$)
+      !! @param[in]     iop1    Boundary condition at south pole (\f$ \theta = \pi \f$)
+      !! @param[in]     tu      \f$ \theta \f$-knot vector
+      !! @param[in]     nu      Number of \f$ \theta \f$-knots
+      !! @param[in]     tv      \f$ \phi \f$-knot vector
+      !! @param[in]     nv      Number of \f$ \phi \f$-knots
+      !! @param[in,out] p       Smoothing parameter
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in]     nc      Length of `c`
+      !! @param[in,out] sq      Sum of squared residuals
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fpu     Residual sums per \f$ \theta \f$-interval
+      !! @param[in,out] fpv     Residual sums per \f$ \phi \f$-interval
+      !! @param[in]     mm      Work dimension
+      !! @param[in]     mvnu    Work dimension
+      !! @param[in,out] spu     \f$ \theta \f$-B-spline observation matrix
+      !! @param[in,out] spv     \f$ \phi \f$-B-spline observation matrix
+      !! @param[in,out] right   Work: RHS vector
+      !! @param[in,out] q       Work: RHS matrix
+      !! @param[in,out] au      Work: \f$ \theta \f$-band matrix
+      !! @param[in,out] av1     Work: \f$ \phi \f$-band matrix (main)
+      !! @param[in,out] av2     Work: \f$ \phi \f$-band matrix (periodic)
+      !! @param[in,out] bu      Work: \f$ \theta \f$-discontinuity jumps
+      !! @param[in,out] bv      Work: \f$ \phi \f$-discontinuity jumps
+      !! @param[in,out] a0      Work: north-pole constraint row
+      !! @param[in,out] a1      Work: south-pole constraint row
+      !! @param[in,out] b0      Work: north-pole smoothing row
+      !! @param[in,out] b1      Work: south-pole smoothing row
+      !! @param[in,out] c0      Work: north-pole cosine row
+      !! @param[in,out] c1      Work: south-pole cosine row
+      !! @param[in,out] cosi    Work: cosine integrals
+      !! @param[in,out] nru     Work: \f$ \theta \f$-knot interval indices
+      !! @param[in,out] nrv     Work: \f$ \phi \f$-knot interval indices
+      !!
+      !! @see Dierckx, Ch. 11, §11.2 (pp. 205-213)
+      !! @see fpgrdi — polar grid variant; fp_rotate_2mat_stride — periodic rotation
+      pure subroutine fpgrsp(ifsu,ifsv,ifbu,ifbv,lback,u,mu,v,                         &
+                             mv,r,mr,dr,iop0,iop1,tu,nu,tv,nv,p,c,nc,sq,fp,fpu,fpv,mm, &
+                             mvnu,spu,spv,right,q,au,av1,av2,bu,bv,a0,a1,b0,b1,c0,c1,  &
+                             cosi,nru,nrv)
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: p
+      real(FP_REAL), intent(inout) :: fp,sq
+      logical(FP_BOOL), intent(in) :: lback
+      integer(FP_SIZE), intent(in) :: mu,mv,mr,iop0,iop1,nu,nv,nc,mm,mvnu
+      integer(FP_SIZE), intent(inout) :: ifsu,ifsv,ifbu,ifbv
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: u(mu),v(mv),r(mr),dr(6),tu(nu),tv(nv)
+
+      real(FP_REAL), intent(inout) :: av1(nv,6),av2(nv,4),cosi(nv,2),spu(mu,4),spv(mv,4),right(mm),bu(nu,5), &
+                                    bv(nv,5),a0(2,mv),b0(2,nv),c0(nv),c1(nv),a1(2,mv),b1(2,nv),q(mvnu),&
+                                    au(nu,5),c(nc),fpu(nu),fpv(nv)
+      integer(FP_SIZE), intent(inout) :: nru(mu),nrv(mv)
+      !  ..local scalars..
+      real(FP_REAL) :: arg,dr01,dr11,fac,fac0,fac1,pinv,term
+      integer(FP_SIZE) :: i,ii,ij,ik,irot,it,ir,i0,i1,i2,j,jj,jk,jper, &
+                 j0,j1,k,k1,l,l0,l1,mvv,ncof,nrold,nroldu,nroldv,number, &
+                 numu,numu1,numv,numv1,nuu,nu4,nu7,nu8,nu9,nv11,nv4,nv7,nv8,n1
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1),h1(DEGREE_3+2),h2(DEGREE_3+1)
+
+      !  let
+      !               |     (spu)      |            |     (spv)      |
+      !        (au) = | -------------- |     (av) = | -------------- |
+      !               | sqrt(1/p) (bu) |            | sqrt(1/p) (bv) |
+      !
+      !                                | r  ' 0 |
+      !                            q = | ------ |
+      !                                | 0  ' 0 |
+      !
+      !  with c      : the (nu-4) x (nv-4) matrix which contains the b-spline
+      !                coefficients.
+      !       r      : the mu x mv matrix which contains the function values.
+      !       spu,spv: the mu x (nu-4), resp. mv x (nv-4) observation matrices
+      !                according to the least-squares problems in the u-,resp.
+      !                v-direction.
+      !       bu,bv  : the (nu-7) x (nu-4),resp. (nv-7) x (nv-4) matrices
+      !                containing the discontinuity jumps of the derivatives
+      !                of the b-splines in the u-,resp.v-variable at the knots
+      !  the b-spline coefficients of the smoothing spline are then calculated
+      !  as the least-squares solution of the following over-determined linear
+      !  system of equations
+      !
+      !  (1)  (av) c (au)' = q
+      !
+      !  subject to the constraints
+      !
+      !  (2)  c(i,nv-3+j) = c(i,j), j=1,2,3 ; i=1,2,...,nu-4
+      !
+      !  (3)  if iop0 = 0  c(1,j) = dr(1)
+      !          iop0 = 1  c(1,j) = dr(1)
+      !                    c(2,j) = dr(1)+(dr(2)*cosi(1,j)+dr(3)*cosi(2,j))*
+      !                            tu(5)/3. = c0(j) , j=1,2,...nv-4
+      !
+      !  (4)  if iop1 = 0  c(nu-4,j) = dr(4)
+      !          iop1 = 1  c(nu-4,j) = dr(4)
+      !                    c(nu-5,j) = dr(4)+(dr(5)*cosi(1,j)+dr(6)*cosi(2,j))
+      !                                *(tu(nu-4)-tu(nu-3))/3. = c1(j)
+      !
+
+      !  initialization
+      nu4 = nu-4
+      nu7 = nu-7
+      nu8 = nu-8
+      nu9 = nu-9
+      nv4 = nv-4
+      nv7 = nv-7
+      nv8 = nv-8
+      nv11 = nv-11
+      nuu  = nu4-iop0-iop1-2
+      pinv = merge(one/p,one,p>zero)
+
+      !  it depends on the value of the flags ifsu,ifsv,ifbu,ifbv,iop0,iop1
+      !  and on the value of p whether the matrices (spu), (spv), (bu), (bv),
+      !  (cosi) still must be determined.
+      if (ifsu==0) then
+          !  calculate the non-zero elements of the matrix (spu) which is the observation matrix
+          !  according to the least-squares spline approximation problem in the u-direction.
+          l  = 4
+          l1 = 5
+          number = 0
+          do it=1,mu
+            arg = u(it)
+            l0 = l
+            l = fp_knot_interval(tu, arg, l, nu4)
+            number = number + (l - l0)
+            l1 = l + 1
+            h = fpbspl(tu,nu,DEGREE_3,arg,l)
+            spu(it,1:4) = h(1:4)
+            nru(it) = number
+          end do
+          ifsu = 1
+      endif
+
+      !  calculate the non-zero elements of the matrix (spv) which is the ob-
+      !  servation matrix according to the least-squares spline approximation
+      !  problem in the v-direction.
+      if (ifsv==0) then
+
+          l  = 4
+          l1 = 5
+          number = 0
+          do it=1,mv
+            arg = v(it)
+            l0 = l
+            l = fp_knot_interval(tv, arg, l, nv4)
+            number = number + (l - l0)
+            l1 = l + 1
+            h = fpbspl(tv,nv,DEGREE_3,arg,l)
+            spv(it,1:4) = h(1:4)
+            nrv(it) = number
+          end do
+          ifsv = 1
+
+          !  calculate the coefficients of the interpolating splines for cos(v) and sin(v).
+          if (iop0/=0 .or. iop1/=0) then
+
+              cosi(1:nv4,:) = zero
+              if (nv7>=4) then
+                  do i=1,nv7
+                     l = i+3
+                     arg = tv(l)
+                     h = fpbspl(tv,nv,DEGREE_3,arg,l)
+                     av1(i,1:3) = h(1:3)
+                     cosi(i,1) = cos(arg)
+                     cosi(i,2) = sin(arg)
+                  end do
+                  call fpcyt1(av1,nv7,nv)
+                  do j=1,2
+                     call fpcyt2(av1,nv7,cosi(:nv7,j),right,nv)
+                     cosi(:nv4,j) = [right(nv7),right(1:nv7),right(1:2)]
+                  end do
+              endif
+          endif
+
+      endif
+
+      if (p>zero) then
+          !  calculate the non-zero elements of the matrix (bu).
+          if (ifbu==0 .and. nu8/=0) then
+             call fpdisc(tu,nu,DEGREE_5,bu,nu)
+             ifbu = 1
+          endif
+
+          !  calculate the non-zero elements of the matrix (bv).
+          if (ifbv==0 .and. nv8/=0) then
+             call fpdisc(tv,nv,DEGREE_5,bv,nv)
+             ifbv = 1
+          endif
+      endif
+      !  substituting (2),(3) and (4) into (1), we obtain the overdetermined system
+      !         (5)  (avv) (cc) (auu)' = (qq)
+      !  from which the nuu*nv7 remaining coefficients
+      !         c(i,j) , i=2+iop0,3+iop0,...,nu-5-iop1,j=1,2,...,nv-7.
+      !  the elements of (cc), are then determined in the least-squares sense.
+      !  simultaneously, we compute the resulting sum of squared residuals sq.
+      dr01 = dr(1)
+      dr11 = dr(4)
+      a0(1,1:mv) = dr01
+      a1(1,1:mv) = dr11
+      if (nv8/=0 .and. p>zero) then
+         b0(1,1:nv8) = zero
+         b1(1,1:nv8) = zero
+      endif
+      mvv = mv
+      if (iop0/=0) then
+          fac       = (tu(5)-tu(4))*third
+          c0(1:nv4) = dr01+fac*matmul(cosi(:nv4,:),dr(2:3))
+
+          forall (i=1:mv) a0(2,i) = dot_product(spv(i,1:4),c0(nrv(i)+1:nrv(i)+4))
+
+          if (nv8/=0 .and. p>zero) then
+              forall (i=1:nv8) b0(2,i) = pinv*dot_product(bv(i,1:5),c0(i:i+4))
+              mvv = mv+nv8
+          endif
+      endif
+      if (iop1/=0) then
+          fac       = (tu(nu4)-tu(nu4+1))*third
+          c1(1:nv4) = dr11 + fac*matmul(cosi(:nv4,:),dr(5:6))
+
+          forall (i=1:mv) a1(2,i) = dot_product(c1(nrv(i)+1:nrv(i)+4),spv(i,1:4))
+
+          if (nv8/=0 .and. p>zero) then
+              forall (i=1:nv8) b1(2,i) = pinv*dot_product(bv(i,1:5),c1(i:i+4))
+              mvv = mv+nv8
+          endif
+      endif
+
+      !  we first determine the matrices (auu) and (qq). then we reduce the matrix (auu) to an unit
+      !  upper triangular form (ru) using givens rotations without square roots. we apply the same
+      !  transformations to the rows of matrix qq to obtain the mv x nuu matrix g.
+      !  we store matrix (ru) into au and g into q.
+      l = mvv*nuu
+      !  initialization.
+      sq = zero
+
+      if (l/=0) then
+         q(1:l) = zero
+         au(1:nuu,1:5) = zero
+         l = 0
+      endif
+      nrold = 0
+      n1 = nrold+1
+      auu_iterations: do it=1,mu
+         number = nru(it)
+
+         auu_inner: do
+
+         ! find the appropriate column of q.
+         right(1:mvv) = zero
+
+         if (nrold==number) then
+            !  fetch a new row of matrix (spu).
+            h(1:4) = spu(it,1:4)
+
+            !  find the appropriate column of q.
+            right(1:mv) = r(l+1:l+mv)
+            l  = l+mv
+            i0 = 1
+            i1 = 4
+         else
+
+            if (p<=zero) then
+               nrold = n1
+               n1 = n1+1
+               cycle auu_inner
+            end if
+            !  fetch a new row of matrix (bu).
+            h(1:5) = bu(n1,1:5)*pinv
+            i0 = 1
+            i1 = 5
+         end if
+
+         j0 = n1
+         j1 = nu7-number
+
+         ! take into account that we eliminate the constraints (3)
+         do while (j0-1<=iop0)
+             fac0 = h(i0)
+             right(1:mv) = right(1:mv)-fac0*a0(j0,1:mv)
+             if (mv/=mvv) then
+                 j = mv
+                 do jj=1,nv8
+                    j = j+1
+                    right(j) = right(j)-fac0*b0(j0,jj)
+                 end do
+             endif
+             j0 = j0+1
+             i0 = i0+1
+         end do
+
+         ! take into account that we eliminate the constraints (4)
+         do while (j1-1<=iop1)
+            fac1 = h(i1)
+            right(1:mv) = right(1:mv)-fac1*a1(j1,1:mv)
+            if (mv/=mvv) then
+                j = mv
+                do jj=1,nv8
+                   j = j+1
+                   right(j) = right(j)-fac1*b1(j1,jj)
+                end do
+            endif
+            j1 = j1+1
+            i1 = i1-1
+         end do
+
+         irot = max(0,nrold-iop0-1)
+
+         ! rotate the new row of matrix (auu) into triangle.
+         if (i0<=i1) call fp_rotate_row_block(h(i0), i1-i0+1, au, nu, right, q, mvv, irot)
+
+         ! we update the sum of squared residuals.
+         sq = sq+sum(right(:mvv)**2)
+         if (nrold==number) exit auu_inner
+         nrold = n1
+         n1 = n1+1
+         end do auu_inner
+      end do auu_iterations
+
+      if (nuu/=0) then
+          !  we determine the matrix (avv) and then we reduce her to an unit upper triangular form (rv)
+          !  using givens rotations without square roots. we apply the same transformations to the
+          !  columns of matrix g to obtain the (nv-7) x (nu-6-iop0-iop1) matrix h. we store matrix (rv)
+          !  into av1 and av2, h into c. the nv7 x nv7 triangular unit upper matrix (rv) has the form
+          !              | av1 '     |
+          !       (rv) = |     ' av2 |
+          !              |  0  '     |
+          !  with (av2) a nv7 x 4 matrix and (av1) a nv11 x nv11 unit upper triangular matrix of
+          !  bandwidth 5.
+          ncof = nuu*nv7
+          !  initialization.
+          c(:ncof) = zero
+          av1(1:nv4,1:5) = zero
+          av2(1:nv4,1:4) = zero
+          jper = 0
+          nrold = 0
+          avv_iterations: do it=1,mv
+             number = nrv(it)
+
+             avv_inner: do
+
+             if (nrold==number) then
+
+               ! fetch a new row of matrix (spv)
+               h(1:5) = [spv(it,1:4),zero]
+
+               ! find the appropriate row of g.
+               right(1:nuu) = q(it:it+(nuu-1)*mvv:mvv)
+
+            else
+
+               if (p<=zero) then
+                  nrold = nrold+1
+                  cycle avv_inner
+               endif
+               ! fetch a new row of matrix (bv).
+               n1 = nrold+1
+               h(1:5) = bv(n1,1:5)*pinv
+
+               ! find the appropriate row of g.
+               if(mv/=mvv) then
+                  l = mv+n1
+                  right(1:nuu) = q(l:l+(nuu-1)*mvv:mvv)
+               else
+                  right(1:nuu) = zero
+               endif
+
+            endif
+
+            ! test whether there are non-zero values in the new row of (avv)
+            ! corresponding to the b-splines n(j;v),j=nv7+1,...,nv4.
+            if (nrold<nv11) then
+
+               ! rotation into triangle of the new row of (avv), in case the elements
+               ! corresponding to the b-splines n(j;v),j=nv7+1,...,nv4 are all zero.
+               call fp_rotate_row_stride(h, 5, av1, nv, right, c, nv7, nuu, nrold)
+
+            else
+
+               ! initialize the matrix (av2).
+               if (jper==0) then
+
+                  jk = nv11+1
+                  do i=1,4
+                     ik = jk
+                     do j=1,5
+                         if (ik<=0) exit
+                         av2(ik,i) = av1(ik,j)
+                         ik = ik-1
+                     end do
+                     jk = jk+1
+                  end do
+                  jper = 1
+
+               endif
+
+               ! if one of the non-zero elements of the new row corresponds to one of the b-splines
+               ! n(j;v),j=nv7+1,...,nv4, we take account of condition (2) for setting up this row of
+               ! (avv). the row is stored in h1(the part with respect to av1) and h2 (the part with
+               ! respect to av2).
+               h1 = zero
+               h2 = zero
+               j = nrold-nv11
+               do i=1,5
+                   j = j+1
+                   l0 = j
+                   l1 = l0-4
+                   do while (l1>max(0,nv11))
+                      l0 = l1-nv11
+                      l1 = l0-4
+                   end do
+                   if (l1<=0) then
+                      h2(l0) = h2(l0) + h(i)
+                   else ! l1<=nv11
+                      h1(l1) = h(i)
+                   end if
+               end do
+
+               ! rotate the new row of (avv) into triangle.
+               call fp_rotate_2mat_stride(h1, 5, h2, 4, av1, av2, nv, &
+                                          right, c, nv7, nuu, 1, nv11)
+
+            end if
+
+            ! we update the sum of squared residuals.
+            sq = sq+sum(right(:nuu)**2)
+
+            if (nrold==number) exit avv_inner
+
+            nrold = nrold+1
+            end do avv_inner
+
+          end do avv_iterations
+
+          !  test whether the b-spline coefficients must be determined.
+          if (lback) return
+          !  backward substitution to obtain the b-spline coefficients as the
+          !  solution of the linear system    (rv) (cr) (ru)' = h.
+          !  first step: solve the system  (rv) (c1) = h.
+          k = 1
+          do i=1,nuu
+             c(k:k+nv7-1) = fpbacp(av1,av2,c(k),nv7,DEGREE_4,DEGREE_5,nv)
+             k = k+nv7
+          end do
+
+          !  second step: solve the system  (cr) (ru)' = (c1).
+          do k=1,nv7
+            right(:nuu) = c(k:k+(nuu-1)*nv7:nv7)
+            c(k:k+(nuu-1)*nv7:nv7) = fpback(au,right(:nuu),nuu,DEGREE_5,nu)
+          end do
+
+      endif
+
+      !  calculate from the conditions (2)-(3)-(4), the remaining b-spline
+      !  coefficients.
+      ncof = nu4*nv4
+
+      q(1:nv4) = dr01
+      q(ncof-nv4+1:ncof) = dr11
+
+      i = nv4
+      j = 0
+      if (iop0/=0) then
+         q(i+1:i+nv4) = c0(1:nv4)
+         i = i+nv4
+      endif
+      if(nuu/=0) then
+         do l=1,nuu
+            ii = i
+            do k=1,nv7
+               i = i+1
+               j = j+1
+               q(i) = c(j)
+            end do
+            do k=1,3
+               ii = ii+1
+               i  = i+1
+               q(i) = q(ii)
+            end do
+         end do
+      endif
+      if(iop1/=0) then
+          do l=1,nv4
+             i = i+1
+             q(i) = c1(l)
+          end do
+      endif
+      c(1:ncof) = q(1:ncof)
+      !  calculate the quantities
+      !    res(i,j) = (r(i,j) - s(u(i),v(j)))**2 , i=1,2,..,mu;j=1,2,..,mv
+      !    fp = sumi=1,mu(sumj=1,mv(res(i,j)))
+      !    fpu(r) = sum''i(sumj=1,mv(res(i,j))) , r=1,2,...,nu-7
+      !                  tu(r+3) <= u(i) <= tu(r+4)
+      !    fpv(r) = sumi=1,mu(sum''j(res(i,j))) , r=1,2,...,nv-7
+      !                  tv(r+3) <= v(j) <= tv(r+4)
+      fp  = zero
+      fpu = zero
+      fpv = zero
+      ir = 0
+      nroldu = 0
+
+      !  main loop for the different grid points.
+      grid_u: do i1=1,mu
+         numu = nru(i1)
+         numu1 = numu+1
+         nroldv = 0
+         grid_v: do i2=1,mv
+            numv = nrv(i2)
+            numv1 = numv+1
+            ir = ir+1
+            ! evaluate s(u,v) at the current grid point by making the sum of the
+            ! cross products of the non-zero b-splines at (u,v), multiplied with
+            ! the appropriate b-spline coefficients.
+            term = zero
+            k1 = numu*nv4+numv
+            do l1 = 1,4
+               fac  = spu(i1,l1)
+               term = term+fac*dot_product(spv(i2,1:4),c(k1+1:k1+4))
+               k1   = k1+nv4
+            end do
+            ! calculate the squared residual at the current grid point.
+            term = (r(ir)-term)**2
+            ! adjust the different parameters.
+            fp = fp+term
+            fpu(numu1) = fpu(numu1)+term
+            fpv(numv1) = fpv(numv1)+term
+            fac = term*half
+            if (numv/=nroldv) then
+               fpv(numv1) = fpv(numv1)-fac
+               fpv(numv) = fpv(numv)+fac
+            endif
+            nroldv = numv
+            if (numu/=nroldu) then
+               fpu(numu1) = fpu(numu1)-fac
+               fpu(numu) = fpu(numu)+fac
+            endif
+         end do grid_v
+         nroldu = numu
+      end do grid_u
+      return
+      end subroutine fpgrsp
+
+
+      !> @brief Insert a single knot into a B-spline representation.
+      !!
+      !! Given the B-spline representation \f$ (t, c) \f$ of a degree-\f$ k \f$
+      !! spline, computes the new knot vector \f$ t' \f$ and coefficients \f$ c' \f$
+      !! that represent the **same spline** after inserting one additional knot
+      !! \f$ x \in [\lambda_l, \lambda_{l+1}) \f$. Uses the Boehm (1980)
+      !! one-knot-at-a-time algorithm:
+      !!
+      !! \f[
+      !!     d_i = r_i \, c_i + (1 - r_i) \, c_{i-1}
+      !!     \tag{1.47}
+      !! \f]
+      !!
+      !! where each weight \f$ r_i \in [0, 1] \f$ is a convex combination factor:
+      !!
+      !! \f[
+      !!     r_i = \frac{\tau_{j+1} - \tau_i}{\tau_{i+k+1} - \tau_i}
+      !!     \tag{1.48}
+      !! \f]
+      !!
+      !! For periodic splines (`iopt /= 0`), the boundary coefficients are wrapped
+      !! accordingly. At least one of \f$ l > 2k \f$ or \f$ l < n - 2k \f$ must hold.
+      !!
+      !! @param[in]  iopt  0 = non-periodic spline, otherwise periodic
+      !! @param[in]  t     Input knot vector, length `n`
+      !! @param[in]  n     Number of input knots
+      !! @param[in]  c     Input B-spline coefficients, length `n-k-1`
+      !! @param[in]  k     Spline degree
+      !! @param[in]  x     New knot to insert, \f$ \lambda_l \leq x < \lambda_{l+1} \f$
+      !! @param[in]  l     Knot interval index where `x` is inserted
+      !! @param[out] tt    Output knot vector, length `nn`
+      !! @param[out] nn    Number of output knots (\f$ n + 1 \f$)
+      !! @param[out] cc    Output B-spline coefficients, length `nn-k-1`
+      !! @param[in]  nest  Leading dimension of arrays `t`, `c`, `tt`, `cc`
+      !!
+      !! @see Dierckx, Ch. 1, §1.3.4 (pp. 34-37), Eq. 1.46-1.48
+      pure subroutine fpinst(iopt,t,n,c,k,x,l,tt,nn,cc,nest)
+
+      !
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: iopt
+      integer(FP_SIZE), intent(in) :: k,n,l,nest
+      integer(FP_SIZE), intent(out) :: nn
+      real(FP_REAL), intent(in) :: x
+      !  ..array arguments..
+      real(FP_REAL), intent(in)  :: t(nest),c(nest)
+      real(FP_REAL), intent(out) :: tt(nest),cc(nest)
+      !  ..local scalars..
+      real(FP_REAL) :: fac,per
+      integer(FP_SIZE) :: i,i1,j,k1,m,mk,nk,nk1,nl,ll
+
+      !  ..
+      k1  = k+1
+      nk1 = n-k1
+      !  the new knots
+      ll = l+1
+      tt(1:n+1) = [t(1:l),x,t(ll:n)]
+      !  the new b-spline coefficients
+      i = nk1
+      do j=l,nk1
+         cc(i+1) = c(i)
+         i = i-1
+      end do
+      i = l
+      do j=1,k
+         m = i+k1
+         fac = (x-tt(i))/(tt(m)-tt(i))
+         i1 = i-1
+         cc(i) = fac*c(i)+(one-fac)*c(i1)
+         i = i1
+      end do
+      cc(1:i) = c(1:i)
+      nn = n+1
+
+      ! incorporate the boundary conditions for a periodic spline.
+      if (iopt/=0) then
+
+          nk = nn-k
+          nl = nk-k1
+          per = tt(nk)-tt(k1)
+          i = k1
+          j = nk
+          if (ll>nl) then
+              do m=1,k
+                 mk = m+nl
+                 cc(m) = cc(mk)
+                 i = i-1
+                 j = j-1
+                 tt(i) = tt(j)-per
+              end do
+          elseif (ll<=(k1+k)) then
+             do m=1,k
+                mk = m+nl
+                cc(mk) = cc(m)
+                i = i+1
+                j = j+1
+                tt(j) = tt(i)+per
+             end do
+          endif
+      endif
+
+      end subroutine fpinst
+
+
+      !> @brief Compute definite integrals of the normalized B-splines.
+      !!
+      !! Calculates the definite integrals of each of the \f$ n-k-1 \f$ normalized
+      !! B-splines \f$ N_{j,k+1}(u) \f$ of degree \f$ k \f$ over the interval
+      !! \f$ [x, y] \f$:
+      !!
+      !! \f[
+      !!     \text{bint}(j) = \int_x^y N_{j,k+1}(u) \, du
+      !! \f]
+      !!
+      !! Uses the Gaffney formula for indefinite integrals of B-splines, which
+      !! exploits the identity (Eq. 1.42):
+      !!
+      !! \f[
+      !!     \int_{\lambda_j}^{u} N_{j,k+1}(v) \, dv
+      !!     = \frac{\lambda_{j+k+1} - \lambda_j}{k+1}
+      !!       \sum_{i=j+1}^{g+k+1} N_{i,k+2}(u)
+      !!     \tag{1.42}
+      !! \f]
+      !!
+      !! @param[in]  t     Knot vector \f$ \lambda_1, \ldots, \lambda_n \f$
+      !! @param[in]  n     Number of knots
+      !! @param[out] bint  Array of length `nk1`; \f$ \text{bint}(j) = \int_x^y N_{j,k+1}(u)\,du \f$
+      !! @param[in]  nk1   Number of B-splines (\f$ n - k - 1 \f$)
+      !! @param[in]  x     Lower integration limit
+      !! @param[in]  y     Upper integration limit
+      !!
+      !! @see Dierckx, Ch. 1, §1.3.3 (pp. 30-33), Eq. 1.42-1.44
+      !! @see Dierckx, Ch. 3, §3.2 (pp. 44-46), Eq. 3.8-3.10
+      pure subroutine fpintb(t,n,bint,nk1,x,y)
+      !  ..
+      !  ..scalars arguments..
+      integer(FP_SIZE), intent(in)  :: n,nk1
+      real(FP_REAL),    intent(in)  :: x,y
+      !  ..array arguments..
+      real(FP_REAL),    intent(in)  :: t(n)
+      real(FP_REAL),    intent(out) :: bint(nk1)
+
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ia,ib,it,j,j1,k,k1,l,li,lj,lk,l0
+      logical(FP_BOOL) :: lmin
+      real(FP_REAL) :: a,ak,arg,b,f
+      !  ..local arrays..
+      real(FP_REAL) aint(DEGREE_5+1),h(MAX_ORDER+1),h1(DEGREE_5+1)
+
+      integer(FP_SIZE), parameter :: nit = 2 ! number of iterations
+
+      !  initialization.
+      k1   = n-nk1
+      ak   = k1
+      k    = k1-1
+      bint = zero
+
+      !  the integration limits are arranged in increasing order.
+      if (equal(x,y)) return
+
+      a = min(x,y)
+      b = max(x,y)
+      lmin = x>y
+
+      a = max(t(k1),a)
+      b = min(t(nk1+1),b)
+      if (a>b) return
+
+      !  using the expression of gaffney for the indefinite integral of a b-spline we find that
+      !  bint(j) = (t(j+k+1)-t(j))*(res(j,b)-res(j,a))/(k+1)
+      !    where for t(l) <= x < t(l+1)
+      !    res(j,x) = 0, j=1,2,...,l-k-1
+      !             = 1, j=l+1,l+2,...,nk1
+      !             = aint(j+k-l+1), j=l-k,l-k+1,...,l
+      !               = sumi((x-t(j+i))*nj+i,k+1-i(x)/(t(j+k+1)-t(j+i)))
+      !                 i=0,1,...,k
+      l  = k1
+      l0 = l+1
+      !  set arg = a.
+      arg = a
+      ia  = 0
+      iterations: do it=1,nit
+      !  search for the knot interval t(l) <= arg < t(l+1).
+        l = fp_knot_interval(t, arg, l, nk1)
+        l0 = l + 1
+      !  calculation of aint(j), j=1,2,...,k+1.
+      !  initialization.
+        aint(1)  = (arg-t(l))/(t(l+1)-t(l))
+        aint(2:) = zero
+        h1(1) = one
+        do j=1,k
+      !  evaluation of the non-zero b-splines of degree j at arg,i.e.
+      !    h(i+1) = nl-j+i,j(arg), i=0,1,...,j.
+          h(1) = zero
+          do i=1,j
+            li = l+i
+            lj = li-j
+            f = h1(i)/(t(li)-t(lj))
+            h(i) = h(i)+f*(t(li)-arg)
+            h(i+1) = f*(arg-t(lj))
+          end do
+      !  updating of the integrals aint.
+          j1 = j+1
+          do i=1,j1
+            li = l+i
+            lj = li-j1
+            aint(i) = aint(i)+h(i)*(arg-t(lj))/(t(li)-t(lj))
+            h1(i) = h(i)
+          end do
+        end do
+
+        if (it<nit) then
+            ! updating of the integrals bint
+            lk = l-k
+            ia = lk
+            do i=1,k1
+              bint(lk) = -aint(i)
+              lk = lk+1
+            end do
+
+            arg = b
+        endif
+      end do iterations
+      !  updating of the integrals bint.
+      lk = l-k
+      ib = lk-1
+      do i=1,k1
+         bint(lk) = bint(lk)+aint(i)
+         lk = lk+1
+      end do
+      if (ib>=ia) bint(ia:ib) = bint(ia:ib)+one
+
+      !  the scaling factors are taken into account.
+      f = one/ak
+      do i=1,nk1
+        j = i+k1
+        bint(i) = bint(i)*(t(j)-t(i))*f
+      end do
+      !  the order of the integration limits is taken into account.
+      if (lmin) bint = -bint
+
+      end subroutine fpintb
+
+
+      !> @brief Select and insert a new knot at the location of maximum residual.
+      !!
+      !! Locates the knot interval \f$ [\lambda_j, \lambda_{j+1}] \f$ with the
+      !! largest sum of squared residuals \f$ \delta_j \f$ (Eq. 5.43) and inserts
+      !! a new knot at the midpoint of its interior data points. This is the
+      !! greedy knot-placement strategy used by the iterative smoothing spline
+      !! algorithm:
+      !!
+      !! \f[
+      !!     \delta_j = \sideset{}{''}{\sum}_{r=u_j+1}^{u_j+m_j}
+      !!     \bigl( w_r (y_r - S_{g}(x_r)) \bigr)^2
+      !!     \tag{5.43}
+      !! \f]
+      !!
+      !! Only intervals with at least one interior data point (\f$ m_j > 2 \f$)
+      !! are eligible. The new knot is placed at \f$ x_{u_j + \lceil m_j/2 \rceil + 1} \f$.
+      !! After insertion, `fpint` and `nrdata` are split to reflect the two
+      !! new sub-intervals.
+      !!
+      !! @param[in]     x       Data abscissae, length `m`
+      !! @param[in]     m       Number of data points
+      !! @param[in,out] t       Knot vector; new knot inserted on exit
+      !! @param[in,out] n       Number of knots; incremented by 1 on exit
+      !! @param[in,out] fpint   Residual sum of squares per knot interval
+      !! @param[in,out] nrdata  Number of interior data points per interval
+      !! @param[in,out] nrint   Number of knot intervals; incremented by 1
+      !! @param[in]     nest    Leading dimension of arrays `t`, `fpint`, `nrdata`
+      !! @param[in]     istart  Smallest eligible data index minus one
+      !!
+      !! @see Dierckx, Ch. 5, §5.3 (pp. 87-94), Eq. 5.37-5.43
+      pure subroutine fpknot(x,m,t,n,fpint,nrdata,nrint,nest,istart)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: m,nest,istart
+      integer(FP_SIZE), intent(inout) :: n,nrint
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: x(m)
+      real(FP_REAL), intent(inout) :: t(nest)
+      real(FP_REAL), intent(inout) :: fpint(nest)
+      integer(FP_SIZE),  intent(inout) :: nrdata(nest)
+
+      !  ..local scalars..
+      real(FP_REAL) :: an,am,fpmax
+      integer(FP_SIZE) :: ihalf,j,jbegin,jj,jk,jpoint,k,maxbeg,maxpt,next,nrx,number
+      !  ..
+      number = 0
+      maxpt  = 0
+      maxbeg = 0
+      k      = (n-nrint-1)/2
+      !  search for knot interval t(number+k) <= x <= t(number+k+1) where fpint(number) is maximal on the
+      !  condition that nrdata(number)/=0. An interval is eligible only if it holds at least one interior
+      !  data point (jpoint/=0); the first eligible interval seeds the search (number==0), after which any
+      !  interval with a strictly larger residual takes over. Seeding on the first eligible interval, rather
+      !  than only on fpmax<fpint(j), guarantees a valid selection even when every residual is exactly zero
+      !  (an all-zero fpint would otherwise leave number==0 and fall through to use of uninitialized am).
+      fpmax  = zero
+      jbegin = istart
+      do j=1,nrint
+        jpoint = nrdata(j)
+
+        if (jpoint/=0 .and. (number==0 .or. fpint(j)>fpmax)) then
+           fpmax  = fpint(j)
+           number = j
+           maxpt  = jpoint
+           maxbeg = jbegin
+        endif
+
+        jbegin = jbegin+jpoint+1
+      end do
+
+      !  no interval carries an interior data point: there is nothing to refine, so leave the knot set as is
+      if (number==0) return
+
+      !  let coincide the new knot t(number+k+1) with a data point x(nrx)
+      !  inside the old knot interval t(number+k) <= x <= t(number+k+1).
+      ihalf = maxpt/2+1
+      nrx   = maxbeg+ihalf
+      next  = number+1
+
+      !  adjust the different parameters.
+      if (next<=nrint) then
+         do j=next,nrint
+            jj = next+nrint-j
+            fpint(jj+1) = fpint(jj)
+            nrdata(jj+1) = nrdata(jj)
+            jk = jj+k
+            t(jk+1) = t(jk)
+         end do
+      endif
+      
+      !  split the selected interval in two, apportioning its residual between the halves.
+      !  number>0 is guaranteed by the early return above, so am is always initialized here.
+      nrdata(number) = ihalf-1
+      nrdata(next)   = maxpt-ihalf
+      am = maxpt
+      an = nrdata(number)
+      fpint(number) = fpmax*an/am
+
+      an = nrdata(next)
+      fpint(next) = fpmax*an/am
+      jk = next+k
+      t(jk) = x(nrx)
+      
+      n     = n+1
+      nrint = nrint+1
+
+      end subroutine fpknot
+
+      !> @brief Estimated number of knots to add next, clamped to the integer range.
+      !!
+      !! Evaluates \f$ rn \cdot fpms / reduc \f$ and truncates it to an integer. On large,
+      !! high-variance data sets the ratio can exceed `huge(0_FP_SIZE)`, where the real-to-integer
+      !! conversion is undefined; the result is saturated instead. Callers apply this estimate only
+      !! when `reduc>acc>0`, so the quotient is finite and non-negative for well-behaved residuals.
+      !!
+      !! @param[in] rn     Number of knots added on the previous iteration
+      !! @param[in] fpms   Residual excess of the current spline, \f$ f_p - s \f$
+      !! @param[in] reduc  Residual reduction achieved by the previous knot addition
+      !! @return    Estimated number of knots to add
+      elemental integer(FP_SIZE) function fp_knots_to_add(rn,fpms,reduc) result(npl1)
+         real(FP_REAL), intent(in) :: rn,fpms,reduc
+
+         real(FP_REAL), parameter :: NPL_MAX = real(huge(0_FP_SIZE),FP_REAL)
+         real(FP_REAL) :: ratio
+
+         ratio = rn*fpms/reduc
+         if (ratio<NPL_MAX) then
+            npl1 = int(max(ratio,zero),FP_SIZE)
+         else
+            npl1 = huge(0_FP_SIZE) ! saturate; a NaN ratio lands here too
+         end if
+
+      end function fp_knots_to_add
+
+      !> @brief Compute smoothing spline on a polar grid with origin constraints.
+      !!
+      !! Given data on a \f$ (u, v) \f$ grid (radial \f$ \times \f$ angular),
+      !! determines the B-spline coefficients of a bicubic smoothing spline
+      !! \f$ s_p(u,v) \f$ periodic in \f$ v \f$, satisfying origin-continuity
+      !! constraints:
+      !!
+      !! - \f$ s(\lambda_1^u, v) = z_0 \f$ (constant at origin)
+      !! - \f$ \partial s / \partial u |_{u=0} = dz(2)\cos v + dz(3)\sin v \f$
+      !!   (if `iopt(2) = 1`)
+      !! - \f$ s(\lambda_{n_u}^u, v) = 0 \f$ (if `iopt(3) = 1`)
+      !!
+      !! The unknown boundary parameters `dz(i)` (when not prescribed) are
+      !! optimized to minimize the residual sum of squares, which is a
+      !! quadratic function of `dz`. Delegates the grid QR factorization
+      !! to fpgrdi.
+      !!
+      !! @param[in,out] ifsu    Flag: 0 = recompute radial B-splines
+      !! @param[in,out] ifsv    Flag: 0 = recompute angular B-splines
+      !! @param[in,out] ifbu    Flag: 0 = recompute radial discontinuities
+      !! @param[in,out] ifbv    Flag: 0 = recompute angular discontinuities
+      !! @param[in]     u       Radial grid values, length `mu`
+      !! @param[in]     mu      Number of radial points
+      !! @param[in]     v       Angular grid values, length `mv`
+      !! @param[in]     mv      Number of angular points
+      !! @param[in]     z       Data values, length `mz`
+      !! @param[in]     mz      Length of `z`
+      !! @param[in]     z0      Value at origin (prescribed or initial guess)
+      !! @param[in,out] dz      Boundary derivative parameters (3 values)
+      !! @param[in]     iopt    Constraint options (3 flags)
+      !! @param[in]     ider    Derivative specification flags
+      !! @param[in]     tu      Radial knot vector
+      !! @param[in]     nu      Number of radial knots
+      !! @param[in]     tv      Angular knot vector
+      !! @param[in]     nv      Number of angular knots
+      !! @param[in]     nuest   Max radial knots
+      !! @param[in]     nvest   Max angular knots
+      !! @param[in,out] p       Smoothing parameter
+      !! @param[in]     step    Search step for boundary parameter optimization
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in]     nc      Length of `c`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fpu     Residual sums per radial interval
+      !! @param[in,out] fpv     Residual sums per angular interval
+      !! @param[in,out] nru     Radial knot interval indices
+      !! @param[in,out] nrv     Angular knot interval indices
+      !! @param[in,out] wrk     Work array
+      !! @param[in]     lwrk    Length of `wrk`
+      !!
+      !! @see Dierckx, Ch. 11, §11.1 (pp. 197-205)
+      !! @see fpgrdi — grid QR factorization; fppogr — polar grid driver
+      pure subroutine fpopdi(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,z,mz,z0,dz,iopt,ider,tu,nu,tv,nv,&
+                             nuest,nvest,p,step,c,nc,fp,fpu,fpv,nru,nrv,wrk,lwrk)
+
+      !
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(inout) :: ifsu,ifsv,ifbu,ifbv
+      integer(FP_SIZE), intent(in)    :: mu,mv,mz,nu,nv,nc,lwrk,nuest,nvest
+      real(FP_REAL), intent(in)    :: z0,step
+      real(FP_REAL), intent(inout) :: fp,p
+      !  ..array arguments..
+      integer(FP_SIZE),  intent(in)    :: ider(2),iopt(3)
+      integer(FP_SIZE),  intent(inout) :: nru(mu),nrv(mv)
+      real(FP_REAL), intent(in)    :: u(mu),v(mv),z(mz),tu(nu),tv(nv)
+      real(FP_REAL), intent(inout) :: c(nc),dz(3),fpu(nu),fpv(nv),wrk(lwrk)
+      !  ..local scalars..
+      real(FP_REAL) :: res,sq,sqq,step1,step2
+      integer(FP_SIZE) :: i,id0,iop0,iop1,i1,j,l,laa,lau,lav1,lav2,lbb,lbu,lbv, &
+                          lcc,lcs,lq,lri,lsu,lsv,l1,l2,mm,mvnu,number
+      !  ..local arrays..
+      integer(FP_SIZE) :: nr(3)
+      real(FP_REAL) :: delta(3),dzz(3),sum(3),a(6,6),g(6)
+
+      !  we partition the working space
+      lsu  = 1
+      lsv  = lsu+4*mu
+      lri  = lsv+4*mv
+      mm   = max0(nuest,mv+nvest)
+      lq   = lri+mm
+      mvnu = nuest*(mv+nvest-8)
+      lau  = lq+mvnu
+      lav1 = lau+5*nuest
+      lav2 = lav1+6*nvest
+      lbu  = lav2+4*nvest
+      lbv  = lbu+5*nuest
+      laa  = lbv+5*nvest
+      lbb  = laa+2*mv
+      lcc  = lbb+2*nvest
+      lcs  = lcc+nvest
+
+      !  we calculate the smoothing spline sp(u,v) according to the input values dz(i),i=1,2,3.
+      iop0 = iopt(2)
+      iop1 = iopt(3)
+      call fpgrdi(ifsu,ifsv,ifbu,ifbv,FP_FALSE,u,mu,v,mv,z,mz,dz,iop0,iop1,tu,nu,tv,nv,p,c,nc,sq,&
+                  fp,fpu,fpv,mm,mvnu,wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1),&
+                  wrk(lav2),wrk(lbu),wrk(lbv),wrk(laa),wrk(lbb),wrk(lcc),wrk(lcs),nru,nrv)
+
+      id0 = ider(1)
+      if (id0==0) then
+        res = (z0-dz(1))**2
+        fp = fp+res
+        sq = sq+res
+      endif
+
+      ! in case all derivative values dz(i) are given (step<=0) or in case we have spline
+      ! interpolation, we accept this spline as a solution.
+      if (step<=zero .or. sq<=zero) return
+
+      dzz(1:3) = dz(1:3)
+
+      ! number denotes the number of derivative values dz(i) that still must be optimized.
+      ! let us denote these parameters by g(j),j=1,...,number.
+      number = 0
+      if (id0<=0) then
+          number   = 1
+          nr   (1) = 1
+          delta(1) = step
+      endif
+
+      if (iop0/=0 .and. ider(2)==0) then
+          step2 = step*three/tu(5)
+          nr(number+1) = 2
+          nr(number+2) = 3
+          delta(number+1) = step2
+          delta(number+2) = step2
+          number = number+2
+      endif
+
+      if(number==0) return
+
+      ! the sum of squared residuals sq is a quadratic polynomial in the parameters g(j). we
+      ! determine the unknown coefficients of this polymomial by calculating (number+1)*(number+2)/2
+      ! different splines according to specific values for g(j).
+      parameter_splines: do i=1,number
+         l      = nr(i)
+         step1  = delta(i)
+
+         dzz(l) = dz(l)+step1
+         call fpgrdi(ifsu,ifsv,ifbu,ifbv,FP_TRUE,u,mu,v,mv,z,mz,dzz,iop0,iop1,tu,nu,tv,nv,p,c,nc,sum(i),&
+                     fp,fpu,fpv,mm,mvnu,wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1), &
+                     wrk(lav2),wrk(lbu),wrk(lbv),wrk(laa),wrk(lbb),wrk(lcc),wrk(lcs),nru,nrv)
+
+         if (id0==0) sum(i) = sum(i)+(z0-dzz(1))**2
+
+         dzz(l) = dz(l)-step1
+         call fpgrdi(ifsu,ifsv,ifbu,ifbv,FP_TRUE,u,mu,v,mv,z,mz,dzz,iop0,iop1,tu,nu,tv,nv,p,c,nc,sqq,&
+                     fp,fpu,fpv,mm,mvnu,wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1), &
+                     wrk(lav2),wrk(lbu),wrk(lbv),wrk(laa),wrk(lbb),wrk(lcc),wrk(lcs),nru,nrv)
+
+         if (id0==0) sqq = sqq+(z0-dzz(1))**2
+
+         a(i,i) = (sum(i)+sqq-sq-sq)/step1**2
+         if (a(i,i)<=zero) then
+            number = 0
+            exit parameter_splines
+         endif
+         g(i) = (sqq-sum(i))/(step1+step1)
+         dzz(l) = dz(l)
+      end do parameter_splines
+
+      if (number>1) then
+         do i=2,number
+            l1      = nr(i)
+            step1   = delta(i)
+            dzz(l1) = dz(l1)+step1
+            i1      = i-1
+            do j=1,i1
+               l2      = nr(j)
+               step2   = delta(j)
+               dzz(l2) = dz(l2)+step2
+
+               call fpgrdi(ifsu,ifsv,ifbu,ifbv,FP_TRUE,u,mu,v,mv,z,mz,dzz,iop0,iop1,tu,nu,tv,nv,p,c,nc,sqq,&
+                           fp,fpu,fpv,mm,mvnu,wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1), &
+                           wrk(lav2),wrk(lbu),wrk(lbv),wrk(laa),wrk(lbb),wrk(lcc),wrk(lcs),nru,nrv)
+
+               if (id0==0) sqq = sqq+(z0-dzz(1))**2
+               a (i,j) = (sq+sqq-sum(i)-sum(j))/(step1*step2)
+               dzz(l2) = dz(l2)
+            end do
+            dzz(l1) = dz(l1)
+         end do
+      endif
+
+      ! the optimal values g(j) are found as the solution of the system
+      ! d (sq) / d (g(j)) = 0 , j=1,...,number.
+      if (number>0) then
+          call fpsysy(a,number,g)
+          do i=1,number
+             l = nr(i)
+             dz(l) = dz(l)+g(i)
+          end do
+      endif
+
+      ! we determine the spline sp(u,v) according to the optimal values g(j).
+      call fpgrdi(ifsu,ifsv,ifbu,ifbv,FP_FALSE,u,mu,v,mv,z,mz,dz,iop0,iop1,tu,nu,tv,nv,p,c,nc,sq, &
+                  fp,fpu,fpv,mm,mvnu,wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1), &
+                  wrk(lav2),wrk(lbu),wrk(lbv),wrk(laa),wrk(lbb),wrk(lcc),wrk(lcs),nru,nrv)
+      if (id0==0) fp = fp+(z0-dz(1))**2
+      return
+      end subroutine fpopdi
+
+      !> @brief Compute smoothing spline on a spherical grid with pole constraints.
+      !!
+      !! Spherical counterpart of fpopdi. Given data on a
+      !! \f$ (\theta, \phi) \f$ grid, determines a bicubic smoothing spline
+      !! \f$ s_p(\theta,\phi) \f$ periodic in \f$ \phi \f$, satisfying
+      !! pole-continuity constraints at both poles:
+      !!
+      !! - \f$ s(0, \phi) = r_0 \f$ (north pole value)
+      !! - \f$ s(\pi, \phi) = r_1 \f$ (south pole value)
+      !! - Optional derivative constraints:
+      !!   \f$ \partial s / \partial \theta |_{\theta=0} = dr(2)\cos\phi + dr(3)\sin\phi \f$
+      !!
+      !! Unknown pole parameters `dr(i)` are optimized to minimize the
+      !! residual. Delegates to fpgrsp for the grid QR factorization.
+      !!
+      !! @param[in,out] ifsu    Flag: 0 = recompute \f$ \theta \f$-B-splines
+      !! @param[in,out] ifsv    Flag: 0 = recompute \f$ \phi \f$-B-splines
+      !! @param[in,out] ifbu    Flag: 0 = recompute \f$ \theta \f$-discontinuities
+      !! @param[in,out] ifbv    Flag: 0 = recompute \f$ \phi \f$-discontinuities
+      !! @param[in]     u       Co-latitude grid \f$ \theta \f$, length `mu`
+      !! @param[in]     mu      Number of \f$ \theta \f$-points
+      !! @param[in]     v       Longitude grid \f$ \phi \f$, length `mv`
+      !! @param[in]     mv      Number of \f$ \phi \f$-points
+      !! @param[in]     r       Data values, length `mr`
+      !! @param[in]     mr      Length of `r`
+      !! @param[in]     r0      North-pole value (prescribed or initial guess)
+      !! @param[in]     r1      South-pole value (prescribed or initial guess)
+      !! @param[in,out] dr      Pole derivative parameters (6 values)
+      !! @param[in]     iopt    Constraint options
+      !! @param[in]     ider    Derivative specification flags
+      !! @param[in]     tu      \f$ \theta \f$-knot vector
+      !! @param[in]     nu      Number of \f$ \theta \f$-knots
+      !! @param[in]     tv      \f$ \phi \f$-knot vector
+      !! @param[in]     nv      Number of \f$ \phi \f$-knots
+      !! @param[in]     nuest   Max \f$ \theta \f$-knots
+      !! @param[in]     nvest   Max \f$ \phi \f$-knots
+      !! @param[in,out] p       Smoothing parameter
+      !! @param[in]     step    Search step for pole parameter optimization
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in]     nc      Length of `c`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fpu     Residual sums per \f$ \theta \f$-interval
+      !! @param[in,out] fpv     Residual sums per \f$ \phi \f$-interval
+      !! @param[in,out] nru     \f$ \theta \f$-knot interval indices
+      !! @param[in,out] nrv     \f$ \phi \f$-knot interval indices
+      !! @param[in,out] wrk     Work array
+      !! @param[in]     lwrk    Length of `wrk`
+      !!
+      !! @see Dierckx, Ch. 11, §11.2 (pp. 205-213)
+      !! @see fpgrsp — spherical grid QR factorization; fpspgr — spherical grid driver
+      pure subroutine fpopsp(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,r, &
+                             mr,r0,r1,dr,iopt,ider,tu,nu,tv,nv,nuest,nvest,p,step,c,nc, &
+                             fp,fpu,fpv,nru,nrv,wrk,lwrk)
+      !
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: mu,mv,mr,nu,nv,nuest,nvest,nc,lwrk
+      integer(FP_SIZE), intent(inout) :: ifsu,ifsv,ifbu,ifbv
+      real(FP_REAL), intent(in) :: r0,r1
+      real(FP_REAL), intent(inout) :: fp
+      real(FP_REAL), intent(inout) :: p
+      !  ..array arguments..
+      integer(FP_SIZE), intent(in) :: ider(4),iopt(3)
+      integer(FP_SIZE), intent(inout) :: nru(mu),nrv(mv)
+      real(FP_REAL), intent(in) :: u(mu),v(mv),r(mr),tu(nu),tv(nv)
+      real(FP_REAL), intent(inout) :: dr(6),wrk(lwrk),step(2),c(nc),fpu(nu),fpv(nv)
+      !  ..local scalars..
+      real(FP_REAL) :: sq,sqq,sq0,sq1,step1,step2
+      integer(FP_SIZE) :: i,id0,iop0,iop1,i1,j,l,lau,lav1,lav2,la0,la1,lbu,lbv,lb0, &
+       lb1,lc0,lc1,lcs,lq,lri,lsu,lsv,l1,l2,mm,mvnu,number, id1
+      !  ..local arrays..
+      integer(FP_SIZE) :: nr(6)
+      logical(FP_BOOL) :: zeroed
+      real(FP_REAL) :: delta(6),drr(6),sum(6),a(6,6),g(6)
+
+      !  we partition the working space
+      lsu  = 1
+      lsv  = lsu+4*mu
+      lri  = lsv+4*mv
+      mm   = max(nuest,mv+nvest)
+      lq   = lri+mm
+      mvnu = nuest*(mv+nvest-8)
+      lau  = lq+mvnu
+      lav1 = lau+5*nuest
+      lav2 = lav1+6*nvest
+      lbu  = lav2+4*nvest
+      lbv  = lbu+5*nuest
+      la0  = lbv+5*nvest
+      la1  = la0+2*mv
+      lb0  = la1+2*mv
+      lb1  = lb0+2*nvest
+      lc0  = lb1+2*nvest
+      lc1  = lc0+nvest
+      lcs  = lc1+nvest
+      !  we calculate the smoothing spline sp(u,v) according to the input
+      !  values dr(i),i=1,...,6.
+      iop0 = iopt(2)
+      iop1 = iopt(3)
+      id0  = ider(1)
+      id1  = ider(3)
+      sq   = zero
+      sum  = zero
+      
+      call fpgrsp(ifsu,ifsv,ifbu,ifbv,FP_FALSE,u,mu,v,mv,r,mr,dr,           &
+                  iop0,iop1,tu,nu,tv,nv,p,c,nc,sq,fp,fpu,fpv,mm,mvnu,       &
+                  wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1),   &
+                  wrk(lav2),wrk(lbu),wrk(lbv),wrk(la0),wrk(la1),wrk(lb0),  &
+                  wrk(lb1),wrk(lc0),wrk(lc1),wrk(lcs),nru,nrv)
+                  
+      sq0 = merge((r0-dr(1))**2,zero,id0==0)
+      sq1 = merge((r1-dr(4))**2,zero,id1==0)
+      sq  = sq+sq0+sq1      
+      
+      ! in case all derivative values dr(i) are given (step<=0) or in case
+      ! we have spline interpolation, we accept this spline as a solution.
+      if (sq<=zero .or. all(step(1:2)<=zero)) return
+      drr    = dr
+      sqq    = sq
+      sum(1) = sq
+
+      ! number denotes the number of derivative values dr(i) that still must
+      ! be optimized. let us denote these parameters by g(j),j=1,...,number.
+      number = 0
+      if (id0<=0) then
+         number   = 1
+         nr   (1) = 1
+         delta(1) = step(1)
+      endif
+      if (iop0/=0 .and. ider(2)==0) then
+         step2 = step(1)*three/(tu(5)-tu(4))
+         nr   (number+1:number+2) = [2,3]
+         delta(number+1:number+2) = step2
+         number = number+2
+      endif
+      if (id1<=0) then
+         number = number+1
+         nr   (number) = 4
+         delta(number) = step(2)
+      end if
+      if (iop1/=0 .and. ider(4)==0) then
+         step2 = step(2)*three/(tu(nu)-tu(nu-4))
+         nr   (number+1:number+2) = [5,6]
+         delta(number+1:number+2) = step2
+         number = number+2
+      endif
+
+      if (number==0) return
+
+      ! the sum of squared residulas sq is a quadratic polynomial in the parameters g(j).
+      ! we determine the unknown coefficients of this polymomial by calculating (number+1)*(number+2)/2
+      ! different splines according to specific values for g(j).
+      zeroed = .false.
+      do i=1,number
+         l      = nr(i)
+         step1  = delta(i)
+         drr(l) = dr(l)+step1
+         call fpgrsp(ifsu,ifsv,ifbu,ifbv,FP_TRUE,u,mu,v,mv,r,mr,drr, &
+                     iop0,iop1,tu,nu,tv,nv,p,c,nc,sum(i),fp,fpu,fpv,mm,mvnu, &
+                     wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1), &
+                     wrk(lav2),wrk(lbu),wrk(lbv),wrk(la0),wrk(la1),wrk(lb0), &
+                     wrk(lb1),wrk(lc0),wrk(lc1),wrk(lcs),nru,nrv)
+                     
+         if (id0==0) sq0 = (r0-drr(1))**2
+         if (id1==0) sq1 = (r1-drr(4))**2
+         sum(i) = sum(i)+sq0+sq1
+         drr(l) = dr(l)-step1
+
+         call fpgrsp(ifsu,ifsv,ifbu,ifbv,FP_TRUE,u,mu,v,mv,r,mr,drr, &
+                     iop0,iop1,tu,nu,tv,nv,p,c,nc,sqq,fp,fpu,fpv,mm,mvnu, &
+                     wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1), &
+                     wrk(lav2),wrk(lbu),wrk(lbv),wrk(la0),wrk(la1),wrk(lb0), &
+                     wrk(lb1),wrk(lc0),wrk(lc1),wrk(lcs),nru,nrv)
+
+         if (id0==0) sq0 = (r0-drr(1))**2
+         if (id1==0) sq1 = (r1-drr(4))**2
+
+         sqq    = sqq+sq0+sq1
+         drr(l) = dr(l)
+         a(i,i) = (sum(i)+sqq-sq-sq)/step1**2
+         if (a(i,i)<=zero) then
+             zeroed = .true.
+             exit
+         end if
+         g(i)   = (sqq-sum(i))/(2*step1)
+      end do
+
+      if (.not.zeroed) then
+
+          if (number>1) then
+             do i=2,number
+                l1      = nr(i)
+                step1   = delta(i)
+                drr(l1) = dr(l1)+step1
+                i1 = i-1
+                do j=1,i1
+                    l2      = nr(j)
+                    step2   = delta(j)
+                    drr(l2) = dr(l2)+step2
+                    call fpgrsp(ifsu,ifsv,ifbu,ifbv,FP_TRUE,u,mu,v,mv,r,mr,drr, &
+                                iop0,iop1,tu,nu,tv,nv,p,c,nc,sqq,fp,fpu,fpv,mm,mvnu, &
+                                wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1), &
+                                wrk(lav2),wrk(lbu),wrk(lbv),wrk(la0),wrk(la1),wrk(lb0), &
+                                wrk(lb1),wrk(lc0),wrk(lc1),wrk(lcs),nru,nrv)
+                    if(id0==0) sq0 = (r0-drr(1))**2
+                    if(id1==0) sq1 = (r1-drr(4))**2
+                    sqq = sqq+sq0+sq1
+                    a(i,j) = (sq+sqq-sum(i)-sum(j))/(step1*step2)
+                    drr(l2) = dr(l2)
+                end do
+                drr(l1) = dr(l1)
+             end do
+          end if
+
+          ! the optimal values g(j) are found as the solution of the system
+          ! d (sq) / d (g(j)) = 0 , j=1,...,number.
+          call fpsysy(a,number,g)
+          forall(i=1:number) dr(nr(i))=dr(nr(i))+g(i)
+
+      endif
+
+      ! we determine the spline sp(u,v) according to the optimal values g(j).
+      call fpgrsp(ifsu,ifsv,ifbu,ifbv,FP_FALSE,u,mu,v,mv,r,mr,dr, &
+                  iop0,iop1,tu,nu,tv,nv,p,c,nc,sq,fp,fpu,fpv,mm,mvnu, &
+                  wrk(lsu),wrk(lsv),wrk(lri),wrk(lq),wrk(lau),wrk(lav1), &
+                  wrk(lav2),wrk(lbu),wrk(lbv),wrk(la0),wrk(la1),wrk(lb0), &
+                  wrk(lb1),wrk(lc0),wrk(lc1),wrk(lcs),nru,nrv)
+      if(id0==0) sq0 = (r0-dr(1))**2
+      if(id1==0) sq1 = (r1-dr(4))**2
+      sq = sq+sq0+sq1
+      return
+      end subroutine fpopsp
+
+
+      !> @brief Sort scattered data points into rectangular panels.
+      !!
+      !! Assigns each data point \f$ (x_i, y_i) \f$, \f$ i = 1, \ldots, m \f$, to
+      !! the rectangular panel \f$ R_{u,v} \f$ defined by
+      !! \f$ \lambda_u^x \leq x < \lambda_{u+1}^x \f$ and
+      !! \f$ \lambda_v^y \leq y < \lambda_{v+1}^y \f$.
+      !!
+      !! For each panel, a linked-list stack is built:
+      !! - `index(j)` points to the first data point in panel \f$ j \f$
+      !! - `nummer(i)` gives the next data point in the same panel
+      !!
+      !! This panel ordering enables efficient row-by-row construction of the
+      !! observation matrix, since only the \f$ (k_x+1)(k_y+1) \f$ B-splines
+      !! supported on a given panel contribute non-zero entries.
+      !!
+      !! @param[in]  x       Data abscissae, length `m`
+      !! @param[in]  y       Data ordinates, length `m`
+      !! @param[in]  m       Number of data points
+      !! @param[in]  kx      Spline degree in \f$ x \f$
+      !! @param[in]  ky      Spline degree in \f$ y \f$
+      !! @param[in]  tx      Knot vector in \f$ x \f$, length `nx`
+      !! @param[in]  nx      Number of knots in \f$ x \f$
+      !! @param[in]  ty      Knot vector in \f$ y \f$, length `ny`
+      !! @param[in]  ny      Number of knots in \f$ y \f$
+      !! @param[out] nummer  Linked-list next pointers, length `m`
+      !! @param[out] index   Panel head pointers, length `nreg`
+      !! @param[in]  nreg    Number of panels \f$ = (n_x - 2k_x - 1)(n_y - 2k_y - 1) \f$
+      !!
+      !! @see Dierckx, Ch. 9, §9.1 (pp. 147-150)
+      pure subroutine fporde(x,y,m,kx,ky,tx,nx,ty,ny,nummer,index,nreg)
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)  :: m,kx,ky,nx,ny,nreg
+      !  ..array arguments..
+      real(FP_REAL), intent(in)  :: x(m),y(m),tx(nx),ty(ny)
+      integer(FP_SIZE), intent(out) :: nummer(m),index(nreg)
+      !  ..local scalars..
+      real(FP_REAL) :: xi,yi
+      integer(FP_SIZE) :: im,k,kx1,ky1,k1,l,l1,nk1x,nk1y,num,nyy
+
+      !  ..
+      kx1  = kx+1
+      ky1  = ky+1
+      nk1x = nx-kx1
+      nk1y = ny-ky1
+      nyy  = nk1y-ky
+      index = 0
+
+      points: do im=1,m
+         xi = x(im)
+         yi = y(im)
+         l = fp_knot_interval(tx, xi, kx1, nk1x)
+         l1 = l + 1
+
+         k = fp_knot_interval(ty, yi, ky1, nk1y)
+         k1 = k + 1
+         num = (l-kx1)*nyy+k-ky
+         nummer(im) = index(num)
+         index(num) = im
+      end do points
+      return
+      end subroutine fporde
+
+
+      !> @brief Core algorithm for open parametric curve fitting.
+      !!
+      !! Fits a \f$ d \f$-dimensional parametric spline curve
+      !! \f$ s(u) = (s_1(u), \ldots, s_d(u)) \f$ of degree \f$ k \f$ on the
+      !! parameter interval \f$ [u_b, u_e] \f$. All \f$ d \f$ coordinate curves
+      !! share the same knot vector and are fitted simultaneously:
+      !!
+      !! \f[
+      !!     \sum_{i=1}^{m} w_i^2 \sum_{j=1}^{d} (x_{i,j} - s_j(u_i))^2 \leq S
+      !!     \tag{6.9}
+      !! \f]
+      !!
+      !! The algorithm follows the same three-level iteration as fpcurf
+      !! (knot selection, QR factorization, smoothing-parameter search) but
+      !! uses vector-RHS Givens rotations (fp_rotate_row_vec) to process all
+      !! dimensions in a single pass.
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue
+      !! @param[in]     idim    Number of curve dimensions \f$ d \f$
+      !! @param[in]     m       Number of data points
+      !! @param[in]     u       Parameter values, length `m`
+      !! @param[in]     mx      Length of `x` (\f$ = m \cdot d \f$)
+      !! @param[in]     x       Data coordinates, interleaved, length `mx`
+      !! @param[in]     w       Data weights, length `m`
+      !! @param[in]     ub      Left boundary of parameter interval
+      !! @param[in]     ue      Right boundary of parameter interval
+      !! @param[in]     k       Spline degree
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nest    Max knots
+      !! @param[in]     tol     Tolerance for smoothing condition
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     k1      \f$ k + 1 \f$
+      !! @param[in]     k2      \f$ k + 2 \f$
+      !! @param[in,out] n       Number of knots
+      !! @param[in,out] t       Knot vector, length `nest`
+      !! @param[in,out] nc      Length of coefficient array `c`
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fpint   Residual sums per knot interval
+      !! @param[in,out] z       Work: transformed RHS
+      !! @param[in,out] a       Work: band matrix
+      !! @param[in,out] b       Work: smoothing matrix
+      !! @param[in,out] g       Work: band matrix copy
+      !! @param[in,out] q       Work: B-spline values
+      !! @param[in,out] nrdata  Interior data-point counts
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 6, §6.3 (pp. 112-114), Eq. 6.9
+      !! @see fp_rotate_row_vec — vector-RHS Givens rotation
+      pure subroutine fppara(iopt,idim,m,u,mx,x,w,ub,ue,k,s,nest,tol,maxit, &
+                             k1,k2,n,t,nc,c,fp,fpint,z,a,b,g,q,nrdata,ier)
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: ub,ue,s,tol
+      real(FP_REAL), intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: idim,maxit,iopt,m,mx,k,k1,k2,nest
+      integer(FP_SIZE), intent(inout) :: n,nc
+      integer(FP_FLAG), intent(inout) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: u(m),x(mx),w(m)
+      real(FP_REAL), intent(inout) :: t(nest),c(nc),fpint(nest),z(nc),a(nest,k1),b(nest,k2),g(nest,k2),q(m,k1)
+      integer(FP_SIZE), intent(inout) :: nrdata(nest)
+
+      !  ..local scalars..
+      real(FP_REAL) :: acc,fac,fpart,fpms,fpold,fp0,f1,f2,f3,p,pinv,p1,p2,p3,rn,store,term,ui,wi
+      integer(FP_SIZE) :: i,it,iter,j,jj,j1,j2,k3,l,l0,mk1,nk1,nmax,nmin,nplus,npl1,nrint,n8
+      logical(FP_BOOL) :: new,check1,check3,success
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1),xi(idim)
+
+      fpold = zero
+      fp0   = zero
+      nplus = 0
+      fpms  = huge(zero)
+
+      ! calculation of acc, the absolute tolerance for the root of f(p)=s.
+      acc = tol*s
+
+      ! determine nmax, the number of knots for spline interpolation.
+      nmax = m+k1
+
+      ! *****
+      !  part 1: determination of the number of knots and their position
+      ! *****
+      !  given a set of knots we compute the least-squares curve sinf(u), and the corresponding sum
+      !  of squared residuals fp=f(p=inf).
+      !  if iopt=-1 sinf(u) is the requested curve.
+      !  if iopt=0 or iopt=1 we check whether we can accept the knots:
+      !    if fp <=s we will continue with the current set of knots.
+      !    if fp > s we will increase the number of knots and compute the corresponding least-
+      !    squares curve until finally fp<=s.
+      !  the initial choice of knots depends on the value of s and iopt.
+      !    if s=0 we have spline interpolation; in that case the number of knots equals nmax = m+k+1.
+      !    if (s>0 and iopt=0) we first compute the least-squares polynomial curve of degree k;
+      !      n = nmin = 2*k+2
+      !    iopt=1 we start with the set of knots found at the last call of the routine, except for
+      !    the case that s > fp0; then we compute directly the polynomial curve of degree k.
+      ! *****
+
+      !  determine nmin, the number of knots for polynomial approximation.
+      nmin = 2*k1
+      bootstrap: if (iopt>=0) then
+
+          interpolating: if (s<=zero) then
+
+              !  if s=0, s(u) is an interpolating curve.
+              !  check that the required storage space exceeds the available one.
+              n = nmax
+              if (nmax>nest) then
+                 ier = FITPACK_INSUFFICIENT_STORAGE
+                 return
+              end if
+
+              !  find the position of the interior knots in case of interpolation.
+              mk1 = m-k1
+              if (mk1/=0) then
+                  k3 = k/2
+                  i  = k2
+                  j = k3+1
+                  odd_k: if (k3*2/=k) then
+                      t(k2:k2+mk1-1) = u(j+1:j+mk1)
+                  else odd_k
+                      t(k2:k2+mk1-1) = half*( u(j+1:j+mk1) + u(j:j+mk1-1) )
+                  endif odd_k
+
+              endif
+
+          else interpolating
+
+              !  if s>0 our initial choice of knots depends on the value of iopt.
+              !  if iopt=0 or iopt=1 and s>=fp0, we start computing the least-squares
+              !  polynomial curve which is a spline curve without interior knots.
+              !  if iopt=1 and fp0>s we start computing the least squares spline curve
+              !  according to the set of knots found at the last call of the routine.
+              use_last_call: if (iopt/=0 .and. n/=nmin)  then
+                 fp0   = fpint(n)
+                 fpold = fpint(n-1)
+                 nplus = nrdata(n)
+              endif use_last_call
+
+              if (fp0<=s .or. iopt==0 .or. n==nmin) then
+                  n         = nmin
+                  fpold     = zero
+                  nplus     = 0
+                  nrdata(1) = m-2
+              endif
+          endif interpolating
+
+      endif bootstrap
+
+      !  main loop for the different sets of knots. m is a safe upper bound
+      !  for the number of trials.
+      iter = 0
+      main_loop: do while (iter<=m)
+
+        iter = iter+1
+
+        if (n==nmin) ier = FITPACK_LEASTSQUARES_OK
+
+        ! find nrint, tne number of knot intervals.
+        nrint = n-nmin+1
+        ! find the position of the additional knots which are needed for
+        ! the b-spline representation of s(u).
+        nk1      = n-k1
+        t(1:k1)  = ub
+        t(n-k:n) = ue
+
+        ! compute the b-spline coefficients of the least-squares spline curve
+        ! sinf(u). the observation matrix a is built up row by row and
+        ! reduced to upper triangular form by givens transformations.
+        ! at the same time fp=f(p=inf) is computed.
+        fp = zero
+
+        ! initialize the b-spline coefficients and the observation matrix a.
+        z(1:nc) = zero
+        a(1:nk1,1:k1) = zero
+        l = k1
+        coefs: do it=1,m
+
+           ! fetch the current data point u(it),x(it).
+           ui = u(it)
+           wi = w(it)
+           xi = x((it-1)*idim+1:it*idim)*wi
+
+           ! search for knot interval t(l) <= ui < t(l+1).
+           l = fp_knot_interval(t, ui, l, nk1)
+
+           ! evaluate the (k+1) non-zero b-splines at ui and store them in q.
+           h = fpbspl(t,n,k,ui,l)
+           q(it,1:k1) = h(1:k1)
+           h(:k1)     = wi*h(:k1)
+
+           ! rotate the new row of the observation matrix into triangle.
+           call fp_rotate_row_vec(h, k1, a, nest, xi, z, l-k1, n, idim)
+
+           !  add contribution of this row to the sum of squares of residual right hand sides.
+           fp = fp + sum(xi**2)
+
+        end do coefs
+
+        if (ier==FITPACK_LEASTSQUARES_OK) fp0 = fp
+        fpint(n-1:n) = [fpold,fp0]
+        nrdata(n)    = nplus
+
+        ! backward substitution to obtain the b-spline coefficients.
+        j1 = 1
+        do j2=1,idim
+           c(j1:j1+nk1-1) = fpback(a,z(j1),nk1,k1,nest)
+           j1 = j1+n
+        end do
+
+        ! test whether the approximation sinf(u) is an acceptable solution.
+        if (iopt<0) return ! was done already
+
+        fpms = fp-s; if(abs(fpms)<acc) return
+
+        ! if f(p=inf) < s accept the choice of knots.
+        if (fpms<zero) exit main_loop
+
+        ! if n = nmax, sinf(u) is an interpolating spline curve.
+        if (n==nmax) then
+           ier = FITPACK_INTERPOLATING_OK
+           return
+        endif
+
+        ! increase the number of knots.
+        ! if n=nest we cannot increase the number of knots because of the storage capacity limitation.
+        if (n==nest) then
+            ier = FITPACK_INSUFFICIENT_STORAGE
+            return
+        end if
+
+        ! determine the number of knots nplus we are going to add.
+        if (ier==FITPACK_OK) then
+           npl1 = nplus*2
+           rn = nplus
+           if (fpold-fp>acc) npl1 = fp_knots_to_add(rn,fpms,fpold-fp)
+           nplus = min(nplus*2,max(npl1,nplus/2,1))
+        else
+           nplus = 1
+           ier   = FITPACK_OK
+        endif
+
+        ! Initialize iterate
+        fpold = fp
+
+        ! compute the sum of squared residuals for each knot interval
+        ! t(j+k) <= u(i) <= t(j+k+1) and store it in fpint(j),j=1,2,...nrint.
+        fpart = zero
+        i = 1
+        l = k2
+        new = .false.
+        jj = 0
+        square_residuals: do it=1,m
+            if (u(it)>=t(l) .and. l<=nk1) then
+               new = .true.
+               l = l+1
+            endif
+            term = zero
+            l0 = l-k2
+            do j2=1,idim
+               fac  = dot_product(c(l0+1:l0+k1),q(it,1:k1))
+               jj   = jj+1
+               term = term+(w(it)*(fac-x(jj)))**2
+               l0   = l0+n
+            end do
+            fpart = fpart+term
+            if (new) then
+               store    = term*half
+               fpint(i) = fpart-store
+               i        = i+1
+               fpart    = store
+               new      = .false.
+            endif
+        end do square_residuals
+
+        fpint(nrint) = fpart
+        add_new_knots: do l=1,nplus
+
+            ! add a new knot.
+            call fpknot(u,m,t,n,fpint,nrdata,nrint,nest,IONE)
+
+            ! if n=nmax we locate the knots as for interpolation
+            if (n==nmax) then
+               !  find the position of the interior knots in case of interpolation.
+               mk1 = m-k1
+               if (mk1/=0) then
+                  k3 = k/2
+                  i  = k2
+                  j  = k3+2
+                  do jj=1,mk1
+                    t(i) = merge( u(j) , (u(j)+u(j-1))*half , k3*2/=k)
+                    i = i+1
+                    j = j+1
+                  end do
+               endif
+
+               ! Restart main loop
+               iter = 0
+               cycle main_loop
+
+            end if
+
+            ! test whether we cannot further increase the number of knots.
+            if (n==nest) exit add_new_knots
+        end do add_new_knots
+      !  restart the computations with the new set of knots.
+      end do main_loop
+
+      ! test whether the least-squares kth degree polynomial curve is a solution
+      ! of our approximation problem.
+      if (ier==FITPACK_LEASTSQUARES_OK) return
+
+      ! *****
+      !  part 2: determination of the smoothing spline curve sp(u).
+      ! *****
+      !  we have determined the number of knots and their position.
+      !  we now compute the b-spline coefficients of the smoothing curve sp(u). the observation matrix a
+      !  is extended by the rows of matrix b expressing that the kth derivative discontinuities of sp(u)
+      !  at the interior knots t(k+2),...t(n-k-1) must be zero. the corresponding weights of these
+      !  additional rows are set to 1/p.
+      !  iteratively we then have to determine the value of p such that f(p), the sum of squared
+      !  residuals be = s. we already know that the least squares kth degree polynomial curve corresponds
+      !  to p=0, and that the least-squares spline curve corresponds to p=infinity. the iteration process
+      !  which is proposed here, makes use of rational interpolation. since f(p) is a convex and strictly
+      !  decreasing function of p, it can be approximated by a rational function r(p) = (u*p+v)/(p+w).
+      !  three values of p(p1,p2,p3) with corresponding values of f(p) (f1=f(p1)-s,f2=f(p2)-s,f3=f(p3)-s)
+      !  are used to calculate the new value of p such that r(p)=s. convergence is guaranteed by taking
+      !  f1>0 and f3<zero
+      ! *****
+
+      ! evaluate the discontinuity jump of the kth derivative of the b-splines at the knots
+      ! t(l),l=k+2,...n-k-1 and store in b.
+      call fpdisc(t,n,k2,b,nest)
+
+      !  initial value for p.
+      p1 = zero
+      f1 = fp0-s
+      p3 = -one
+      f3 = fpms
+      p  = sum(a(1:nk1,1))/nk1
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+      n8 = n-nmin
+
+      !  iteration process to find the root of f(p) = s.
+      iter = 0
+      find_root: do while (iter<maxit)
+
+         iter = iter+1
+
+         ! the rows of matrix b with weight 1/p are rotated into the
+         ! triangularised observation matrix a which is stored in g.
+         pinv = one/p
+         c(1:nc)       = z(1:nc)
+         g(1:nk1,1:k1) = a(1:nk1,1:k1)
+         g(1:nk1,k2)   = zero
+         b_rows: do it=1,n8
+            ! the row of matrix b is rotated into triangle by givens transformation
+            h(1:k2) = b(it,1:k2)*pinv
+            xi = zero
+            call fp_rotate_shifted_vec(h, k2, g, nest, xi, c, it, nk1, n, idim)
+         end do b_rows
+
+         ! backward substitution to obtain the b-spline coefficients.
+         j1 = 1
+         do j2=1,idim
+            c(j1:j1+nk1-1) = fpback(g,c(j1),nk1,k2,nest)
+            j1 =j1+n
+         end do
+
+         ! computation of f(p).
+         fp = zero
+         l = k2
+         jj = 0
+         get_fp: do it=1,m
+            if (u(it)>=t(l) .and. l<=nk1) l = l+1
+            l0 = l-k2
+            term = zero
+            do j2=1,idim
+              fac  = dot_product(c(l0+1:l0+k1),q(it,1:k1))
+              jj   = jj+1
+              term = term+(fac-x(jj))**2
+              l0   = l0+n
+            end do
+            fp = fp+term*w(it)**2
+         end do get_fp
+
+         ! SUCCESS! the approximation sp(u) is an acceptable solution.
+         fpms = fp-s; if (abs(fpms)<acc) return
+
+         ! find the new value of p and carry out one more step.
+         call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+         if (.not.success) then
+            ier = FITPACK_S_TOO_SMALL
+            return
+         end if
+
+      end do find_root
+
+      ! Maximum number of iterations reached
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fppara
+
+
+      !> @brief Core algorithm for parametric surface fitting on a grid.
+      !!
+      !! Fits a \f$ d \f$-dimensional parametric tensor-product spline surface
+      !! \f$ s(u,v) = (s_1(u,v), \ldots, s_d(u,v)) \f$ to data on a
+      !! rectangular grid \f$ \{u_i\} \times \{v_j\} \f$. Uses the Kronecker
+      !! product decomposition (Eq. 10.9-10.12) that separates the bivariate
+      !! problem into sequences of univariate operations:
+      !!
+      !! \f[
+      !!     (A_u \otimes A_v) \, c = z
+      !!     \tag{10.9}
+      !! \f]
+      !!
+      !! The \f$ u \f$- and \f$ v \f$-direction triangularizations are performed
+      !! independently (via fp_rotate_row_block and fp_rotate_row_stride),
+      !! followed by back-substitution.
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue
+      !! @param[in]     ipar    Periodicity flags (packed)
+      !! @param[in]     idim    Number of surface dimensions \f$ d \f$
+      !! @param[in]     u       \f$ u \f$-grid values, length `mu`
+      !! @param[in]     mu      Number of \f$ u \f$-grid points
+      !! @param[in]     v       \f$ v \f$-grid values, length `mv`
+      !! @param[in]     mv      Number of \f$ v \f$-grid points
+      !! @param[in]     z       Data values, length `mz` (\f$ = mu \cdot mv \cdot d \f$)
+      !! @param[in]     mz      Length of `z`
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nuest   Max \f$ u \f$-knots
+      !! @param[in]     nvest   Max \f$ v \f$-knots
+      !! @param[in]     tol     Smoothing condition tolerance
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in,out] nc      Length of coefficient array
+      !! @param[in,out] nu      Number of \f$ u \f$-knots
+      !! @param[in,out] tu      \f$ u \f$-knot vector
+      !! @param[in,out] nv      Number of \f$ v \f$-knots
+      !! @param[in,out] tv      \f$ v \f$-knot vector
+      !! @param[in,out] c       B-spline coefficients
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fp0     Initial residual sum
+      !! @param[in,out] fpold   Previous residual sum
+      !! @param[in,out] reducu  Residual reduction in \f$ u \f$
+      !! @param[in,out] reducv  Residual reduction in \f$ v \f$
+      !! @param[in,out] fpintu  Residual sums per \f$ u \f$-interval
+      !! @param[in,out] fpintv  Residual sums per \f$ v \f$-interval
+      !! @param[in,out] lastdi  Last direction of knot addition
+      !! @param[in,out] nplusu  Number of \f$ u \f$-knots to add
+      !! @param[in,out] nplusv  Number of \f$ v \f$-knots to add
+      !! @param[in,out] nru     Work: \f$ u \f$-knot interval indices
+      !! @param[in,out] nrv     Work: \f$ v \f$-knot interval indices
+      !! @param[in,out] nrdatu  Interior data counts per \f$ u \f$-interval
+      !! @param[in,out] nrdatv  Interior data counts per \f$ v \f$-interval
+      !! @param[in,out] wrk     Work array
+      !! @param[in,out] lwrk    Length of `wrk`
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 10, §10.3 (pp. 173-178), Eq. 10.9-10.12
+      !! @see fpgrre, fpgrdi — grid triangularization helpers
+      pure subroutine fppasu(iopt,ipar,idim,u,mu,v,mv,z,mz,s,nuest,nvest, &
+                             tol,maxit,nc,nu,tu,nv,tv,c,fp,fp0,fpold,reducu,reducv,fpintu, &
+                             fpintv,lastdi,nplusu,nplusv,nru,nrv,nrdatu,nrdatv,wrk,lwrk,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: s,tol
+      real(FP_REAL), intent(inout) :: fp,fp0,fpold,reducu,reducv
+      integer(FP_SIZE), intent(in)    :: iopt,idim,mu,mv,mz,nuest,nvest,maxit
+      integer(FP_SIZE), intent(inout) :: nc,nu,nv,lastdi,nplusu,nplusv,lwrk
+      integer(FP_FLAG), intent(inout) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: u(mu),v(mv),z(mz*idim)
+      real(FP_REAL), intent(inout) :: tu(nuest),tv(nvest),c(nc*idim),fpintu(nuest),fpintv(nvest),wrk(lwrk)
+      integer(FP_SIZE),  intent(in)    :: ipar(2)
+      integer(FP_SIZE),  intent(inout) :: nrdatu(nuest),nrdatv(nvest),nru(mu),nrv(mv)
+      !  ..local scalars
+      real(FP_REAL) :: acc,fpms,f1,f2,f3,p,p1,p2,p3,rn,peru,perv,ub,ue,vb,ve
+      integer(FP_SIZE) :: i,ifbu,ifbv,ifsu,ifsv,iter,j,lau1,lav1,laa,l,lau,lav,lbu,lbv,lq,lri,lsu,&
+                 lsv,mm,mpm,mvnu,ncof,nk1u,nk1v,nmaxu,nmaxv,nminu,nminv,nplu,nplv,npl1,&
+                 nrintu,nrintv,nue,nuk,nve,nuu,nvv
+      logical(FP_BOOL) :: periodic_u,periodic_v,check1,check3,success
+      
+      fpms = huge(zero)
+
+      !  acc denotes the absolute tolerance for the root of f(p)=s.
+      acc = tol*s
+
+      !  find nmaxu and nmaxv which denote the number of knots in u- and v-
+      !  direction in case of spline interpolation.
+      nmaxu = mu+4+2*ipar(1)
+      nmaxv = mv+4+2*ipar(2)
+
+      periodic_u = ipar(1)==1
+      periodic_v = ipar(2)==1
+
+      !  find nue and nve which denote the maximum number of knots
+      !  allowed in each direction
+      nue = min(nmaxu,nuest)
+      nve = min(nmaxv,nvest)
+
+      !  set boundaries of the approximation domain
+      ub   = u(1)
+      ue   = u(mu)
+      vb   = v(1)
+      ve   = v(mv)
+
+      !  we partition the working space.
+      lsu  = 1
+      lsv  = lsu+mu*4
+      lri  = lsv+mv*4
+      mm   = max(nuest,mv)
+      lq   = lri+mm*idim
+      mvnu = nuest*mv*idim
+      lau  = lq+mvnu
+      nuk  = nuest*5
+      lbu  = lau+nuk
+      lav  = lbu+nuk
+      nuk  = nvest*5
+      lbv  = lav+nuk
+      laa = lbv+nuk
+      lau1 = lau
+      if (ipar(1)/=0) then
+          peru = ue-ub
+          lau1 = laa
+          laa = laa+4*nuest
+      endif
+      lav1 = lav
+      if (ipar(2)/=0) then
+          perv = ve-vb
+          lav1 = laa
+      endif
+
+      peru = merge(ue-ub,zero,periodic_u)
+      perv = merge(ve-vb,zero,periodic_v)
+
+      ! **********************************************************************************************
+      !  part 1: determination of the number of knots and their position
+      ! **********************************************************************************************
+      !  given a set of knots we compute the least-squares closed curve sinf(u,v) ,and the
+      !  corresponding sum of squared residuals fp=f(p=inf).
+      !  if iopt=-1 sinf(u,v) is the requested approximation
+      !  if iopt=0 or iopt=1 we check whether we can accept the knots:
+      !     if fp <=s we will continue with the current set of knots.
+      !     if fp > s we will increase the number of knots and compute the orresponding least-squares
+      !        spline until finally fp<=s.
+      !  the initial choice of knots depends on the value of s and iopt. if s=0 we have spline
+      !     interpolation; in that case the number of knots equals nmaxu = mu+4+2*ipar(1) and
+      !     nmaxv = mv+4+2*ipar(2).
+      !     if s > 0 and iopt=0 we first compute the least-squares polynomial nu=nminu=8, nv=nminv=8
+      !     if iopt=1 we start with the set of knots found at the last call of the routine, except for
+      !     the case that s > fp0; then we compute directly the least-squares polynomial directly.
+      ! **********************************************************************************************
+
+      !  determine the number of knots for polynomial approximation.
+      nminu = 8
+      nminv = 8
+
+      bootstrap: if (iopt>=0) then
+
+          interpolating: if (s<=zero) then
+
+              !  if s = 0, s(u,v) is an interpolating spline.
+              nu = nmaxu
+              nv = nmaxv
+
+              !  test whether the required storage space exceeds the available one.
+              if (nv>nvest .or. nu>nuest) then
+                  ier = FITPACK_INSUFFICIENT_STORAGE
+                  return
+              end if
+
+              !  find the position of the interior knots in case of interpolation:
+
+              !  the knots in the u-direction.
+              nuu = nu-8
+              if (nuu>0) tu(5:4+nuu) = u(3-ipar(1):2-ipar(1)+nuu)
+
+              !  the knots in the v-direction.
+              nvv = nv-8
+              if (nvv>0) tv(5:4+nvv) = v(3-ipar(2):2-ipar(2)+nvv)
+
+          else interpolating
+
+              ! if s > 0 our initial choice of knots depends on the value of iopt.
+              use_last_call: if (iopt/=0 .and. fp0>s) then
+
+                  !  if iopt=1 and fp0 > s we start computing the least- squares spline
+                  !  according to the set of knots found at the last call of the routine.
+
+                  !  we determine the number of grid coordinates u(i) inside each knot
+                  !  interval (tu(l),tu(l+1)).
+                  l = 5
+                  j = 1
+                  nrdatu(1) = 0
+                  mpm = mu-1
+                  do i=2,mpm
+                     nrdatu(j) = nrdatu(j)+1
+                     if (u(i)>=tu(l)) then
+                         nrdatu(j) = nrdatu(j)-1
+                         l = l+1
+                         j = j+1
+                         nrdatu(j) = 0
+                     endif
+                  end do
+
+                  !  we determine the number of grid coordinates v(i) inside each knot
+                  !  interval (tv(l),tv(l+1)).
+                  l = 5
+                  j = 1
+                  nrdatv(1) = 0
+                  mpm = mv-1
+                  do i=2,mpm
+                    nrdatv(j) = nrdatv(j)+1
+                    if (v(i)>=tv(l)) then
+                        nrdatv(j) = nrdatv(j)-1
+                        l = l+1
+                        j = j+1
+                        nrdatv(j) = 0
+                    endif
+                  end do
+
+              else
+
+                  !  if iopt=0 or iopt=1 and s>=fp0, we start computing the least-squares
+                  !  polynomial (which is a spline without interior knots).
+                  nu = nminu
+                  nv = nminv
+                  nrdatu(1) = mu-2
+                  nrdatv(1) = mv-2
+                  lastdi = KNOT_DIM_NONE
+                  nplusu = 0
+                  nplusv = 0
+                  fp0    = zero
+                  fpold  = zero
+                  reducu = zero
+                  reducv = zero
+
+              endif use_last_call
+
+          endif interpolating
+
+      endif bootstrap
+
+      mpm  = mu+mv
+      ifsu = 0
+      ifsv = 0
+      ifbu = 0
+      ifbv = 0
+      p    = -one
+
+      !  main loop for the different sets of knots. mpm=mu+mv is a safe upper
+      !  bound for the number of trials.
+      iter = 0
+      main_loop: do while (iter<=mpm)
+
+         iter = iter+1
+
+         if (nu==nminu .and. nv==nminv) ier = FITPACK_LEASTSQUARES_OK
+
+         ! find nrintu (nrintv) which is the number of knot intervals in the
+         ! u-direction (v-direction).
+         nrintu = nu-nminu+1
+         nrintv = nv-nminv+1
+
+         ! find ncof, the number of b-spline coefficients for the current set of knots.
+         nk1u = nu-4
+         nk1v = nv-4
+         ncof = nk1u*nk1v
+
+         ! find the position of the additional knots which are needed for the
+         ! b-spline representation of s(u,v).
+         if (periodic_u) then
+            tu(1:4)     = [tu(nu-6:nu-4)-peru,ub]
+            tu(nu-3:nu) = [ue,tu(5:7)+peru]
+         else
+            tu(1:4)     = ub
+            tu(nu-3:nu) = ue
+         endif
+
+         if (periodic_v) then
+            tv(1:4)     = [tv(nv-6:nv-4)-perv,vb]
+            tv(nv-3:nv) = [ve,tv(5:7)+perv]
+         else
+            tv(1:4)     = vb
+            tv(nv-3:nv) = ve
+         end if
+
+         !  find the least-squares spline sinf(u,v) and calculate for each knot interval
+         !  tu(j+3)<=u<=tu(j+4) (tv(j+3)<=v<=tv(j+4)) the sum of squared residuals
+         !  fpintu(j),j=1,2,...,nu-7 (fpintv(j),j=1,2,...,nv-7) for the data points having their
+         !  absciss (ordinate)-value belonging to that interval.
+         !  fp gives the total sum of squared residuals.
+         call fpgrpa(ifsu,ifsv,ifbu,ifbv,idim,ipar,u,mu,v,mv,z,mz,tu,           &
+                     nu,tv,nv,p,c,nc,fp,fpintu,fpintv,mm,mvnu,wrk(lsu),wrk(lsv), &
+                     wrk(lri),wrk(lq),wrk(lau),wrk(lau1),wrk(lav),wrk(lav1),     &
+                     wrk(lbu),wrk(lbv),nru,nrv)
+
+         if (ier==FITPACK_LEASTSQUARES_OK) fp0 = fp
+
+         ! SUCCESS! the least-squares spline is an acceptable solution.
+         fpms = fp-s
+         if (iopt<0 .or. abs(fpms)<acc) return
+
+         ! if f(p=inf) < s, we accept the choice of knots.
+         if (fpms<zero) exit main_loop
+
+         ! if nu=nmaxu and nv=nmaxv, sinf(u,v) is an interpolating spline.
+         if (nu==nmaxu .and. nv==nmaxv) then
+             ier = FITPACK_INTERPOLATING_OK
+             fp = zero
+             return
+         end if
+
+         ! increase the number of knots.
+         ! if nu=nue and nv=nve we cannot further increase the number of knots
+         ! because of the storage capacity limitation.
+         if (nu==nue .and. nv==nve) then
+             ier = FITPACK_INSUFFICIENT_STORAGE
+             return
+         end if
+
+         ier = FITPACK_OK
+
+         ! adjust the parameter reducu or reducv according to the direction
+         ! in which the last added knots were located.
+         select case (lastdi)
+            case (KNOT_DIM_1); reducu = fpold-fp
+            case (KNOT_DIM_2); reducv = fpold-fp
+         end select
+
+         ! store the sum of squared residuals for the current set of knots.
+         fpold = fp
+
+         ! find nplu, the number of knots we should add in the u-direction.
+         nplu = 1
+         if (nu/=nminu) then
+            npl1 = nplusu*2
+            rn = nplusu
+            if (reducu>acc) npl1 = fp_knots_to_add(rn,fpms,reducu)
+            nplu = min(nplusu*2,max(npl1,nplusu/2,1))
+         endif
+
+         ! find nplv, the number of knots we should add in the v-direction.
+         nplv = 1
+         if (nv/=nminv) then
+            npl1 = nplusv*2
+            rn = nplusv
+            if (reducv>acc) npl1 = fp_knots_to_add(rn,fpms,reducv)
+            nplv = min(nplusv*2,max(npl1,nplusv/2,1))
+         endif
+
+         ! test whether we are going to add knots in the u- or v-direction.
+         ! lastdi = dimension index of last knot addition: KNOT_DIM_NONE = not yet set;
+         !          KNOT_DIM_1 = u direction; KNOT_DIM_2 = v direction
+         lastdi = new_knot_dimension(nu,nplu,nue,nv,nplv,nve,lastdi)
+
+         choose_dir: if (lastdi==KNOT_DIM_2) then
+
+            ! addition in the v-direction.
+            nplusv = nplv
+            ifsv   = 0
+
+            add_v_knots: do l=1,nplusv
+
+               ! add a new knot in the v-direction.
+               call fpknot(v,mv,tv,nv,fpintv,nrdatv,nrintv,nvest,IONE)
+
+               ! test whether we cannot further increase the number of knots in the v-direction.
+               if (nv==nve) exit add_v_knots
+
+            end do add_v_knots
+
+        else choose_dir
+
+            ! addition in the u-direction.
+            nplusu = nplu
+            ifsu   = 0
+            add_u_knots: do l=1,nplusu
+
+               ! add a new knot in the u-direction
+               call fpknot(u,mu,tu,nu,fpintu,nrdatu,nrintu,nuest,IONE)
+
+               ! test whether we cannot further increase the number of knots in the u-direction.
+               if (nu==nue) exit add_u_knots
+
+            end do add_u_knots
+
+        endif choose_dir
+
+      !  restart the computations with the new set of knots.
+      end do main_loop
+
+      !  test whether the least-squares polynomial is a solution of our
+      !  approximation problem.
+      if (ier==FITPACK_LEASTSQUARES_OK) return
+
+      ! **********************************************************************************************
+      ! part 2: determination of the smoothing spline sp(u,v)
+      ! **********************************************************************************************
+      !  we have determined the number of knots and their position. we now compute the b-spline
+      !  coefficients of the smoothing spline sp(u,v). this smoothing spline varies with the parameter
+      !  p in such a way that
+      !    f(p)= suml=1,idim(sumi=1,mu(sumj=1,mv((z(i,j,l)-sp(u(i),v(j),l))**2)
+      !  is a continuous, strictly decreasing function of p. moreover the least-squares polynomial
+      !  corresponds to p=0 and the least-squares spline to p=infinity. iteratively we then have to
+      !  determine the positive value of p such that f(p)=s. the process which is proposed here makes
+      !  use of rational interpolation. f(p) is approximated by a rational function r(p)=(u*p+v)/(p+w);
+      !  three values of p (p1,p2,p3) with corresponding values of f(p) (f1=f(p1)-s,f2=f(p2)-s,
+      !  f3=f(p3)-s) are used to calculate the new value of p such that r(p)=s.
+      !  convergence is guaranteed by taking f1 > 0 and f3 < 0.
+      ! **********************************************************************************************
+
+      ! initial value for p.
+      p1 = zero
+      f1 = fp0-s
+      p3 = -one
+      f3 = fpms
+      p  = one
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+
+      !  iteration process to find the root of f(p)=s.
+      root_iterations: do iter = 1,maxit
+          ! find the smoothing spline sp(u,v) and the corresponding sum of
+          ! squared residuals fp.
+          call fpgrpa(ifsu,ifsv,ifbu,ifbv,idim,ipar,u,mu,v,mv,z,mz,tu, &
+                      nu,tv,nv,p,c,nc,fp,fpintu,fpintv,mm,mvnu,wrk(lsu),wrk(lsv), &
+                      wrk(lri),wrk(lq),wrk(lau),wrk(lau1),wrk(lav),wrk(lav1), &
+                      wrk(lbu),wrk(lbv),nru,nrv)
+
+          !  test whether the approximation sp(u,v) is an acceptable solution.
+          fpms = fp-s; if (abs(fpms)<acc) return
+
+          ! find the new value of p and carry out one more step.
+          call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+          if (.not.success) then
+             ier = FITPACK_S_TOO_SMALL
+             return
+          end if
+
+      end do root_iterations
+
+      ! Maximum number of iterations reached.
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fppasu
+
+
+      !> @brief Core algorithm for univariate periodic spline fitting.
+      !!
+      !! Fits a periodic spline \f$ s(x) \f$ of degree \f$ k \f$ where
+      !! \f$ s^{(j)}(x_1) = s^{(j)}(x_m) \f$ for \f$ j = 0, \ldots, k-1 \f$.
+      !! The periodicity reduces the number of free coefficients to
+      !! \f$ n - 2k - 1 \f$ and wraps the B-spline columns into the
+      !! block-triangular structure (Eq. 6.13) analogous to fpclos.
+      !!
+      !! This is the scalar-valued counterpart of fpclos (which handles
+      !! multi-dimensional parametric curves). Uses two-matrix Givens
+      !! rotations (fp_rotate_row_2mat) for the periodic block structure.
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue
+      !! @param[in]     x       Data abscissae, length `m` (strictly increasing)
+      !! @param[in]     y       Data ordinates, length `m`
+      !! @param[in]     w       Data weights, length `m`
+      !! @param[in]     m       Number of data points
+      !! @param[in]     k       Spline degree
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nest    Max knots
+      !! @param[in]     tol     Tolerance for smoothing condition
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     k1      \f$ k + 1 \f$
+      !! @param[in]     k2      \f$ k + 2 \f$
+      !! @param[in,out] n       Number of knots
+      !! @param[in,out] t       Knot vector, length `nest`
+      !! @param[in,out] c       B-spline coefficients, length `nest`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fpint   Residual sums per knot interval
+      !! @param[in,out] z       Work: transformed RHS
+      !! @param[in,out] a1      Work: band matrix \f$ R_{11}^* \f$
+      !! @param[in,out] a2      Work: band matrix \f$ R_{12}^*/R_{22}^* \f$
+      !! @param[in,out] b       Work: smoothing matrix
+      !! @param[in,out] g1      Work: band matrix copy
+      !! @param[in,out] g2      Work: band matrix copy
+      !! @param[in,out] q       Work: B-spline values
+      !! @param[in,out] nrdata  Interior data-point counts
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 6, §6.1-6.2 (pp. 95-112), Eq. 6.1-6.8
+      !! @see fp_rotate_row_2mat — two-matrix scalar Givens rotation
+      pure subroutine fpperi(iopt,x,y,w,m,k,s,nest,tol,maxit, &
+                             k1,k2,n,t,c,fp,fpint,z,a1,a2,b,g1,g2,q,nrdata,ier)
+
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: s,tol
+      real(FP_REAL), intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,m,k,k1,k2,nest,maxit
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(inout) :: ier
+
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: x(m),y(m),w(m)
+      real(FP_REAL), intent(inout) :: t(nest),c(nest),fpint(nest),z(nest),a1(nest,k1),a2(nest,k), &
+                                    b(nest,k2),g1(nest,k2),g2(nest,k1),q(m,k1)
+      integer(FP_SIZE), intent(inout) :: nrdata(nest)
+
+      !  ..local scalars..
+      real(FP_REAL) :: acc,cos,c1,d1,fpart,fpms,fpold,fp0,f1,f2,f3,p,per,pinv,p1,p2,p3,sin,store,&
+                     term,wi,xi,yi,rn
+      integer(FP_SIZE) :: i,ik,it,iter,i1,i2,i3,j,jk,jper,j1,j2,kk,kk1,k3,l,l0,l1,l5,mm,m1,new,&
+                 nk1,nk2,nmax,nmin,nplus,npl1,nrint,n10,n11,n7,n8
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1),h1(DEGREE_5+2),h2(DEGREE_5+1)
+      logical(FP_BOOL) :: done,check1,check3,success
+
+      fpold = zero
+      fp0   = zero
+      nplus = 0
+      fpms  = huge(zero)
+
+      !  calculation of acc, the absolute tolerance for the root of f(p)=s.
+      acc = tol*s
+
+      !  determine nmax, the number of knots for periodic spline interpolation
+      nmax = m+2*k
+
+      ! *****
+      !  part 1: determination of the number of knots and their position
+      ! *****
+      !  given a set of knots we compute the least-squares periodic spline sinf(x). if the
+      !  sum f(p=inf) <= s we accept the choice of knots. the initial choice of knots depends on the
+      !  value of s and iopt.
+      !    if s=0 we have spline interpolation; in that case the number of knots equals nmax = m+2*k.                                        c
+      !    if s > 0 and iopt=0 iopt=0 we first compute the least-squares polynomial of degree k;
+      !      n = nmin = 2*k+2. since s(x) must be periodic we find that s(x) is a constant function.                          c
+      !      iopt=1 we start with the set of knots found at the last call of the routine, except for
+      !      the case that s > fp0; then we compute directly the least-squares periodic polynomial.
+      ! *****
+
+      m1   = m-1
+      kk   = k
+      kk1  = k1
+      k3   = 3*k+1
+      nmin = 2*k1
+      ier  = FITPACK_OK
+
+      ! determine the length of the period of s(x).
+      per = x(m)-x(1)
+      if (iopt>=0) then
+
+         interp_or_fit: if (s<=zero .and. nmax/=nmin) then
+
+            !  if s=0, s(x) is an interpolating spline.
+            n = nmax
+
+            !  test whether the required storage space exceeds the available one.
+            if (n>nest) then
+               ier = FITPACK_INSUFFICIENT_STORAGE
+               return
+            end if
+
+            !  find the position of the interior knots in case of interpolation.
+            call fpperi_reset_interp(k,m,n,nest,kk,kk1,x,y,t,c,fp,per,fp0,s,fpint,nrdata,done)
+            if (done) then
+               ier = FITPACK_INTERPOLATING_OK
+               return
+            end if
+
+          else interp_or_fit
+
+             !  if s > 0 our initial choice depends on the value of iopt.
+             !  if iopt=0 or iopt=1 and s>=fp0, we start computing the least-squares
+             !  periodic polynomial. (i.e. a constant function).
+             !  if iopt=1 and fp0>s we start computing the least-squares periodic
+             !  spline according the set of knots found at the last call of the routine.
+             if (iopt/=0 .and. n/=nmin) then
+                fp0   = fpint(n)
+                fpold = fpint(n-1)
+                nplus = nrdata(n)
+             endif
+
+             ! the case that s(x) is a constant function is treated separetely.
+             ! find the least-squares constant c1 and compute fp0 at the same time.
+             if (iopt==0 .or. n==nmin .or. (iopt/=0 .and. n/=nmin .and. s>=fp0)) then
+                fp0 = zero
+                d1 = zero
+                c1 = zero
+                do it=1,m1
+                   wi = w(it)
+                   yi = y(it)*wi
+                   call fpgivs(wi,d1,cos,sin)
+                   call fprota(cos,sin,yi,c1)
+                   fp0 = fp0+yi**2
+                end do
+                c1 = c1/d1
+
+                ! test whether that constant function is a solution of our problem.
+                fpms = fp0-s
+
+                is_constant: if (fpms<acc .or. nmax==nmin) then
+
+                   ier = FITPACK_LEASTSQUARES_OK
+                   ! the least-squares constant function c1 is a solution of our problem. A constant
+                   ! function is a spline of degree k with all b-spline coefficients equal to c1.
+                   do i=1,k1
+                      rn = k1-i
+                      t(i) = x(1)-rn*per
+                      c(i) = c1
+                      j = i+k1
+                      rn = i-1
+                      t(j) = x(m)+rn*per
+                   end do
+                   n = nmin
+                   fp = fp0
+                   fpint(n-1:n) = [zero,fp0]
+                   nrdata(n) = 0
+                   return
+
+                endif is_constant
+
+                fpold = fp0
+                ! test whether the required storage space exceeds the available one.
+                if (nmin>=nest) then
+                   ier = FITPACK_INSUFFICIENT_STORAGE
+                   return
+                endif
+
+                ! start computing the least-squares periodic spline with one interior knot.
+                nplus = 1
+                n = nmin+1
+                mm = (m+1)/2
+                t(k2) = x(mm)
+                nrdata(1) = mm-2
+                nrdata(2) = m1-mm
+             endif
+
+          endif interp_or_fit
+
+      endif
+
+      !  main loop for the different sets of knots. m is a save upper bound for the number of trials.
+      iter = 0
+      update_knots: do while (iter<m)
+
+         iter = iter+1
+
+         ! find nrint, the number of knot intervals.
+         nrint = n-nmin+1
+
+         ! find the position of the additional knots which are needed for the b-spline representation
+         ! of s(x). if we take
+         !      t(k+1) = x(1), t(n-k) = x(m)
+         !      t(k+1-j) = t(n-k-j) - per, j=1,2,...k
+         !      t(n-k+j) = t(k+1+j) + per, j=1,2,...k
+         ! then s(x) is a periodic spline with period per if the b-spline coefficients satisfy the
+         ! following conditions
+         !      c(n7+j) = c(j), j=1,...k   (**)   with n7=n-2*k-1.
+         t(k1) = x(1)
+         nk1 = n-k1
+         nk2 = nk1+1
+         t(nk2) = x(m)
+         do j=1,k
+            i1 = nk2+j
+            i2 = nk2-j
+            j1 = k1+j
+            j2 = k1-j
+            t(i1) = t(j1)+per
+            t(j2) = t(i2)-per
+         end do
+
+         ! compute the b-spline coefficients c(j),j=1,...n7 of the least-squares periodic spline
+         ! sinf(x). the observation matrix a is built up row by row while taking into account
+         ! condition (**) and is reduced to triangular form by givens transformations .
+         ! at the same time fp=f(p=inf) is computed.
+         ! the n7 x n7 triangularised upper matrix a has the form
+         !            ! a1 '    !
+         !        a = !    ' a2 !
+         !            ! 0  '    !
+         ! with a2 a n7xk matrix and a1 a n10xn10 upper triangular matrix of bandwidth k+1 (n10=n7-k).
+
+         ! initialization.
+         z (1:nk1) = zero
+         a1(1:nk1,1:kk1) = zero
+         n7   = nk1-k
+         n10  = n7-kk
+         jper = 0
+         fp   = zero
+         l    = k1
+         get_coefs: do it=1,m1
+            ! fetch the current data point x(it),y(it)
+            xi = x(it)
+            wi = w(it)
+            yi = y(it)*wi
+
+            ! search for knot interval t(l) <= xi < t(l+1).
+            l = fp_knot_interval(t, xi, l, nk1)
+
+            ! evaluate the (k+1) non-zero b-splines at xi and store them in q.
+            h = fpbspl(t,n,k,xi,l)
+
+            q(it,:k1) = h(:k1)
+            h(:k1)    = h(:k1)*wi
+
+            l5 = l-k1
+
+            ! test whether the b-splines nj,k+1(x),j=1+n7,...nk1 are all zero at xi
+            if (l5>=n10) then
+
+               if (jper==0) then
+                  ! initialize the matrix a2.
+                  a2(1:n7,1:kk) = zero
+                  jk = n10+1
+                  do i=1,kk
+                     ik = jk
+                     do j=1,kk1
+                        if (ik<=0) exit
+                        a2(ik,i) = a1(ik,j)
+                        ik = ik-1
+                     end do
+                     jk = jk+1
+                  end do
+                  jper = 1
+               endif
+
+               ! if one of the b-splines nj,k+1(x),j=n7+1,...nk1 is not zero at xi
+               ! we take account of condition (**) for setting up the new row
+               ! of the observation matrix a. this row is stored in the arrays h1
+               ! (the part with respect to a1) and h2 (the part with respect to a2).
+               h1 = zero
+               h2 = zero
+               j  = l5-n10
+               do i=1,kk1
+                  j  = j+1
+                  l0 = j
+                  l1 = l0-kk
+                  do while (l1>max(0,n10))
+                    l0 = l1-n10
+                    l1 = l0-kk
+                  end do
+                  if (l1>0) then
+                     h1(l1) = h(i)
+                  else
+                     h2(l0) = h2(l0)+h(i)
+                  end if
+               end do
+
+               ! rotate the new row of the observation matrix into triangle
+               ! by givens transformations.
+               call fp_rotate_row_2mat(h1, kk1, h2, kk, a1, a2, nest, yi, z, 1, n10)
+
+          else ! l5<n10
+
+             ! rotation of the new row of the observation matrix into triangle in case the b-splines
+             ! nj,k+1(x),j=n7+1,...n-k-1 are all zero at xi.
+             ! rotate the new row of the observation matrix into triangle.
+             call fp_rotate_row(h, kk1, a1, yi, z, l5)
+
+          endif
+
+          ! add contribution of this row to the sum of squares of residual rhs
+          fp = fp+yi**2
+
+        end do get_coefs
+
+        fpint(n-1:n) = [fpold,fp0]
+        nrdata(n)    = nplus
+
+        ! backward substitution to obtain the b-spline coefficients c(j),j=1,.n
+        c(1:n7) = fpbacp(a1,a2,z,n7,kk,kk1,nest)
+
+        ! calculate from condition (**) the coefficients c(j+n7),j=1,2,...k.
+        c(n7+1:n7+k) = c(1:k)
+
+        ! Success! if the approximation sinf(x) is an acceptable solution.
+        fpms = fp-s
+        if (iopt<0 .or. abs(fpms)<acc) return
+
+        ! if f(p=inf) < s accept the choice of knots.
+        if (fpms<zero) exit update_knots
+
+        ! if n=nmax, sinf(x) is an interpolating spline.
+        if (n==nmax) then
+           ier = FITPACK_INTERPOLATING_OK
+           return
+        end if
+
+        ! increase the number of knots.
+        ! if n=nest we cannot increase the number of knots because of the
+        ! storage capacity limitation.
+        if (n==nest) then
+           ier = FITPACK_INSUFFICIENT_STORAGE
+           return
+        end if
+
+        ! determine the number of knots nplus we are going to add.
+        npl1  = nplus*ITWO
+        if (fpold-fp>acc) npl1 = fp_knots_to_add(real(nplus,FP_REAL),fpms,fpold-fp) ! guard the division: skip it when fpold-fp<=acc
+        nplus = min(nplus*2,max(npl1,nplus/2,1))
+        fpold = fp
+
+        ! compute the sum(wi*(yi-s(xi))**2) for each knot interval
+        ! t(j+k) <= xi <= t(j+k+1) and store it in fpint(j),j=1,2,...nrint.
+        fpart = zero
+        i     = 1
+        l     = k1
+        do it=1,m1
+           if (x(it)>=t(l)) then
+              new = 1
+              l = l+1
+           endif
+           term = zero
+           l0 = l-k2
+           do j=1,k1
+              l0 = l0+1
+              term = term+c(l0)*q(it,j)
+           end do
+           term = (w(it)*(term-y(it)))**2
+           fpart = fpart+term
+           if (new/=0) then
+              if (l>k2) then
+                 store    = term*half
+                 fpint(i) = fpart-store
+                 i        = i+1
+                 fpart    = store
+              else
+                 fpint(nrint) = term
+              endif
+              new = 0
+           endif
+        end do
+        fpint(nrint) = fpint(nrint)+fpart
+
+        add_new_knots: do l=1,nplus
+
+           ! add a new knot
+           call fpknot(x,m,t,n,fpint,nrdata,nrint,nest,IONE)
+
+           ! if n=nmax we locate the knots as for interpolation.
+           if (n==nmax) then
+
+               ! find the position of the interior knots in case of interpolation.
+               call fpperi_reset_interp(k,m,n,nest,kk,kk1,x,y,t,c,fp,per,fp0,s,fpint,nrdata,done)
+               if (done) then
+                  ier = FITPACK_INTERPOLATING_OK
+                  return
+               else
+                  ! Restart iteration
+                  iter = 0
+                  cycle update_knots
+               end if
+
+           end if
+           ! test whether we cannot further increase the number of knots.
+           if (n==nest) exit add_new_knots
+
+        end do add_new_knots
+      !  restart the computations with the new set of knots.
+      end do update_knots
+
+      ! *****
+      !  part 2: determination of the smoothing periodic spline sp(x).
+      ! *****
+      !  we have determined the number of knots and their position.
+      !  we now compute the b-spline coefficients of the smoothing spline sp(x). the observation
+      !  matrix a is extended by the rows of matrix b expressing that the kth derivative discontinuities
+      !  of sp(x) at the interior knots t(k+2),...t(n-k-1) must be zero. the corresponding weights of
+      !  these additional rows are set to 1/sqrt(p). iteratively we then have to determine the value of p
+      !  such that f(p)=sum(w(i)*(y(i)-sp(x(i)))**2) be = s. we already know that the least-squares
+      !  constant function corresponds to p=0, and that the least-squares periodic spline corresponds to
+      !  p=infinity. the iteration process which is proposed here, makes use of rational interpolation.
+      !  since f(p) is a convex and strictly decreasing function of p, it can be approximated by a rational
+      !  function r(p) = (u*p+v)/(p+w). three values of p(p1,p2,p3) with corresponding values of f(p)
+      !  (f1=f(p1)-s,f2=f(p2)-s,f3=f(p3)-s) are used to calculate the new value of p such that r(p)=s.
+      !  convergence is guaranteed by taking f1>0 and f3<zero
+      ! *****
+
+      !  evaluate the discontinuity jump of the kth derivative of the b-splines at the knots
+      !  t(l),l=k+2,...n-k-1 and store in b.
+      call fpdisc(t,n,k2,b,nest)
+
+      !  initial value for p.
+      p   = zero
+      p1  = zero
+      f1  = fp0-s
+      p3  = -one
+      f3  = fpms
+      n11 = n10-1
+      n8  = n7-1
+      l   = n7
+      do i=1,k
+         j = k+1-i
+         p = p+a2(l,j)
+         l = l-1
+         if (l==0) exit
+      end do
+      if (l/=0) p = p+sum(a1(1:n10,1))
+      rn = n7
+      p = rn/p
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+
+      ! iteration process to find the root of f(p) = s.
+      find_root: do iter=1,maxit
+
+         !  form the matrix g  as the matrix a extended by the rows of matrix b.
+         !  the rows of matrix b with weight 1/p are rotated into
+         !  the triangularised observation matrix a.
+         !  after triangularisation our n7 x n7 matrix g takes the form
+         !            ! g1 '    !
+         !        g = !    ' g2 !
+         !            ! 0  '    !
+         !  with g2 a n7 x (k+1) matrix and g1 a n11 x n11 upper triangular
+         !  matrix of bandwidth k+2. ( n11 = n7-k-1)
+
+         pinv = one/p
+
+         !  store matrix a into g
+         c (1:n7)      = z(1:n7)
+         g1(1:n7,1:k1) = a1(1:n7,1:k1)
+         g1(1:n7,k2)   = zero
+         g2(1:n7,1)    = zero
+         g2(1:n7,2:k1) = a2(1:n7,1:k)
+
+         l = n10
+         do j=1,k1
+            if (l<=0) exit
+            g2(l,1) = a1(l,j)
+            l = l-1
+         end do
+
+         n8_rows: do it=1,n8
+
+            ! fetch a new row of matrix b and store it in the arrays h1 (the part
+            ! with respect to g1) and h2 (the part with respect to g2).
+            yi = zero
+            h1(:k2) = zero
+            h2(:k1) = zero
+            if (it<=n11) then
+
+                l  = it
+                l0 = it
+                storeh2: do j=1,k2
+                   if (l0==n10) then
+                      l0 = 1
+                      do l1=j,k2
+                         h2(l0) = b(it,l1)*pinv
+                         l0 = l0+1
+                      end do
+                      exit storeh2
+                   endif
+                   h1(j) = b(it,j)*pinv
+                   l0 = l0+1
+                end do storeh2
+
+            else
+               l = 1
+               i = it-n10
+               do j=1,k2
+                  i = i+1
+                  l0 = i
+                  l1 = l0-k1
+                  do while (l1>max(0,n11))
+                     l0 = l1-n11
+                     l1 = l0-k1
+                  end do
+                  if (l1>0) then
+                     h1(l1) = b(it,j)*pinv
+                  else
+                     h2(l0) = h2(l0)+b(it,j)*pinv
+                  end if
+               end do
+            endif
+
+            ! rotate this row into triangle by givens transformations without square roots.
+            call fp_rotate_row_2mat(h1, k2, h2, k1, g1, g2, nest, yi, c, l, n11)
+         end do n8_rows
+
+         ! backward substitution to obtain the b-spline coefficients c(j),j=1,2,...n7 of sp(x).
+         c(:n7) = fpbacp(g1,g2,c,n7,k1,k2,nest)
+
+         ! calculate from condition (**) the b-spline coefficients c(n7+j),j=1,.
+         c(n7+1:n7+k) = c(1:k)
+
+         ! computation of f(p).
+         fp = zero
+         l = k1
+         do it=1,m1
+            if (x(it)>=t(l)) l = l+1
+            l0 = l-k2
+            term = dot_product(c(l0+1:l0+k1),q(it,1:k1))
+            fp = fp+(w(it)*(term-y(it)))**2
+         end do
+
+         ! test whether the approximation sp(x) is an acceptable solution.
+         fpms = fp-s
+         if (abs(fpms)<acc) return
+
+         ! test whether the maximal number of iterations is reached.
+         if (iter==maxit) then
+            ier = FITPACK_MAXIT
+            return
+         end if
+
+         ! find the new value of p and carry out one more step.
+         call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+         if (.not.success) then
+            ier = FITPACK_S_TOO_SMALL
+            return
+         end if
+
+      end do find_root
+
+      return
+
+      end subroutine fpperi
+
+      !> @brief Set up the initial knot configuration for periodic spline interpolation.
+      !!
+      !! When \f$ s = 0 \f$ (interpolation) and \f$ k \f$ is odd, places interior knots
+      !! at the data abscissae. For \f$ k = 1 \f$ (linear), directly sets the
+      !! B-spline coefficients from the data and returns the exact interpolant.
+      !! When \f$ k \f$ is even, knots are placed at midpoints of consecutive abscissae.
+      !!
+      !! @param[in]     k       Spline degree
+      !! @param[in]     m       Number of data points
+      !! @param[in]     n       Number of knots
+      !! @param[in]     nest    Maximum knots allowed
+      !! @param[in,out] kk      Adjusted degree for iteration
+      !! @param[in,out] kk1     Adjusted order for iteration
+      !! @param[in]     x       Data abscissae, length `m`
+      !! @param[in]     y       Data ordinates, length `m`
+      !! @param[in,out] t       Knot vector, length `nest`
+      !! @param[in,out] c       B-spline coefficients, length `nest`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in]     per     Period \f$ = x_m - x_1 \f$
+      !! @param[in]     fp0     Upper bound for the smoothing factor
+      !! @param[in]     s       Smoothing factor
+      !! @param[in,out] fpint   Knot interval contributions, length `nest`
+      !! @param[in,out] nrdata  Data point counts per interval, length `nest`
+      !! @param[out]    done    `.true.` if the interpolant was fully determined
+      !!
+      !! @see Dierckx, Ch. 6, §6.1-6.2 (pp. 95-112): periodic spline fitting
+      pure subroutine fpperi_reset_interp(k,m,n,nest,kk,kk1,x,y,t,c,fp,per,fp0,s,fpint,nrdata,done)
+         integer(FP_SIZE), intent(in) :: k,m,n,nest
+         integer(FP_SIZE), intent(inout) :: kk,kk1
+         real(FP_REAL), intent(in) :: x(m),y(m),per,fp0,s
+         real(FP_REAL), intent(inout) :: t(nest),c(nest),fp,fpint(nest)
+         integer(FP_SIZE), intent(inout) :: nrdata(nest)
+         logical(FP_BOOL), intent(out) :: done
+
+         integer(FP_SIZE) :: m1
+
+         m1 = m-1
+         done = .false.
+
+         k_is_odd: if (mod(k,2)/=0) then
+
+            t(k+2:k+m1) = x(2:m1)
+
+            if (s<=zero) then
+               kk  = k-1
+               kk1 = k
+               if (kk<=0) then
+                   t(1:2)       = [t(m)-per,x(1)]
+                   t(m+1:m+2)   = [x(m),t(3)+per]
+                   c(:m)        = [y(1:m1),y(1)]
+                   fp           = zero
+                   fpint(n-1:n) = [zero,fp0]
+                   nrdata(n)    = 0
+                   done = .true.
+               endif
+            endif
+
+         else k_is_odd
+
+            t(k+2:k+m1) = half*(x(2:m1)+x(1:m1-1))
+
+         endif k_is_odd
+
+      end subroutine fpperi_reset_interp
+
+      !> @brief Construct a polynomial curve satisfying endpoint derivative constraints.
+      !!
+      !! Finds a \f$ d \f$-dimensional polynomial curve
+      !! \f$ p(u) = (p_1(u), \ldots, p_d(u)) \f$ of degree \f$ k \f$ that
+      !! satisfies prescribed derivative values at the endpoints \f$ a \f$ and
+      !! \f$ b \f$:
+      !!
+      !! \f[
+      !!     p_j^{(l)}(a) = \text{db}(d \cdot l + j), \quad l = 0, \ldots, i_b - 1
+      !! \f]
+      !! \f[
+      !!     p_j^{(l)}(b) = \text{de}(d \cdot l + j), \quad l = 0, \ldots, i_e - 1
+      !! \f]
+      !!
+      !! The result is returned as B-spline coefficients `cp(1:np)` on the
+      !! knot vector \f$ [a, \ldots, a, b, \ldots, b] \f$ (each with
+      !! multiplicity \f$ k+1 \f$). Used by concur to build an initial
+      !! polynomial approximation for constrained parametric curves.
+      !!
+      !! @param[in]  idim  Number of curve dimensions \f$ d \f$
+      !! @param[in]  k     Polynomial degree
+      !! @param[in]  a     Left endpoint
+      !! @param[in]  b     Right endpoint
+      !! @param[in]  ib    Number of derivative conditions at \f$ a \f$
+      !! @param[in]  db    Derivative values at \f$ a \f$, length `nb`
+      !! @param[in]  nb    Length of `db` (\f$ = d \cdot i_b \f$)
+      !! @param[in]  ie    Number of derivative conditions at \f$ b \f$
+      !! @param[in]  de    Derivative values at \f$ b \f$, length `ne`
+      !! @param[in]  ne    Length of `de` (\f$ = d \cdot i_e \f$)
+      !! @param[out] cp    B-spline coefficients of the polynomial, length `np`
+      !! @param[in]  np    Length of `cp` (\f$ = d \cdot (k+1) \f$)
+      !!
+      !! @see Dierckx, Ch. 7, §7.1 (pp. 115-120)
+      pure subroutine fppocu(idim,k,a,b,ib,db,nb,ie,de,ne,cp,np)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)        :: idim,k,ib,nb,ie,ne,np
+      real(FP_REAL), intent(in)    :: a,b
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: db(nb),de(ne)
+      real(FP_REAL), intent(inout) :: cp(np)
+      !  ..local scalars..
+      real(FP_REAL) :: ab,aki
+      integer     :: i,id,j,jj,l,ll,k1,k2
+      !  ..local array..
+      real(FP_REAL) :: work(6,6)
+      !  ..
+      k1 = k+1
+      k2 = 2*k1
+      ab = b-a
+
+      all_dims: do id=1,idim
+         ! Reset temporary storage
+         work(:k1,1) = zero
+
+         if (ib>0) then
+
+             work(1,1:ib) = db(id:id+(ib-1)*idim:idim)
+
+             if (ib>1) then ! probably unnecessary
+                 ll = ib
+                 do j=2,ib
+                    ll =  ll-1
+                    do i=1,ll
+                       aki = k1-i
+                       work(j,i) = ab*work(j-1,i+1)/aki + work(j-1,i)
+                    end do
+                 end do
+             endif
+
+         endif
+
+        if (ie>0) then
+            l = id
+            j = k1
+            do i=1,ie
+               work(j,i) = de(l)
+               l = l+idim
+               j = j-1
+            end do
+
+            if (ie>1) then ! probably unnecessary
+               ll = ie
+               do jj=2,ie
+                  ll =  ll-1
+                  j = k1+1-jj
+                  do i=1,ll
+                     aki = k1-i
+                     work(j,i) = work(j+1,i) - ab*work(j,i+1)/aki
+                     j = j-1
+                  end do
+               end do
+            endif
+         endif
+
+         l = (id-1)*k2
+         cp(l+1:l+k1) = work(:k1,1)
+
+      end do all_dims
+      return
+      end subroutine fppocu
+
+
+      !> @brief Driver for polar grid smoothing spline with knot selection.
+      !!
+      !! Outer iteration loop for fitting a smoothing spline on a polar grid.
+      !! Manages the knot-selection strategy (adding knots in the radial
+      !! or angular direction based on residuals) and the smoothing-parameter
+      !! search, delegating the actual grid computation to fpopdi at each step.
+      !!
+      !! @param[in]     iopt    Fitting options (3 flags)
+      !! @param[in]     ider    Derivative specification flags
+      !! @param[in]     u       Radial grid, length `mu`
+      !! @param[in]     mu      Number of radial points
+      !! @param[in]     v       Angular grid, length `mv`
+      !! @param[in]     mv      Number of angular points
+      !! @param[in]     z       Data values, length `mz`
+      !! @param[in]     mz      Length of `z`
+      !! @param[in]     z0      Origin value
+      !! @param[in]     r       Boundary function values, length `mv`
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nuest   Max radial knots
+      !! @param[in]     nvest   Max angular knots
+      !! @param[in]     tol     Smoothing condition tolerance
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     nc      Length of coefficient array
+      !! @param[in,out] nu      Number of radial knots
+      !! @param[in,out] tu      Radial knot vector
+      !! @param[in,out] nv      Number of angular knots
+      !! @param[in,out] tv      Angular knot vector
+      !! @param[in,out] c       B-spline coefficients
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fp0     Initial residual
+      !! @param[in,out] fpold   Previous residual
+      !! @param[in,out] reducu  Residual reduction in radial direction
+      !! @param[in,out] reducv  Residual reduction in angular direction
+      !! @param[in,out] fpintu  Residual sums per radial interval
+      !! @param[in,out] fpintv  Residual sums per angular interval
+      !! @param[in,out] dz      Boundary derivative parameters
+      !! @param[in]     step    Search step for boundary optimization
+      !! @param[in,out] lastdi  Last direction of knot addition
+      !! @param[in,out] nplusu  Number of radial knots to add
+      !! @param[in,out] nplusv  Number of angular knots to add
+      !! @param[in,out] lasttu  Last radial knot change flag
+      !! @param[in,out] nru     Radial knot interval indices
+      !! @param[in,out] nrv     Angular knot interval indices
+      !! @param[in,out] nrdatu  Interior data counts per radial interval
+      !! @param[in,out] nrdatv  Interior data counts per angular interval
+      !! @param[in,out] wrk     Work array
+      !! @param[in]     lwrk    Length of `wrk`
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 11, §11.1 (pp. 197-205)
+      !! @see fpopdi — grid computation; fppola — scattered polar fitting
+      pure subroutine fppogr(iopt,ider,u,mu,v,mv,z,mz,z0,r,s, &
+                             nuest,nvest,tol,maxit,nc,nu,tu,nv,tv,c,fp,fp0,fpold,reducu, &
+                             reducv,fpintu,fpintv,dz,step,lastdi,nplusu,nplusv,lasttu,nru, &
+                             nrv,nrdatu,nrdatv,wrk,lwrk,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: mu,mv,mz,nuest,nvest,nc,lwrk,maxit
+      integer(FP_SIZE), intent(inout) :: nu,nv,lastdi,nplusu,nplusv,lasttu
+      integer(FP_FLAG), intent(inout) :: ier
+      real(FP_REAL), intent(in)    :: z0,r,s,tol
+      real(FP_REAL), intent(inout) :: fp,fp0,fpold,step,reducu,reducv
+      !  ..array arguments..
+      integer(FP_SIZE), intent(in) :: iopt(3),ider(2)
+      integer(FP_SIZE), intent(inout) :: nrdatu(nuest),nrdatv(nvest),nru(mu),nrv(mv)
+      real(FP_REAL), intent(in) :: u(mu),v(mv),z(mz)
+      real(FP_REAL), intent(inout) :: c(nc),tu(nuest),tv(nvest),dz(3),wrk(lwrk),fpintu(nuest),fpintv(nvest)
+      !  ..local scalars..
+      real(FP_REAL) :: acc,fpms,f1,f2,f3,p,p1,p2,p3,vb,ve,zmax,zmin,rn
+      integer(FP_SIZE) :: i,ifbu,ifbv,ifsu,ifsv,istart,iter,i1,i2,j,ju,ktu,l,mpm,mumin,mu0,mu1,&
+                 nn,nplu,nplv,npl1,nrintu,nrintv,nue,numax,nve,nvmax
+      logical(FP_BOOL) :: check1,check3,success
+      !  ..local arrays..
+      integer(FP_SIZE) :: idd(2)
+      real(FP_REAL) :: dzz(3)
+
+      !   set constants
+      real(FP_REAL), parameter :: period = 2*pi
+
+      !   initialization
+      nplu  = 0
+      nplv  = 0
+      ifsu  = 0
+      ifsv  = 0
+      ifbu  = 0
+      ifbv  = 0
+      p     = -one
+      mumin = 4-iopt(3) - merge(1,0,ider(1)>=0) - merge(1,0,iopt(2)==1 .and. ider(2)==1)
+
+      vb    = v(1)
+      ve    = vb+period
+
+      ! acc denotes the absolute tolerance for the root of f(p)=s.
+      acc   = tol*s
+
+      ! numax and nvmax denote the number of knots needed for interpolation.
+      numax = mu+5+iopt(2)+iopt(3)
+      nvmax = mv+7
+      nue   = min(numax,nuest)
+      nve   = min(nvmax,nvest)
+
+      ! *****************************************************************************************************
+      ! part 1: determination of the number of knots and their position.
+      ! *****************************************************************************************************
+      !  given a set of knots we compute the least-squares spline sinf(u,v) and the corresponding sum of
+      !  squared residuals fp = f(p=inf).
+      !  if iopt(1)=-1  sinf(u,v) is the requested approximation.
+      !  if iopt(1)>=0  we check whether we can accept the knots:
+      !    if fp <= s we will continue with the current set of knots.
+      !    if fp >  s we will increase the number of knots and compute the corresponding least-squares spline
+      !       until finally fp <= s. the initial choice of knots depends on the value of s and iopt.
+      !    if s=0 we have spline interpolation; in that case the number of knots in the u-direction equals
+      !       nu=numax=mu+5+iopt(2)+iopt(3) and in the v-direction nv=nvmax=mv+7.
+      !    if s>0 and:
+      !       iopt(1)=0 we first compute the least-squares polynomial,i.e. a spline without interior knots:
+      !          nu=8 ; nv=8.
+      !       iopt(1)=1 we start with the set of knots found at the last call of the routine, except for the
+      !          case that s > fp0; then we compute the least-squares polynomial directly.
+      ! *****************************************************************************************************
+      if (iopt(1)>=0) then
+
+          if (s<=zero) then
+
+              !  if s = 0, s(u,v) is an interpolating spline.
+              nu = numax
+              nv = nvmax
+
+              !  test whether the required storage space exceeds the available one.
+              if (nu>nuest .or. nv>nvest) then
+                 ier = FITPACK_INSUFFICIENT_STORAGE
+                 return
+              end if
+
+              ! find the position of the knots in the v-direction.
+              tv(1:mv+7) = [v(mv-2:mv)-period,v(1:mv),ve,v(2:4)+period]
+
+              ! if not all the derivative values g(i,j) are given, we will first
+              ! estimate these values by computing a least-squares spline
+              idd(1) = merge(ider(1),IONE,ider(1)/=0)
+              idd(2) = ider(2)
+              if (idd(1)>0) dz(1) = z0
+
+              if (ider(1)<0 .or. (iopt(2)/=0 .and. ider(2)==0)) then
+
+                  ! we set up the knots in the u-direction for computing the least-squares spline.
+                  i1 = 3
+                  i2 = mu-2
+                  nu = 4
+                  do i=1,mu
+                     if (i1>i2) exit
+                     nu = nu+1
+                     tu(nu) = u(i1)
+                     i1 = i1+2
+                  end do
+                  do i=1,4
+                     tu(i) = zero
+                     nu = nu+1
+                     tu(nu) = r
+                  end do
+
+                  ! we compute the least-squares spline for estimating the derivatives.
+                  call fpopdi(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,z,mz,z0,dz,iopt,idd,            &
+                              tu,nu,tv,nv,nuest,nvest,p,step,c,nc,fp,fpintu,fpintv,nru,nrv, &
+                              wrk,lwrk)
+                  ifsu = 0
+
+              endif
+
+              ! if all the derivatives at the origin are known, we compute the interpolating spline.
+              ! we set up the knots in the u-direction, needed for interpolation.
+              nn = numax-8
+              if (nn/=0) then
+                  ju = 2-iopt(2)
+                  do l=1,nn
+                     tu(l+4) = u(ju)
+                     ju = ju+1
+                  end do
+                  nu = numax
+                  l = nu
+                  do i=1,4
+                     tu(i) = zero
+                     tu(l) = r
+                     l = l-1
+                  end do
+              endif
+
+              ! we compute the interpolating spline.
+              call fpopdi(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,z,mz,z0,dz,iopt,idd, &
+                          tu,nu,tv,nv,nuest,nvest,p,step,c,nc,fp,fpintu,fpintv,nru,nrv, &
+                          wrk,lwrk)
+
+              ier = FITPACK_INTERPOLATING_OK
+              fp  = zero
+              return
+
+          else
+
+              ! if s>0 our initial choice of knots depends on the value of iopt(1).
+              ier = FITPACK_OK
+
+              if (iopt(1)/=0) step = -step
+
+              if (iopt(1)/=0 .and. fp0>s) then
+
+                  !  if iopt(1)=1 and fp0 > s we start computing the least-squares spline
+                  !  according to the set of knots found at the last call of the routine.
+                  !  we determine the number of grid coordinates u(i) inside each knot
+                  !  interval (tu(l),tu(l+1)).
+                  l = 5
+                  j = 1
+                  nrdatu(1) = 0
+                  mu0 = 2-iopt(2)
+                  mu1 = mu-2+iopt(3)
+                  do i=mu0,mu1
+                      nrdatu(j) = nrdatu(j)+1
+                      if (u(i)>=tu(l)) then
+                          nrdatu(j) = nrdatu(j)-1
+                          l = l+1
+                          j = j+1
+                          nrdatu(j) = 0
+                      endif
+                  end do
+
+                  !  we determine the number of grid coordinates v(i) inside each knot
+                  !  interval (tv(l),tv(l+1)).
+                  l = 5
+                  j = 1
+                  nrdatv(1) = 0
+                  do i=2,mv
+                      nrdatv(j) = nrdatv(j)+1
+                      if (v(i)>=tv(l)) then
+                          nrdatv(j) = nrdatv(j)-1
+                          l = l+1
+                          j = j+1
+                          nrdatv(j) = 0
+                      endif
+                  end do
+                  idd = ider
+
+              else
+
+                  ! if iopt(1)=0 or iopt(1)=1 and s >= fp0,we start computing the least-
+                  ! squares polynomial (which is a spline without interior knots).
+                  ier       = FITPACK_LEASTSQUARES_OK
+                  idd       = [ider(1),IONE]
+                  nu        = 8
+                  nv        = 8
+                  nrdatu(1) = mu-3+iopt(2)+iopt(3)
+                  nrdatv(1) = mv-1
+                  lastdi    = KNOT_DIM_NONE
+                  nplusu    = 0
+                  nplusv    = 0
+                  fp0       = zero
+                  fpold     = zero
+                  reducu    = zero
+                  reducv    = zero
+                  lasttu    = 0     ! force step (zmax-zmin) to be computed on the first pass;
+                  step      = zero  ! both are inout persistent state, uninitialized on a fresh fit
+              endif
+
+          endif
+
+      endif
+
+      ! main loop for the different sets of knots.
+      ! mpm=mu+mv is a safe upper bound for the number of trials.
+      mpm = mu+mv
+      iterations: do iter=1,mpm
+
+          ! number of knot intervals in the u (v) directions.
+          nrintu = nu-7
+          nrintv = nv-7
+
+          ! position of the additional knots which are needed for the b-spline representation of s(u,v).
+          tu(1:4)     = zero
+          tu(nu-3:nu) = r
+
+          tv(1:4)     = [tv(nv-6:nv-4)-period,vb]
+          tv(nv-3:nv) = [ve,tv(5:7)+period]
+
+          ! find an estimate of the range of possible values for the optimal derivatives at the origin.
+          ktu = max(mumin,merge(mu,nrdatu(1)+ITWO-iopt(2),nrintu==1))
+
+          if (ktu/=lasttu) then
+              l      = mv*ktu
+              zmin   = min(z0,minval(z(:l),1))
+              zmax   = max(z0,maxval(z(:l),1))
+              step   = zmax-zmin
+              lasttu = ktu
+          endif
+
+          ! find the least-squares spline sinf(u,v).
+          call fpopdi(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,z,mz,z0,dz,iopt,idd, &
+                      tu,nu,tv,nv,nuest,nvest,p,step,c,nc,fp,fpintu,fpintv,nru,nrv, &
+                      wrk,lwrk)
+
+          step = abs(step)
+          if (ier==FITPACK_LEASTSQUARES_OK) fp0 = fp
+
+          ! test whether the least-squares spline is an acceptable solution.
+          fpms = fp-s
+          if (iopt(1)<0 .or. abs(fpms)<acc) return
+
+          ! if f(p=inf) < s, we accept the choice of knots.
+          if (fpms<zero) exit iterations
+
+          ! if nu=numax and nv=nvmax, sinf(u,v) is an interpolating spline
+          if (nu==numax .and. nv==nvmax) then
+             fp  = zero
+             ier = FITPACK_INTERPOLATING_OK
+             return
+          end if
+
+           ! *** increase the number of knots. ***
+           ! if nu=nue and nv=nve we cannot further increase the number of knots
+           ! because of the storage capacity limitation.
+            if (nu==nue .and. nv==nve) then
+               ier = FITPACK_INSUFFICIENT_STORAGE
+               return
+            endif
+
+            if (ider(1)==0) fpintu(1) = fpintu(1)+(z0-c(1))**2
+            ier = FITPACK_OK
+
+            !  adjust the parameter reducu or reducv according to the direction
+            !  in which the last added knots were located.
+            first_knot: if (lastdi==KNOT_DIM_NONE) then
+
+                 nplv   = 3
+                 idd(2) = ider(2)
+                 fpold  = fp
+
+            else first_knot
+
+                 select case (lastdi)
+                    case (KNOT_DIM_1); reducu = fpold-fp
+                    case (KNOT_DIM_2); reducv = fpold-fp
+                 end select
+
+                 ! store the sum of squared residuals for the current set of knots.
+                 fpold = fp
+
+                 ! find nplu, the number of knots we should add in the u-direction.
+                 nplu = 1
+                 if (nu/=8) then
+                    npl1 = nplusu*2
+                    rn = nplusu
+                    if (reducu>acc) npl1 = fp_knots_to_add(rn,fpms,reducu)
+                    nplu = min(nplusu*2,max(npl1,nplusu/2,1))
+                 endif
+
+                 ! find nplv, the number of knots we should add in the v-direction.
+                 nplv = 3
+                 if (nv/=8) then
+                    npl1 = nplusv*2
+                    rn = nplusv
+                    if (reducv>acc) npl1 = fp_knots_to_add(rn,fpms,reducv)
+                    nplv = min(nplusv*2,max(npl1,nplusv/2,1))
+                 endif
+
+            endif first_knot
+
+            ! test whether we are going to add knots in the u- or v-direction.
+            lastdi = new_knot_dimension(nu,nplu,nue,nv,nplv,nve,lastdi)
+
+            choose_dir: if (lastdi==KNOT_DIM_2) then
+
+               ! addition in the v-direction.
+               nplusv = nplv
+               ifsv   = 0
+
+               add_v_knots: do l=1,nplusv
+
+                  ! add a new knot in the v-direction.
+                  call fpknot(v,mv,tv,nv,fpintv,nrdatv,nrintv,nvest,IONE)
+
+                  ! test whether we cannot further increase the number of knots in the v-direction.
+                  if (nv==nve) exit add_v_knots
+
+               end do add_v_knots
+
+           else choose_dir
+
+               ! addition in the u-direction.
+               nplusu = nplu
+               ifsu   = 0
+               istart = merge(1,0,iopt(2)==0)
+               add_u_knots: do l=1,nplusu
+
+                  ! add a new knot in the u-direction
+                  call fpknot(u,mu,tu,nu,fpintu,nrdatu,nrintu,nuest,istart)
+
+                  ! test whether we cannot further increase the number of knots in the u-direction.
+                  if (nu==nue) exit add_u_knots
+
+               end do add_u_knots
+
+           endif choose_dir
+
+           ! restart the computations with the new set of knots.
+      end do iterations
+
+      ! test whether the least-squares polynomial is a solution of our approximation problem.
+      if (ier==FITPACK_LEASTSQUARES_OK) return
+
+      ! **********************************************************************************************
+      ! part 2: determination of the smoothing spline sp(u,v)
+      ! **********************************************************************************************
+      !  we have determined the number of knots and their position. we now compute the b-spline
+      !  coefficients of the smoothing spline sp(u,v). this smoothing spline depends on the parameter
+      !  p in such a way that
+      !    f(p) = sumi=1,mu(sumj=1,mv((z(i,j)-sp(u(i),v(j)))**2)
+      !  is a continuous, strictly decreasing function of p. moreover the least-squares polynomial
+      !  corresponds to p=0 and the least-squares spline to p=infinity. then iteratively we have to
+      !  determine the positive value of p such that f(p)=s. the process which is proposed here makes
+      !  use of rational interpolation. f(p) is approximated by a rational function r(p)=(u*p+v)/(p+w);
+      !  three values of p (p1,p2,p3) with corresponding values of f(p) (f1=f(p1)-s,f2=f(p2)-s,
+      !  f3=f(p3)-s) are used to calculate the new value of p such that r(p)=s.
+      !  convergence is guaranteed by taking f1 > 0 and f3 < 0.
+      ! **********************************************************************************************
+
+      ! initial value for p.
+      p1 = zero
+      f1 = fp0-s
+      p3 = -one
+      f3 = fpms
+      p  = one
+      dzz(1:3) = dz(1:3)
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+
+      !  iteration process to find the root of f(p)=s.
+      root_iterations: do iter = 1,maxit
+
+          ! find the smoothing spline sp(u,v) and the corresponding sum f(p).
+          call fpopdi(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,z,mz,z0,dzz,iopt,idd, &
+                      tu,nu,tv,nv,nuest,nvest,p,step,c,nc,fp,fpintu,fpintv,nru,nrv, &
+                      wrk,lwrk)
+
+          ! SUCCESS! the approximation sp(u,v) is an acceptable solution.
+          fpms = fp-s; if (abs(fpms)<acc) return
+
+          ! find the new value of p and carry out one more step.
+          call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+          if (.not.success) then
+             ier = FITPACK_S_TOO_SMALL
+             return
+          end if
+
+      end do root_iterations
+
+      ! Maximum number of iterations reached.
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fppogr
+
+
+      !> @brief Core algorithm for spline fitting on a polar domain.
+      !!
+      !! Fits a smooth bivariate spline to data on a polar-like domain
+      !! \f$ D = \{(x,y) : x^2 + y^2 \leq r(\theta)^2\} \f$ by transforming
+      !! to coordinates \f$ (u, v) \f$ where \f$ u = r/r(\theta) \f$ (radial)
+      !! and \f$ v = \theta \f$ (angular). The boundary function \f$ r(\theta) \f$
+      !! is user-supplied.
+      !!
+      !! Continuity at the origin (\f$ u = 0 \f$) imposes constraints on the
+      !! B-spline coefficients (Eq. 11.3-11.5):
+      !!
+      !! - \f$ s(0, v) \f$ must be independent of \f$ v \f$
+      !! - Derivatives at the origin must satisfy symmetry conditions
+      !!
+      !! The algorithm uses the same iterative scheme as fpsurf (knot
+      !! placement, QR factorization with rank-deficiency handling, smoothing
+      !! search) with additional logic for origin-continuity constraints and
+      !! the periodic \f$ v \f$-direction.
+      !!
+      !! @param[in]     iopt1   Fitting option (0 = new, 1 = continue)
+      !! @param[in]     iopt2   Origin BC option (0 = free, 1 = given)
+      !! @param[in]     iopt3   Derivative BC option at origin
+      !! @param[in]     m       Number of data points
+      !! @param[in]     u       Radial coordinates, length `m`
+      !! @param[in]     v       Angular coordinates, length `m`
+      !! @param[in]     z       Data values, length `m`
+      !! @param[in]     w       Data weights, length `m`
+      !! @param[in]     rad     Boundary function values at data angles
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nuest   Max radial knots
+      !! @param[in]     nvest   Max angular knots
+      !! @param[in]     eta     Rank-deficiency tolerance factor
+      !! @param[in]     tol     Smoothing condition tolerance
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     ib1     Bandwidth parameter
+      !! @param[in]     ib3     Extended bandwidth parameter
+      !! @param[in]     nc      Length of coefficient array
+      !! @param[in]     ncc     Auxiliary coefficient dimension
+      !! @param[in]     intest  Length of `fpint`
+      !! @param[in]     nrest   Length of `index`
+      !! @param[in,out] nu      Number of radial knots
+      !! @param[in,out] tu      Radial knot vector
+      !! @param[in,out] nv      Number of angular knots
+      !! @param[in,out] tv      Angular knot vector
+      !! @param[in,out] c       B-spline coefficients
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] sup     Upper bound for residual
+      !! @param[in,out] fpint   Work: residual sums per panel
+      !! @param[in,out] coord   Work: coordinates
+      !! @param[in,out] f       Work: RHS vector
+      !! @param[in,out] ff      Work: RHS copy
+      !! @param[in,out] row     Work: observation row
+      !! @param[in,out] cs      Work: cosine values
+      !! @param[in,out] cosi    Work: cosine integrals
+      !! @param[in,out] a       Work: band matrix
+      !! @param[in,out] q       Work: extended band matrix
+      !! @param[in,out] bu      Work: radial discontinuity coefficients
+      !! @param[in,out] bv      Work: angular discontinuity coefficients
+      !! @param[in,out] spu     Work: radial B-spline values
+      !! @param[in,out] spv     Work: angular B-spline values
+      !! @param[in,out] h       Work vector
+      !! @param[in,out] index   Work: panel sorting indices
+      !! @param[in,out] nummer  Work: data-to-panel mapping
+      !! @param[in,out] wrk     Work array
+      !! @param[in]     lwrk    Length of `wrk`
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 11, §11.1 (pp. 197-205), Eq. 11.1-11.9
+      !! @see fprppo — polar representation; fpopdi — polar derivatives
+      pure subroutine fppola(iopt1,iopt2,iopt3,m,u,v,z,w,rad,s, nuest,nvest,eta,tol,maxit, &
+                             ib1,ib3,nc,ncc,intest,nrest,nu,tu,nv,tv,c,fp,sup,fpint,coord, &
+                             f,ff,row,cs,cosi,a,q,bu,bv,spu,spv,h,index,nummer,wrk,lwrk,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: iopt1,iopt2,iopt3,m,nuest,nvest,maxit,ib1,ib3,nc,ncc,intest,nrest,lwrk
+      integer(FP_SIZE), intent(inout) :: nu,nv
+      integer(FP_FLAG), intent(inout) :: ier
+      real(FP_REAL), intent(in)    :: s,eta,tol
+      real(FP_REAL), intent(inout) :: fp,sup
+      !  ..array arguments..
+      integer(FP_SIZE),  intent(inout) :: index(nrest),nummer(m)
+      real(FP_REAL), intent(in)    :: u(m),v(m),z(m),w(m)
+      real(FP_REAL), intent(inout) :: tu(nuest),tv(nvest),c(nc),fpint(intest),coord(intest),f(ncc),ff(nc),row(nvest), &
+                                    cs(nvest),cosi(5,nvest),a(ncc,ib1),q(ncc,ib3),bu(nuest,5),bv(nvest,5),spu(m,4), &
+                                    spv(m,4),h(ib3),wrk(lwrk)
+      !  ..user supplied function..
+#if defined(__GFORTRAN__) && __GNUC__ == 15
+      ! GCC 15 bug #120163: use inline interface instead of procedure(fitpack_polar_boundary)
+      interface
+         pure real(FP_REAL) function rad(theta)
+            import FP_REAL
+            real(FP_REAL), intent(in) :: theta
+         end function rad
+      end interface
+#else
+      procedure(fitpack_polar_boundary) :: rad
+#endif
+      !  ..local scalars..
+      real(FP_REAL) :: acc,arg,co,c1,c2,c3,c4,dmax,eps,fac,fac1,fac2,fpmax,fpms,f1,f2,f3,huj,p,pinv,piv,p1,p2,p3, &
+                     r,ratio,si,sigma,sq,store,uu,u2,u3,wi,zi,rn
+      integer(FP_SIZE) :: i,iband,iband3,iband4,ii,il,in,ipar,ipar1,irot,iter,i1,j,jrot,j1,j2,l,la,lf,lh,ll,&
+                 lu,lv,lwest,l1,l2,l3,l4,ncof,ncoff,nvv,nv4,nreg,nrint,nrr,nr1,nuu,nu4,num,num1,numin,nvmin,rank,&
+                 iband1,jlu
+      logical(FP_BOOL) :: check1,check3,success
+      !  ..local arrays..
+      real(FP_REAL), dimension(MAX_ORDER+1) :: hu,hv
+
+      fpms   = zero
+      ipar   = iopt2*(iopt2+3)/2
+      ipar1  = ipar+1
+      eps    = sqrt(eta)
+      iband1 = 0
+      fpms   = huge(zero)
+
+      ! calculation of acc, the absolute tolerance for the root of f(p)=s.
+      acc    = tol*s
+
+      initialize: if (iopt1>=0) then
+
+          numin = 9
+          nvmin = 9+iopt2*(iopt2+1)
+
+          if (iopt1==0 .or. s>=sup) then
+
+              !  if iopt1 = 0 we begin by computing the weighted least-squares polymomial of the form
+              !     s(u,v) = f(1)*(1-u**3)+f(2)*u**3+f(3)*(u**2-u**3)+f(4)*(u-u**3)
+              !  where f(4) = 0 if iopt2> 0 , f(3) = 0 if iopt2 > 1 and
+              !        f(2) = 0 if iopt3> 0.
+              !  the corresponding weighted sum of squared residuals gives the upper
+              !  bound sup for the smoothing factor s.
+              sup = zero
+              f(1:4) = zero
+              a(1:4,1:4) = zero
+              initial_poly: do i=1,m
+                 wi   = w(i)
+                 zi   = z(i)*wi
+                 uu   = u(i)
+                 u2   = uu*uu
+                 u3   = uu*u2
+                 h(1) = (one-u3)*wi
+                 h(2) = merge(u3*wi,zero,iopt3==0)
+                 h(3) = merge(u2*(one-uu)*wi,zero,iopt2<=1)
+                 h(4) = merge(uu*(one-u2)*wi,zero,iopt2<=0)
+                 ! rotate the initial polynomial row into triangle.
+                 call fp_rotate_row(h, 4, a, zi, f, 0)
+                 sup = sup+zi*zi
+              end do initial_poly
+
+              if (not_equal(a(4,1),zero)) f(4) = f(4)/a(4,1)
+              if (not_equal(a(3,1),zero)) f(3) = (f(3)-a(3,2)*f(4))/a(3,1)
+              if (not_equal(a(2,1),zero)) f(2) = (f(2)-a(2,2)*f(3)-a(2,3)*f(4))/a(2,1)
+              if (not_equal(a(1,1),zero)) f(1) = (f(1)-a(1,2)*f(2)-a(1,3)*f(3)-a(1,4)*f(4))/a(1,1)
+
+              !  find the b-spline representation of this least-squares polynomial
+              c1 = f(1)
+              c4 = f(2)
+              c2 = f(4)/three+c1
+              c3 = (f(3)+two*f(4))/three+c1
+              nu = 8
+              nv = 8
+              do i=1,4
+                 c(i)    = c1
+                 c(i+4)  = c2
+                 c(i+8)  = c3
+                 c(i+12) = c4
+                 tu(i)   = zero
+                 tu(i+4) = one
+                 rn      = 2*i-9
+                 tv(i)   = rn*pi
+                 rn      = 2*i-1
+                 tv(i+4) = rn*pi
+              end do
+              fp = sup
+
+              !  test whether the least-squares polynomial is an acceptable solution
+              fpms = sup-s
+              if (fpms<acc) then
+                 ier = FITPACK_LEASTSQUARES_OK
+                 return
+              end if
+
+          endif
+
+          ! Find the initial set of interior knots
+          initial_knots: if (iopt1==0 .or. (iopt1>0 .and. (s>=sup .or. (s<sup .and. nv<nvmin)))) then
+
+             !  test whether we cannot further increase the number of knots.
+             if (nuest<numin .or. nvest<nvmin) then
+                ier = FITPACK_INSUFFICIENT_STORAGE
+                return
+             end if
+
+             !  find the initial set of interior knots of the spline in case iopt1=0.
+             nu    = numin
+             nv    = nvmin
+             tu(5) = half
+             nvv   = nv-8
+             rn    = nvv+1
+             fac   = pi2/rn
+             forall (i=1:nvv) tv(i+4) = i*fac-pi
+
+          endif initial_knots
+
+      endif initialize
+
+
+      !  ************************************************************************************************************
+      !  part 1 : computation of least-squares bicubic splines.
+      !  ************************************************************************************************************
+      !  if iopt1<0 we compute the least-squares bicubic spline according to the given set of knots.
+      !  if iopt1>=0 we compute least-squares bicubic splines with increasing numbers of knots until the
+      !  corresponding sum f(p=inf)<=s.
+      !  the initial set of knots then depends on the value of iopt1:
+      !    if iopt1=0 we start with one interior knot in the u-direction (0.5) and 1+iopt2*(iopt2+1) in the
+      !               v-direction.
+      !    if iopt1>0 we start with the set of knots found at the last call of the routine.
+      !  ************************************************************************************************************
+      !  main loop for the different sets of knots. m is a safe upper bound for the number of trials.
+      nu4 = nu-4
+      nv4 = nv-4      
+      
+      compute_knots: do iter=1,m
+          ! find the position of the additional knots which are needed for the
+          ! b-spline representation of s(u,v).
+          l1 = 4
+          l2 = l1
+          l3 = nv-3
+          l4 = l3
+          tv(l2) = -pi
+          tv(l3) = pi
+          do i=1,3
+             l1 = l1+1
+             l2 = l2-1
+             l3 = l3+1
+             l4 = l4-1
+             tv(l2) = tv(l4)-pi2
+             tv(l3) = tv(l1)+pi2
+          end do
+          l = nu
+          do i=1,4
+            tu(i) = zero
+            tu(l) = one
+            l = l-1
+          end do
+          ! find nrint, the total number of knot intervals and nreg, the number of panels in which the approximation
+          ! domain is subdivided by the intersection of knots.
+          nuu = nu-7
+          nvv = nv-7
+          nrr = nvv/2
+          nr1 = nrr+1
+          nrint = nuu+nvv
+          nreg = nuu*nvv
+
+          ! arrange the data points according to the panel they belong to.
+          call fporde(u,v,m,DEGREE_3,DEGREE_3,tu,nu,tv,nv,nummer,index,nreg)
+
+          if (iopt2/=0) then
+              ! find the b-spline coefficients cosi of the cubic spline approximations for cr(v)=rad(v)*cos(v)
+              ! and sr(v) = rad(v)*sin(v).
+              ! if iopt2=1, and additionally also for cr(v)**2,sr(v)**2 and 2*cr(v)*sr(v) if iopt2=2
+              a(1:nvv,1:nvv) = zero
+              cosi(1:ipar,1:nvv) = zero
+
+              ! the coefficients cosi are obtained from interpolation conditions at the knots tv(i),i=4,5,...nv-4.
+              get_coefs: do i=1,nvv
+                  l2  = i+3
+                  arg = tv(l2)
+                  hv = fpbspl(tv,nv,DEGREE_3,arg,l2)
+                  row(1:nvv) = zero
+                  ll = i
+                  do j=1,3
+                     if (ll>nvv) ll= 1
+                     row(ll) = row(ll)+hv(j)
+                     ll = ll+1
+                  end do
+                  co = cos(arg)
+                  si = sin(arg)
+                  r  = rad(arg)
+                  cs(1:2) = [co,si]*r
+                  if (iopt2/=1) cs(3:5) = [cs(:2)**2,cs(1)*cs(2)]
+
+                  do j=1,nvv
+                      piv = row(j)
+                      if (equal(piv,zero)) cycle
+                      call fpgivs(piv,a(j,1),co,si)
+                      call fprota(co,si,cs(:ipar),cosi(:ipar,j))
+
+                      j1 = j+1
+                      if (j<nvv) call fprota(co,si,row(j1:nvv),a(j,2:nvv-j1+2))
+                  end do
+              end do get_coefs
+
+              do l=1,ipar
+                  cs(1:nvv) = cosi(l,1:nvv)
+                  cosi(l,1:nvv) = fpback(a,cs,nvv,nvv,ncc)
+              end do
+
+          endif
+
+          ! find ncof, the dimension of the spline and ncoff, the number
+          ! of coefficients in the standard b-spline representation.
+          nu4 = nu-4
+          nv4 = nv-4
+          ncoff = nu4*nv4
+          ncof = ipar1+nvv*(nu4-1-iopt2-iopt3)
+
+          ! find the bandwidth of the observation matrix a.
+          iband = merge(ncof,IFOUR*nvv,nuu-iopt2-iopt3<=1)
+          iband1 = iband-1
+
+          ! initialize the observation matrix a.
+          f(1:ncof) = zero
+          a(1:ncof,1:iband) = zero
+          ! initialize the sum of squared residuals.
+          fp = zero
+          ratio = one+tu(6)/tu(5)
+          ! fetch the data points in the new order. main loop for the different panels.
+          panels: do num=1,nreg
+             !  fix certain constants for the current panel; jrot records the column number of the first
+             ! non-zero element in a row of the observation matrix according to a data point of the panel.
+             num1 = num-1
+             lu   = num1/nvv
+             l1   = lu+4
+             lv   = num1-lu*nvv+1
+             l2   = lv+3
+             jrot = merge(ipar1+(lu-iopt2-1)*nvv,IZERO,lu>iopt2)
+             lu   = lu+1
+
+             !  test whether there are still data points in the current panel.
+             in = index(num)
+             points_left: do while (in/=0)
+
+                ! fetch a new data point.
+                wi = w(in)
+                zi = z(in)*wi
+
+                ! evaluate for the u-direction, the 4 non-zero b-splines at u(in)
+                hu = fpbspl(tu,nu,DEGREE_3,u(in),l1)
+
+                ! evaluate for the v-direction, the 4 non-zero b-splines at v(in)
+                hv = fpbspl(tv,nv,DEGREE_3,v(in),l2)
+
+                ! store the value of these b-splines in spu and spv resp.
+                spu(in,:) = hu(1:4)
+                spv(in,:) = hv(1:4)
+
+                ! initialize the new row of observation matrix.
+                h(1:iband) = zero
+
+                ! calculate the non-zero elements of the new row by making the cross
+                ! products of the non-zero b-splines in u- and v-direction and
+                ! by taking into account the conditions of the splines.
+                row(1:nvv) = zero
+
+                ! take into account the periodicity condition of the bicubic splines.
+                ll = lv
+                do i=1,4
+                   if (ll>nvv) ll=1
+                   row(ll) = row(ll)+hv(i)
+                   ll = ll+1
+                end do
+
+                ! take into account the other conditions of the splines.
+                if (iopt2/=0 .and. lu<=iopt2+1) &
+                cs(1:ipar) = matmul(cosi(1:ipar,1:nvv),row(1:nvv))
+
+                ! fill in the non-zero elements of the new row.
+                j1 = 0
+                new_row: do j =1,4
+                  jlu = j+lu
+                  huj = hu(j)
+                  if (jlu>iopt2+2) then
+                      if (jlu>nu4 .and. iopt3/=0) cycle new_row
+                      h(j1+1:j1+nvv) = row(1:nvv)*huj
+                      j1 = j1+nvv
+                  else
+                      select case (jlu)
+                         case (1,2)
+                             h(1) = huj
+                             j1 = 1
+                         case (3)
+                             h(1:3) = [h(1)+huj,huj*cs(1:2)]
+                             j1 = 3
+                         case (4)
+                             h(1)   = h(1)+huj
+                             h(2:3) = h(2:3)+huj*ratio*cs(1:2)
+                             h(4:6) = huj*cs(3:5)
+                             j1 = 6
+                      end select
+                  endif
+                end do new_row
+                h(1:iband) = wi*h(1:iband)
+
+                ! rotate the row into triangle by givens transformations.
+                call fp_rotate_row(h, iband, a, zi, f, jrot)
+
+                ! add the contribution of the row to the sum of squares of residual right hand sides.
+                fp = fp+zi**2
+
+                ! find the number of the next data point in the panel.
+                in = nummer(in)
+             end do points_left
+          end do panels
+
+          ! find dmax, the maximum value for the diagonal elements in the reduced triangle.
+          dmax = max(zero,maxval(a(1:ncof,1)))
+
+          ! check whether the observation matrix is rank deficient.
+          sigma = eps*dmax
+
+          if (any(a(1:ncof,1)<=sigma)) then
+
+             ! in case of rank deficiency, find the minimum norm solution.
+             lwest = ncof*iband+ncof+iband
+             if (lwest>lwrk) then
+                ier = lwest
+                return
+             end if
+
+             lf = 1
+             lh = lf+ncof
+             la = lh+iband
+             ff(1:ncof) = f(1:ncof)
+             q(1:ncof,1:iband) = a(1:ncof,1:iband)
+             call fprank(q,ff,ncof,iband,ncc,sigma,c,sq,rank,wrk(la),wrk(lf),wrk(lh))
+             q(1:ncof,1) = q(1:ncof,1)/dmax
+
+             ! add to the sum of squared residuals, the contribution of reducing the rank.
+             fp = fp+sq
+
+          else
+
+             ! backward substitution in case of full rank.
+             c(:ncof) = fpback(a,f,ncof,iband,ncc)
+             rank = ncof
+             q(1:ncof,1) = a(1:ncof,1)/dmax
+
+          endif
+
+          ! find the coefficients in the standard b-spline representation of the spline.
+          call fprppo(nu,nv,iopt2,iopt3,cosi,ratio,c,ff,ncoff)
+
+          ! test whether the least-squares spline is an acceptable solution.
+          fpms = fp-s
+          if (iopt1<0 .or. abs(fpms)<=acc) then
+            if (fp<=zero) then
+               ier = FITPACK_INTERPOLATING_OK
+               fp  = zero
+               return
+            else
+               if (ncof/=rank) ier = -rank
+               return
+            endif
+          endif
+
+          ! if f(p=inf) < s, accept the choice of knots.
+          if (fpms<zero) exit compute_knots
+
+          ! test whether we cannot further increase the number of knots
+          if (m<ncof) then
+             ier = FITPACK_TOO_MANY_KNOTS
+             return
+          end if
+
+          ! search where to add a new knot.
+          ! find for each interval the sum of squared residuals fpint for the data points having the coordinate
+          ! belonging to that knot interval. calculate also coord which is the same sum, weighted by the position
+          ! of the data points considered.
+          fpint(1:nrint) = zero
+          coord(1:nrint) = zero
+
+          do num=1,nreg
+              num1 = num-1
+              lu = num1/nvv
+              l1 = lu+1
+              lv = num1-lu*nvv
+              l2 = lv+1+nuu
+              jrot = lu*nv4+lv
+              in = index(num)
+              do while (in/=0)
+                  store = zero
+                  i1 = jrot
+                  do i=1,4
+                    store = store + spu(in,i)*dot_product(spv(in,1:4),c(i1+1:i1+4))
+                    i1 = i1+nv4
+                  end do
+                  store     = (w(in)*(z(in)-store))**2
+                  fpint(l1) = fpint(l1)+store
+                  coord(l1) = coord(l1)+store*u(in)
+                  fpint(l2) = fpint(l2)+store
+                  coord(l2) = coord(l2)+store*v(in)
+                  in = nummer(in)
+              end do
+          end do
+          ! bring together the information concerning knot panels which are
+          ! symmetric with respect to the origin.
+          do i=1,nrr
+              l1 = nuu+i
+              l2 = l1+nrr
+              fpint(l1) = fpint(l1)+fpint(l2)
+              coord(l1) = coord(l1)+coord(l2)-pi*fpint(l2)
+          end do
+
+          ! find the interval for which fpint is maximal on the condition that
+          ! there still can be added a knot.
+          l1 = merge(nuu+1,      1,nuest<nu+1)
+          l2 = merge(nuu  ,nuu+nrr,nvest<nv+2)
+
+          ! test whether we cannot further increase the number of knots.
+          if (l1>l2) then
+             ier = FITPACK_INSUFFICIENT_STORAGE
+             return
+          end if
+
+          add_knot: do
+
+             ! Set knot at the location with max squared residual
+             fpmax = zero
+             l = 0
+             do i=l1,l2
+                if (fpmax<fpint(i)) then
+                   l = i
+                   fpmax = fpint(i)
+                endif
+             end do
+
+             ! All residuals already <=0
+             if (l==0) then
+                ier = FITPACK_OVERLAPPING_KNOTS
+                return
+             end if
+
+             ! calculate the position of the new knot.
+             arg = coord(l)/fpint(l)
+
+             ! test in what direction the new knot is going to be added.
+             choose_direction: if (l<=nuu) then
+                !  addition in the u-direction
+                l4       = l+4
+                fpint(l) = zero ! Clear location
+                fac1     = tu(l4)-arg
+                fac2     = arg-tu(l4-1)
+             else choose_direction
+                !  addition in the v-direction
+                l4 = l+4-nuu
+                fpint(l) = zero
+                fac1 = tv(l4)-arg
+                fac2 = arg-tv(l4-1)
+             endif choose_direction
+
+             ! Suitable location
+             if (fac1<=(ten*fac2) .and. fac2<=(ten*fac1)) then
+
+                 ! Place knot
+                 place_knot: if (l<=nuu) then
+                    j = nu
+                    do i=l4,nu
+                      tu(j+1) = tu(j)
+                      j = j-1
+                    end do
+                    tu(l4) = arg
+                    nu = nu+1
+
+                 else place_knot
+                    ll = nrr+4
+                    j = ll
+                    do i=l4,ll
+                        tv(j+1) = tv(j)
+                        j = j-1
+                    end do
+                    tv(l4) = arg
+                    nv = nv+2
+                    nrr = nrr+1
+                    do i=5,ll
+                        j = i+nrr
+                        tv(j) = tv(i)+pi
+                    end do
+                 endif place_knot
+
+                 exit add_knot
+
+             endif
+
+          end do add_knot
+      !  restart the computations with the new set of knots.
+      end do compute_knots
+
+      ! ************************************************************************************************************
+      ! part 2: determination of the smoothing bicubic spline.
+      ! ************************************************************************************************************
+      ! we have determined the number of knots and their position. we now compute the coefficients of the
+      ! smoothing spline sp(u,v). the observation matrix a is extended by the rows of a matrix, expressing
+      ! that sp(u,v) must be a constant function in the variable v and a cubic polynomial in the variable u.
+      ! the corresponding weights of these additional rows are set to 1/(p). iteratively we than have to
+      ! determine the value of p such that f(p) = sum((w(i)*(z(i)-sp(u(i),v(i))))**2)  be = s.
+      ! we already know that the least-squares polynomial corresponds to p=0, and that the least-squares
+      ! bicubic spline corresponds to p=infinity. the iteration process makes use of rational interpolation.
+      ! since f(p) is a convex and strictly decreasing function of p, it can be approximated by a rational
+      ! function of the form r(p) = (u*p+v)/(p+w). three values of p (p1,p2,p3) with corresponding values of
+      ! f(p) (f1=f(p1)-s,f2=f(p2)-s,f3=f(p3)-s) are used to calculate the new value of p such that r(p)=s.
+      ! convergence is guaranteed by taking f1>0,f3<zero
+      ! ************************************************************************************************************
+
+      ! evaluate the discontinuity jumps of the 3-th order derivative of the b-splines at the knots:
+      call fpdisc(tu,nu,DEGREE_5,bu,nuest)   ! tu(l),l=5,...,nu-4.
+      call fpdisc(tv,nv,DEGREE_5,bv,nvest)   ! tv(l),l=5,...,nv-4.
+
+      ! initial value for p.
+      p1 = zero
+      f1 = sup-s
+      p3 = -one
+      f3 = fpms
+      p  = sum(a(:ncof,1))/real(ncof,FP_REAL)
+
+      !  find the bandwidth of the extended observation matrix.
+      iband4 = min(ncof,iband+ipar1)
+      iband3 = iband4 -1
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+      nuu    = nu4-iopt3-1
+
+      !  iteration process to find the root of f(p)=s.
+      iterations: do iter=1,maxit
+
+          pinv = one/p
+
+          ! store the triangularized observation matrix into q.
+          ff(1:ncof) = f(1:ncof)
+          q(1:ncof,1:iband4) = zero
+          q(1:ncof,1:iband)  = a(1:ncof,1:iband)
+
+          ! extend the observation matrix with the rows of a matrix, expressing
+          ! that for u=constant sp(u,v) must be a constant function.
+          u_constant: do i=5,nv4
+              ii = i-4
+              row(1:nvv) = zero
+              ll = ii
+              do l=1,5
+                  if (ll>nvv) ll=1
+                  row(ll) = row(ll)+bv(ii,l)
+                  ll = ll+1
+              end do
+              do j=1,nuu
+
+                  !  initialize the new row.
+                  h(1:iband) = zero
+
+                  !  fill in the non-zero elements of the row. jrot records the column
+                  !  number of the first non-zero element in the row.
+                  if (j>iopt2) then
+
+                      h(1:nvv) = row(1:nvv)
+                      jrot = ipar1+1+(j-iopt2-1)*nvv
+
+                  elseif (j==2) then
+
+                      cs(3:5) = matmul(cosi(3:5,1:nvv),row(1:nvv))
+                      h(1:2)  = cs(1:2)*ratio
+                      h(3:5)  = cs(3:5)
+                      jrot    = 2
+
+                  else
+
+                      cs(1:2) = matmul(cosi(1:2,1:nvv),row(1:nvv))
+                      h(1:2)  = cs(1:2)
+                      jrot    = 2
+
+                  end if
+
+                  h(1:iband) = h(1:iband)*pinv
+                  zi = zero
+
+                  ! rotate the new row into triangle by givens transformations.
+                  call fp_rotate_shifted(h, iband, q, ncc, zi, ff, jrot, ncof)
+              end do
+          end do u_constant
+
+          !  extend the observation matrix with the rows of a matrix expressing
+          !  that for v=constant. sp(u,v) must be a cubic polynomial.
+          v_constant: do i=5,nu4
+              ii = i-4
+              do j=1,nvv
+
+                  ! initialize the new row
+                  h(1:iband4) = zero
+                  !  fill in the non-zero elements of the row. jrot records the column
+                  !  number of the first non-zero element in the row.
+                  j1 = 1
+                  fill_in: do l=1,5
+                     il = ii+l-1
+                     if (il==nu4 .and. iopt3/=0) then
+                        cycle fill_in
+                     elseif (il>iopt2+1) then
+                        h(j1)  = bu(ii,l)
+                        j1     = j1+nvv
+                     elseif (il<0) then
+                        h(1)   = bu(ii,l)
+                        j1     = j+1
+                     elseif (il==0) then
+                        h(1)   = h(1)+bu(ii,l)
+                        h(2:3) = bu(ii,l)*cosi(1:2,j)
+                        j1     = j+3
+                     elseif (il>0) then
+                        h(1)   = h(1)+bu(ii,l)
+                        h(2:3) = bu(ii,l)*cosi(1:2,j)*ratio
+                        h(4:6) = bu(ii,l)*cosi(3:5,j)
+                        j1     = j+6
+                     endif
+                  end do fill_in
+
+                  h(:iband4) = h(:iband4)*pinv
+                  zi   = zero
+                  jrot = merge(ipar1+(ii-iopt2-2)*nvv+j,IONE,ii>iopt2+1)
+
+                  ! rotate the new row into triangle by givens transformations.
+                  call fp_rotate_shifted(h, iband4, q, ncc, zi, ff, jrot, ncof)
+
+              end do
+          end do v_constant
+
+          ! find dmax, the maximum value for the diagonal elements in the reduced triangle.
+          dmax = max(zero,maxval(q(1:ncof,1)))
+
+          ! check whether the matrix is rank deficient.
+          sigma = eps*dmax
+
+          if (all(q(1:ncof,1)>sigma)) then
+
+             ! backward substitution in case of full rank.
+             c(:ncof) = fpback(q,ff,ncof,iband4,ncc)
+             rank = ncof
+
+          else
+
+             ! in case of rank deficiency, find the minimum norm solution.
+             lwest = ncof*iband4+ncof+iband4
+             if (lwest>lwrk) then
+                ier = lwest
+                return
+             end if
+             lf = 1
+             lh = lf+ncof
+             la = lh+iband4
+             call fprank(q,ff,ncof,iband4,ncc,sigma,c,sq,rank,wrk(la),wrk(lf),wrk(lh))
+
+          endif
+
+          q(:ncof,1) = q(:ncof,1)/dmax
+
+          ! find the coefficients in the standard b-spline representation of the polar spline.
+          call fprppo(nu,nv,iopt2,iopt3,cosi,ratio,c,ff,ncoff)
+
+          ! compute f(p).
+          fp = zero
+          get_fp: do num = 1,nreg
+              num1 = num-1
+              lu = num1/nvv
+              lv = num1-lu*nvv
+              jrot = lu*nv4+lv
+              in = index(num)
+
+              do while (in/=0)
+                  store = zero
+                  i1 = jrot
+                  do i=1,4
+                     store = store + spu(in,i)*dot_product(spv(in,1:4),c(i1+1:i1+4))
+                     i1 = i1+nv4
+                  end do
+                  fp = fp+(w(in)*(z(in)-store))**2
+                  in = nummer(in)
+              end do
+          end do get_fp
+
+          ! test whether the approximation sp(u,v) is an acceptable solution
+          fpms = fp-s
+          if (abs(fpms)<=acc) then
+              if (ncof/=rank) ier = -rank
+              return
+          end if
+
+          ! find the new value of p and carry out one more step.
+          call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+          if (.not.success) then
+             ier = FITPACK_S_TOO_SMALL
+             return
+          end if
+
+      end do iterations
+
+      ! the maximum allowable number of iterations has been reached.
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fppola
+
+      !> @brief Update the smoothing parameter \f$ p \f$ during iterative knot selection.
+      !!
+      !! Given the current iterate \f$ (p, F(p) - S) \f$ and the bracketing triple
+      !! \f$ (p_1, F_1), (p_2, F_2), (p_3, F_3) \f$ with \f$ F_1 > 0 \f$ and
+      !! \f$ F_3 < 0 \f$, updates the bracket and computes the next estimate
+      !! via rational interpolation (fprati, Eq. 5.30).
+      !!
+      !! During the initial phase (before the bracket is established), the routine
+      !! adjusts \f$ p \f$ by multiplicative factors to find \f$ p \f$ values that
+      !! bracket the root \f$ F(p) = 0 \f$.
+      !!
+      !! @param[in,out] p1       Left bracket; satisfies \f$ F_1 > 0 \f$
+      !! @param[in,out] f1       \f$ F(p_1) - S \f$; updated with \f$ p_1 \f$
+      !! @param[in,out] p2       Most recent iterate; set to `p` on entry
+      !! @param[in,out] f2       \f$ F(p_2) - S \f$; set to `fpms` on entry
+      !! @param[in,out] p3       Right bracket; satisfies \f$ F_3 < 0 \f$
+      !! @param[in,out] f3       \f$ F(p_3) - S \f$; updated with \f$ p_3 \f$
+      !! @param[in,out] p        Current smoothing parameter; updated to next estimate
+      !! @param[in]     fpms     Current residual \f$ F(p) - S \f$
+      !! @param[in]     acc      Convergence tolerance
+      !! @param[in,out] check1   `.true.` once lower bracket is established
+      !! @param[in,out] check3   `.true.` once upper bracket is established
+      !! @param[out]    success  `.false.` if iteration stalls (non-monotone \f$ F \f$)
+      !!
+      !! @see Dierckx, Ch. 5, §5.2.4 (pp. 83-86), Eq. 5.30-5.32
+      elemental subroutine root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+          real(FP_REAL), intent(inout) :: p1,f1,p2,f2,p3,f3,p
+          real(FP_REAL), intent(in)    :: fpms,acc
+          logical(FP_BOOL), intent(inout) :: check1,check3
+          logical(FP_BOOL), intent(out) :: success
+
+          !  set constants
+          real(FP_REAL), parameter :: con1 = 0.1e0_FP_REAL
+          real(FP_REAL), parameter :: con9 = 0.9e0_FP_REAL
+          real(FP_REAL), parameter :: con4 = 0.4e-01_FP_REAL
+
+          success = .true.
+
+          p2 = p
+          f2 = fpms
+          if (.not.check3) then
+             if ((f2-f3)>acc) then
+                check3=f2<zero
+             else
+                ! our initial choice of p is too large.
+                p3 = p2
+                f3 = f2
+                p  = p*con4
+                if (p<=p1) p=p1*con9 + p2*con1
+                return
+             endif
+          endif
+
+          if (.not.check1) then
+             if ((f1-f2)>acc) then
+                 check1 = f2>zero
+             else
+                 ! our initial choice of p is too small
+                 p1 = p2
+                 f1 = f2
+                 p  = p/con4
+                 if (p3>=zero .and. p>=p3) p = p2*con1 + p3*con9
+                 return
+             endif
+          endif
+
+          ! test whether the iteration process proceeds as theoretically expected.
+          if (f2>=f1 .or. f2<=f3) then
+             success = .false.
+             return
+          else
+             ! find the new value of p.
+             call fprati(p1,f1,p2,f2,p3,f3,p)
+          endif
+
+      end subroutine root_finding_iterate
+
+
+      !> @brief Compute the minimum-norm least-squares solution under rank deficiency.
+      !!
+      !! When the QR-triangularized observation matrix \f$ R \f$ has rank
+      !! \f$ r < n \f$ (detected by near-zero diagonal elements
+      !! \f$ |R_{ii}| < \varepsilon \f$), the least-squares solution is not unique.
+      !! This routine computes the **minimum-norm** B-spline coefficient vector
+      !! \f$ \tilde{c} \f$ by factoring the reduced upper trapezoidal matrix
+      !! \f$ W = [W_1 \; W_2] \f$ (Eq. 9.9):
+      !!
+      !! \f[
+      !!     \tilde{c} = W^T (W W^T)^{-1} \tilde{z}_1
+      !!     \tag{9.8}
+      !! \f]
+      !!
+      !! The factorization \f$ W = R_1 Q_1 \f$ is computed via Givens rotations
+      !! that zero out the columns of \f$ W_2 \f$ against \f$ W_1 \f$, exploiting
+      !! the band structure. The solution avoids the large oscillations that
+      !! arise from simply setting zero-rank coefficients to zero.
+      !!
+      !! @param[in,out] a     Band matrix from QR, dimension `(na, m)`. On exit,
+      !!                      contains the reduced factorization.
+      !! @param[in,out] f     Transformed RHS vector, length `n`. On exit, modified.
+      !! @param[in]     n     Number of unknowns (B-spline coefficients)
+      !! @param[in]     m     Bandwidth of `a`
+      !! @param[in]     na    Leading dimension of `a`
+      !! @param[in]     tol   Threshold \f$ \varepsilon \f$ for rank detection
+      !! @param[out]    c     Minimum-norm solution vector, length `n`
+      !! @param[out]    sq    Residual sum of squares from the rank reduction
+      !! @param[out]    rank  Detected rank \f$ r \f$ of the system
+      !! @param[in,out] aa    Work array `(n, m)`
+      !! @param[in,out] ff    Work vector, length `n`
+      !! @param[in,out] h     Work vector, length `m`
+      !!
+      !! @see Dierckx, Ch. 9, §9.1.2 (pp. 150-152), Eq. 9.7-9.10
+      pure subroutine fprank(a,f,n,m,na,tol,c,sq,rank,aa,ff,h)
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)  :: n         ! the dimension of a.
+      integer(FP_SIZE), intent(in)  :: m         ! the bandwidth of a.
+      integer(FP_SIZE), intent(in)  :: na
+      integer(FP_SIZE), intent(out) :: rank      ! the rank of matrix a.
+      real(FP_REAL), intent(in)  :: tol       ! a threshold to determine the rank of a.
+      real(FP_REAL), intent(out) :: sq        ! the contribution of reducing the rank to the sum of squared residuals.
+
+      !  ..array arguments..
+      real(FP_REAL), intent(out) :: c(n)      ! the minimum norm solution.
+      real(FP_REAL), intent(out) :: a(na,m)   ! the non-zero elements of the observation matrix after
+                                            ! triangularization by givens transformations.
+      real(FP_REAL), intent(out)  :: f(n)     ! the transformed right hand side.
+
+      real(FP_REAL), intent(inout) :: aa(n,m),ff(n),h(m) ! working arrays
+      !  ..local scalars..
+      integer     :: i,ii,ij,i1,i2,j,jj,j1,j2,j3,k,kk,m1,nl
+      real(FP_REAL) :: cos,fac,piv,sin,yi
+      real(FP_REAL) :: store,stor1,stor2,stor3
+
+      !  ..
+      m1 = m-1
+      !  the rank deficiency nl is considered to be the number of sufficient small diagonal elements of a.
+      nl = 0
+      sq = zero
+      rows: do i=1,n
+         if (a(i,1)>tol) cycle rows
+
+         ! if a sufficient small diagonal element is found, we put it to zero. the remainder of the row
+         ! corresponding to that zero diagonal element is then rotated into triangle by givens rotations .
+         ! the rank deficiency is increased by one.
+         nl = nl+1
+         if (i==n) cycle rows
+         yi     = f(i)
+         h(1:m) = [a(i,2:m),zero]
+         i1 = i+1
+         in_row: do ii=i1,n
+            i2 = min(n-ii,m1)
+            piv = h(1)
+            if (equal(piv,zero)) then
+               if (i2==0) exit in_row
+               h(1:i2) = h(2:i2+1)
+            else
+               call fpgivs(piv,a(ii,1),cos,sin)
+               call fprota(cos,sin,yi,f(ii))
+               if (i2==0) exit in_row
+               do j=1,i2
+                 j1 = j+1
+                 call fprota(cos,sin,h(j1),a(ii,j1))
+                 h(j) = h(j1)
+               end do
+            endif
+            h(i2+1) = zero
+         end do in_row
+         ! add to the sum of squared residuals the contribution of deleting
+         ! the row with small diagonal element.
+         sq = sq+yi**2
+      end do rows
+
+      !  rank denotes the rank of a.
+      rank = n-nl
+
+      !  let b denote the (rank*n) upper trapezoidal matrix which can be obtained from the (n*n) upper
+      !  triangular matrix a by deleting the rows and interchanging the columns corresponding to a zero
+      !  diagonal element. if this matrix is factorized using givens transformations as  b = (r) (u)  where
+      !    r is a (rank*rank) upper triangular matrix,
+      !    u is a (rank*n) orthonormal matrix
+      !  then the minimal least-squares solution c is given by c = b' v, where v is the solution of the
+      !  system  (r) (r)' v = g  and g denotes the vector obtained from the old right hand side f, by
+      !  removing the elements corresponding to a zero diagonal element of a.
+
+      ! initialization.
+      aa(1:rank,1:m) = zero
+
+      !  form in aa the upper triangular matrix obtained from a by removing rows and columns with zero
+      !  diagonal elements. form in ff the new right hand side by removing the elements of the old right
+      !  hand side corresponding to a deleted row.
+      ii = 0
+      make_U: do i=1,n
+         if (a(i,1)<=tol) cycle make_U
+         ii = ii+1
+         ff(ii) = f(i)
+         aa(ii,1) = a(i,1)
+         jj = ii
+         kk = 1
+         j  = i
+         j1 = min(j-1,m1)
+         if (j1/=0) then  ! probably unnecessary
+            do k=1,j1
+              j = j-1
+              if (a(j,1)>tol) then
+                 kk = kk+1
+                 jj = jj-1
+                 aa(jj,kk) = a(j,k+1)
+              endif
+            end do
+         endif
+      end do make_U
+
+      !  form successively in h the columns of a with a zero diagonal element.
+      ii = 0
+      make_h: do i=1,n
+        ii = ii+1
+        if (a(i,1)>tol) cycle make_h
+        ii = ii-1
+        if (ii==0) cycle make_h
+        jj = 1
+        j  = i
+        j1 = min(j-1,m1)
+        do k=1,j1
+           j = j-1
+           if (a(j,1)>tol) then
+             h(jj) = a(j,k+1)
+             jj = jj+1
+           endif
+        end do
+        h(jj:m) = zero
+
+        ! rotate this column into aa by givens transformations.
+        jj = ii
+        rotate_col: do i1=1,ii
+           j1 = min(jj-1,m1)
+           piv = h(1)
+           if (not_equal(piv,zero)) then
+              call fpgivs(piv,aa(jj,1),cos,sin)
+              if (j1==0) cycle make_h
+              kk = jj
+              do j2=1,j1
+                 j3 = j2+1
+                 kk = kk-1
+                 call fprota(cos,sin,h(j3),aa(kk,j3))
+                 h(j2) = h(j3)
+              end do
+           else
+              if (j1==0) cycle make_h
+              do j2=1,j1
+                j3 = j2+1
+                h(j2) = h(j3)
+              end do
+           endif
+           jj = jj-1
+           h(j3) = zero
+        end do rotate_col
+      end do make_h
+
+      !  solve the system (aa) (f1) = ff
+      ff(rank) = ff(rank)/aa(rank,1)
+      i = rank-1
+      if (i/=0) then
+         do j=2,rank
+            store = ff(i)
+            i1 = min0(j-1,m1)
+            k = i
+            do ii=1,i1
+               k = k+1
+               stor1 = ff(k)
+               stor2 = aa(i,ii+1)
+               store = store-stor1*stor2
+            end do
+            stor1 = aa(i,1)
+            ff(i) = store/stor1
+            i = i-1
+         end do
+      endif
+
+      !  solve the system  (aa)' (f2) = f1
+      ff(1) = ff(1)/aa(1,1)
+      if (rank>1) then
+          do j=2,rank
+            store = ff(j)
+            i1 = min0(j-1,m1)
+            k = j
+            do ii=1,i1
+               k = k-1
+               stor1 = ff(k)
+               stor2 = aa(k,ii+1)
+               store = store-stor1*stor2
+            end do
+            stor1 = aa(j,1)
+            ff(j) = store/stor1
+         end do
+      endif
+
+      !  premultiply f2 by the transpoze of a.
+      k = 0
+      do i=1,n
+        store = zero
+        if (a(i,1)>tol) k = k+1
+        j1 = min(i,m)
+        kk = k
+        ij = i+1
+        do j=1,j1
+           ij = ij-1
+           if (a(ij,1)>tol) then
+              stor1 = a(ij,j)
+              stor2 = ff(kk)
+              store = store+stor1*stor2
+              kk = kk-1
+           endif
+        end do
+        c(i) = store
+      end do
+
+      !  add to the sum of squared residuals the contribution of putting
+      !  to zero the small diagonal elements of matrix (a).
+      stor3 = zero
+      add_to_res: do i=1,n
+         if (a(i,1)<=tol) then
+            store = f(i)
+            i1 = min(n-i,m1)
+            if (i1>0) then
+               do j=1,i1
+                  ij = i+j
+                  stor1 = c(ij)
+                  stor2 = a(i,j+1)
+                  store = store-stor1*stor2
+               end do
+            endif
+            fac = a(i,1)*c(i)
+            stor1 = a(i,1)
+            stor2 = c(i)
+            stor1 = stor1*stor2
+            stor3 = stor3+stor1*(stor1-store-store)
+         endif
+      end do add_to_res
+
+      fac = stor3
+      sq  = sq+fac
+      return
+      end subroutine fprank
+
+
+      !> @brief Rational interpolation for the smoothing parameter search.
+      !!
+      !! Given three points \f$ (p_1, F_1) \f$, \f$ (p_2, F_2) \f$, \f$ (p_3, F_3) \f$
+      !! on the curve \f$ F(p) \f$, computes the zero of the rational interpolant:
+      !!
+      !! \f[
+      !!     R(p) = \frac{u \, p + v}{p + w}
+      !!     \tag{5.30}
+      !! \f]
+      !!
+      !! that passes through the three points. The zero \f$ \tilde{p} \f$ gives the
+      !! next estimate of the smoothing parameter \f$ p \f$ satisfying
+      !! \f$ F(p) = S \f$ during the iterative knot-placement strategy.
+      !!
+      !! When \f$ p_3 = \infty \f$ (indicated by `p3 <= 0`), the formula simplifies to:
+      !!
+      !! \f[
+      !!     \tilde{p} = \frac{p_1 (F_1 - F_3)(F_2 - S) - p_2 (F_2 - F_3)(F_1 - S)}
+      !!                      {(F_1 - F_2)(F_3 - S)}
+      !!     \tag{5.31}
+      !! \f]
+      !!
+      !! On exit, \f$ (p_1, F_1) \f$ and \f$ (p_3, F_3) \f$ are updated to bracket
+      !! the root: \f$ F_1 > 0 \f$ and \f$ F_3 < 0 \f$.
+      !!
+      !! @param[in,out] p1  First abscissa; updated to maintain \f$ F_1 > 0 \f$
+      !! @param[in,out] f1  First ordinate; updated with \f$ p_1 \f$
+      !! @param[in]     p2  Second abscissa (most recent iterate)
+      !! @param[in]     f2  Second ordinate \f$ F(p_2) - S \f$
+      !! @param[in,out] p3  Third abscissa; \f$ p_3 \leq 0 \f$ means \f$ p_3 = \infty \f$.
+      !!                    Updated to maintain \f$ F_3 < 0 \f$.
+      !! @param[in,out] f3  Third ordinate; updated with \f$ p_3 \f$
+      !! @param[out]    p   The new estimate \f$ \tilde{p} \f$
+      !!
+      !! @see Dierckx, Ch. 5, §5.2.4 (pp. 83-86), Eq. 5.30-5.32
+      elemental subroutine fprati(p1,f1,p2,f2,p3,f3,p)
+      !  ..scalar arguments..
+      real(FP_REAL), intent(inout) :: p1,f1,p3,f3
+      real(FP_REAL), intent(in)    :: p2,f2
+      real(FP_REAL), intent(out)   :: p
+
+      !  ..local scalars..
+      real(FP_REAL) :: h1,h2,h3
+      !  ..
+      if (p3>zero) then
+         h1 = f1*(f2-f3)
+         h2 = f2*(f3-f1)
+         h3 = f3*(f1-f2)
+         p = -(p1*p2*h3+p2*p3*h1+p3*p1*h2)/(p1*h1+p2*h2+p3*h3)
+      else
+         !  value of p in case p3 = infinity.
+         p = (p1*(f1-f3)*f2-p2*(f2-f3)*f1)/((f1-f2)*f3)
+      end if
+
+      !  adjust the value of p1,f1,p3 and f3 such that f1 > 0 and f3 < 0.
+      if (f2>=zero) then
+        p1 = p2
+        f1 = f2
+      else
+        p3 = p2
+        f3 = f2
+      endif
+
+      return
+      end subroutine fprati
+
+
+      !> @brief Knot determination + p-iteration for `dims`-dimensional gridded fits.
+      !!
+      !! Outer iteration loop for fitting a smoothing spline surface on a
+      !! rectangular grid \f$ \{x_i\} \times \{y_j\} \f$. Manages the knot
+      !! selection strategy (alternating between axis directions based on residuals)
+      !! and the smoothing-parameter search, delegating the grid computation to
+      !! fpgrre at each step. At `dims=2` this is bit-for-bit identical to fpregr:
+      !! the paired per-axis state becomes `dims`-length arrays and the knot-init /
+      !! knot-placement passes become runtime do-loops over the axes, while the binary
+      !! knot-direction arbiter and the scalar p-iteration root find for f(p)=s are
+      !! kept literal-2 until the dims>2 step.
+      !!
+      !! WORKSPACE: per the no-allocation rule, all scratch (`sp,a,b,right,q,fpint,nr,
+      !! nrdat`) is supplied by the caller (regrid carves it from the user wrk/iwrk)
+      !! and received here as assumed-shape inout views; the persistent fit-state
+      !! (`fp0,fpold,reduc,lastdi,nplus`) is passed explicitly rather than hidden in
+      !! wrk offsets.
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue
+      !! @param[in]     dims    Number of axes (domain dimension)
+      !! @param[in]     xg      Per-axis grid values; column \f$ d \f$ is `xg(1:m(d),d)`
+      !! @param[in]     m       Number of grid points per axis, `m(dims)`
+      !! @param[in]     z       Data values, flat row-major `z(*)` (passed through to fpgrre)
+      !! @param[in]     lo      Per-axis lower boundary (orig xb,yb)
+      !! @param[in]     hi      Per-axis upper boundary (orig xe,ye)
+      !! @param[in]     k       Degree per axis, `k(dims)`
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nest    Max knots per axis (orig nxest,nyest)
+      !! @param[in]     tol     Smoothing condition tolerance
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     nc      Length of coefficient array
+      !! @param[in,out] n       Number of knots per axis (orig nx,ny)
+      !! @param[in,out] t       Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)` (orig tx,ty)
+      !! @param[in,out] c       B-spline coefficients, length `nc`
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fp0     Initial residual
+      !! @param[in,out] fpold   Previous residual
+      !! @param[in,out] reduc   Per-axis residual reduction (orig reducx,reducy)
+      !! @param[in,out] lastdi  Last direction of knot addition
+      !! @param[in,out] nplus   Per-axis number of knots to add (orig nplusx,nplusy)
+      !! @param[in,out] fpint   Residual sums per knot interval, per axis (orig fpintx,fpinty)
+      !! @param[in,out] nr      Per-axis knot interval indices (orig nrx,nry)
+      !! @param[in,out] nrdat   Per-axis interior data counts per interval (orig nrdatx,nrdaty)
+      !! @param[in,out] sp      Work: per-axis observation matrices
+      !! @param[in,out] right   Work: RHS vector
+      !! @param[in,out] q       Work: RHS matrix
+      !! @param[in,out] a       Work: per-axis band matrices
+      !! @param[in,out] b       Work: per-axis discontinuity matrices
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see fpregr, fpgrre, Dierckx Ch. 10 §10.2 (pp. 170-172) Eq. 10.4-10.8; todo/fitpack_nd_grids.md (slice 1, §8 part C)
+      pure subroutine fpregr(iopt,dims,xg,m,z,lo,hi,k,s,nest,tol,maxit,nc, &
+                                n,t,c,fp,fp0,fpold,reduc,lastdi,nplus, &
+                                fpint,nr,nrdat,sp,right,q,a,b,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: iopt
+      integer(FP_DIM),  intent(in)    :: dims
+      real(FP_REAL),    intent(in)    :: s,tol
+      integer(FP_SIZE), intent(in)    :: nc,maxit
+      real(FP_REAL),    intent(inout) :: c(nc),fp,fp0,fpold
+      integer(FP_SIZE), intent(inout) :: lastdi
+      integer(FP_FLAG), intent(inout) :: ier
+      !  ..array arguments (sizes)..
+      integer(FP_SIZE), intent(in)    :: m(dims),k(dims),nest(dims)
+      real(FP_REAL),    intent(in)    :: lo(dims),hi(dims)
+      integer(FP_SIZE), intent(inout) :: n(dims),nplus(dims)
+      real(FP_REAL),    intent(inout) :: reduc(dims)
+      !  ..array arguments (data + caller-supplied workspace views)..
+      !  z(*): flat row-major gridded data, passed straight to fpgrre; fpregr never reads it.
+      real(FP_REAL),    intent(in)               :: z(*)
+      real(FP_REAL),    intent(in),    contiguous :: xg(:,:)
+      real(FP_REAL),    intent(inout), contiguous :: t(:,:),fpint(:,:),sp(:,:,:),right(:),q(:),a(:,:,:),b(:,:,:)
+      integer(FP_SIZE), intent(inout), contiguous :: nr(:,:),nrdat(:,:)
+      !  ..local scalars..
+      real(FP_REAL) :: acc,fpms,f1,f2,f3,p,p1,p2,p3,rn
+      integer(FP_DIM)  :: d
+      integer(FP_SIZE) :: i,iter,j,k3,l,mk1,mpm,ncof,npl1,mm,mynx
+      logical(FP_BOOL) :: check1,check3,success
+      !  ..per-axis arrays..
+      integer(FP_SIZE) :: ifs(dims),ifb(dims),k1(dims),k2(dims),nk1(dims),nmax(dims),ne(dims), &
+                          nmin(dims),nrint(dims),npl(dims)
+
+      ! per-axis order extents and scratch sizes
+      k1   = k+1
+      k2   = k+2
+      mm   = size(right,kind=FP_SIZE)
+      mynx = size(q,kind=FP_SIZE)
+
+      ! acc denotes the absolute tolerance for the root of f(p)=s.
+      acc = tol*s
+
+      ! nmax: number of knots for interpolation; ne: max allowed; nmin: polynomial (no interior).
+      nmax = m+k1
+      ne   = min(nmax,nest)
+      nmin = 2*k1
+
+      ! ***** part 1: determination of the number of knots and their position. *****
+      bootstrap: if (iopt>=0) then
+
+          interpolating: if (s<=zero) then
+
+              ! if s = 0, s(x,..) is an interpolating spline: nmax knots per axis.
+              n = nmax
+              if (any(n>nest)) then
+                 ier = FITPACK_INSUFFICIENT_STORAGE
+                 return
+              end if
+
+              ! interior knots (per axis)
+              do d=1,dims
+                 mk1 = m(d)-k1(d)
+                 if (mk1/=0) then
+                    k3 = k(d)/2
+                    i  = k1(d)+1
+                    j  = k3+2
+                    do l=1,mk1
+                       t(i,d) = merge( xg(j,d) , (xg(j,d)+xg(j-1,d))*half , k3*2/=k(d))
+                       i = i+1
+                       j = j+1
+                    end do
+                 end if
+              end do
+
+          else interpolating
+
+              !  if s > 0 our initial choice of knots depends on the value of iopt.
+              use_last_call: if (iopt/=0 .and. fp0>s) then
+
+                  !  iopt=1 and fp0>s: re-derive the data counts per knot interval, per axis.
+                  do d=1,dims
+                     l = k2(d)
+                     j = 1
+                     nrdat(1,d) = 0
+                     mpm = m(d)-1
+                     do i=2,mpm
+                        nrdat(j,d) = nrdat(j,d)+1
+                        if (xg(i,d)>=t(l,d)) then
+                            nrdat(j,d) = nrdat(j,d)-1
+                            l = l+1
+                            j = j+1
+                            nrdat(j,d) = 0
+                        endif
+                     end do
+                  end do
+
+              else use_last_call
+
+                  !  iopt=0, or iopt=1 and s>=fp0: start from the least-squares polynomial.
+                  n = nmin
+                  nrdat(1,:dims) = m-2
+                  lastdi = KNOT_DIM_NONE
+                  nplus  = 0
+                  fp0    = zero
+                  fpold  = zero
+                  reduc  = zero
+
+              endif use_last_call
+
+          endif interpolating
+
+      endif bootstrap
+
+      ! mpm = sum(m) is a safe upper bound on the number of trials.
+      mpm = sum(m)
+      ifs = 0
+      ifb = 0
+      p   = -one
+
+      !  main loop for the different sets of knots.
+      iter = 0
+      main_loop: do while (iter<=mpm)
+
+          iter = iter+1
+
+          if (all(n==nmin)) ier = FITPACK_LEASTSQUARES_OK
+
+          ! knot intervals, coefficient count, and the boundary (clamped) knots, per axis.
+          nrint = n-nmin+1
+          nk1   = n-k1
+          ncof  = product(nk1)
+          forall (d=1:dims)
+             t(1:k1(d),d)        = lo(d)
+             t(n(d)-k(d):n(d),d) = hi(d)
+          end forall
+
+          ! least-squares spline + per-interval residuals fpint(:,d) and total fp.
+          call fpgrre(dims,ifs,ifb,xg,m,z,k,t,n,p,c,nc,fp,fpint,mm,mynx,sp,right,q,a,b,nr)
+
+          if (ier==FITPACK_LEASTSQUARES_OK) fp0 = fp
+
+          ! SUCCESS! the least-squares spline is an acceptable solution.
+          fpms = fp-s
+          if (iopt<0 .or. abs(fpms)<acc) return
+
+          ! if f(p=inf) < s, we accept the choice of knots.
+          if (fpms<zero) exit main_loop
+
+          ! if all axes are at nmax, sinf is an interpolating spline.
+          if (all(n==nmax)) then
+             ier = FITPACK_INTERPOLATING_OK
+             fp = zero
+             return
+          end if
+
+          ! if all axes are at their storage limit we cannot add more knots.
+          if (all(n==ne)) then
+              ier = FITPACK_INSUFFICIENT_STORAGE
+              return
+          end if
+
+          ier = FITPACK_OK
+
+          ! adjust reduc for the axis of the last knot addition (lastdi is the dimension index).
+          if (lastdi/=KNOT_DIM_NONE) reduc(lastdi) = fpold-fp
+
+          fpold = fp
+
+          ! number of knots to add per axis.
+          do d=1,dims
+             npl(d) = 1
+             if (n(d)/=nmin(d)) then
+                 npl1 = nplus(d)*2
+                 rn   = nplus(d)
+                 if (reduc(d)>acc) npl1 = fp_knots_to_add(rn,fpms,reduc(d))
+                 npl(d) = min(nplus(d)*2,max(npl1,nplus(d)/2,1))
+             endif
+          end do
+
+         ! choose the axis for the next knots: the uncapped axis with the smallest pending count
+         ! npl(d) (ties to the highest index). lastdi then drives the placement below.
+         lastdi = new_knot_dimension_nd(dims,n,npl,ne)
+
+         ! add knots along the chosen axis (lastdi in 1..dims).
+         d        = lastdi
+         nplus(d) = npl(d)
+         ifs(d)   = 0
+         add_knots: do l=1,nplus(d)
+            call fpknot(xg(1:m(d),d),m(d),t(1:nest(d),d),n(d),fpint(1:nest(d),d), &
+                        nrdat(1:nest(d),d),nrint(d),nest(d),IONE)
+            if (n(d)==ne(d)) exit add_knots
+         end do add_knots
+
+      end do main_loop
+
+      ! test whether the least-squares polynomial is the solution.
+      if (ier==FITPACK_LEASTSQUARES_OK) return
+
+      ! ***** part 2: determination of the smoothing spline (root of f(p)=s; scalar). *****
+      p1   = zero
+      f1   = fp0-s
+      p3   = -one
+      f3   = fpms
+      p    = one
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+
+      root_iterations: do iter = 1,maxit
+
+          call fpgrre(dims,ifs,ifb,xg,m,z,k,t,n,p,c,nc,fp,fpint,mm,mynx,sp,right,q,a,b,nr)
+
+          fpms = fp-s; if (abs(fpms)<acc) return
+
+          call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+          if (.not.success) then
+             ier = FITPACK_S_TOO_SMALL
+             return
+          end if
+
+      end do root_iterations
+
+      ! Maximum number of iterations reached.
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fpregr
+
+      !> @brief Choose which dimension receives the next knot during bivariate fitting.
+      !!
+      !! Selects whether to add a knot in dimension 1 or 2, balancing knot
+      !! insertion across dimensions. Prefers dimension 2 when it has fewer
+      !! added knots, unless dimension 1 is at its maximum or no knot has
+      !! been added yet.
+      !!
+      !! @param[in] n1     Current number of knots in dimension 1
+      !! @param[in] n1add  Number of knots added to dimension 1 this iteration
+      !! @param[in] n1max  Maximum allowed knots in dimension 1
+      !! @param[in] n2     Current number of knots in dimension 2
+      !! @param[in] n2add  Number of knots added to dimension 2 this iteration
+      !! @param[in] n2max  Maximum allowed knots in dimension 2
+      !! @param[in] last   Last dimension a knot was added to (`KNOT_DIM_1`, `KNOT_DIM_2`,
+      !!                   or `KNOT_DIM_NONE`)
+      !!
+      !! @return `KNOT_DIM_1` or `KNOT_DIM_2`
+      elemental integer function new_knot_dimension(n1,n1add,n1max,n2,n2add,n2max,last) result(dir)
+         integer(FP_SIZE), intent(in) :: n1,n2       ! Number of knots in both dimensions
+         integer(FP_SIZE), intent(in) :: n1add,n2add ! Number of knots ADDED in either dimension
+         integer(FP_SIZE), intent(in) :: n1max,n2max ! Max number of knots in either dimension
+         integer(FP_SIZE), intent(in) :: last        ! Last dimension used
+
+         if ( n2<n2max .and. ( n2add<=n1add .or. n1>=n1max .or. last==KNOT_DIM_NONE ) )then
+            dir = KNOT_DIM_2
+         else
+            dir = KNOT_DIM_1
+         end if
+
+      end function new_knot_dimension
+
+      !> @brief Choose which axis gets the next knots (N-D form of new_knot_dimension).
+      !!
+      !! Among the uncapped axes (n(d)<ne(d)) picks the one with the smallest pending knot count
+      !! npl(d); ties resolve to the highest axis index. At dims=2 this is bit-for-bit identical to
+      !! new_knot_dimension. The caller guarantees at least one uncapped axis, so dir ends in 1..dims.
+      !!
+      !! @param[in] dims  Number of axes
+      !! @param[in] n     Current knot count per axis
+      !! @param[in] npl   Pending knots to add per axis this iteration
+      !! @param[in] ne    Knot cap per axis (min(nmax,nest))
+      !! @return Dimension index (1..dims) of the axis to refine
+      pure integer(FP_SIZE) function new_knot_dimension_nd(dims,n,npl,ne) result(dir)
+         integer(FP_DIM),  intent(in) :: dims
+         integer(FP_SIZE), intent(in) :: n(dims),npl(dims),ne(dims)
+         integer(FP_DIM) :: d
+
+         dir = KNOT_DIM_NONE
+         do d=1,dims
+            if (n(d)>=ne(d)) cycle              ! axis d is at its cap: skip
+            if (dir==KNOT_DIM_NONE) then
+               dir = d                          ! first uncapped axis
+            elseif (npl(d)<=npl(dir)) then      ! '<=' makes ties favor the higher index
+               dir = d
+            end if
+         end do
+
+      end function new_knot_dimension_nd
+
+      !> @brief Apply a Givens plane rotation to two scalars.
+      !!
+      !! Given the cosine \f$ c \f$ and sine \f$ s \f$ of a Givens rotation (as
+      !! computed by fpgivs), transforms a pair of values \f$ (a, b) \f$:
+      !!
+      !! \f[
+      !!     a' = c \, a - s \, b, \qquad
+      !!     b' = s \, a + c \, b
+      !!     \tag{4.15}
+      !! \f]
+      !!
+      !! This is used to propagate each Givens rotation through the remaining
+      !! columns of the observation matrix and the right-hand side vector
+      !! during QR factorization.
+      !!
+      !! @param[in]     cos  Cosine of the rotation angle
+      !! @param[in]     sin  Sine of the rotation angle
+      !! @param[in,out] a    First element; replaced by \f$ c \, a - s \, b \f$
+      !! @param[in,out] b    Second element; replaced by \f$ s \, a + c \, b \f$
+      !!
+      !! @see Dierckx, Ch. 4, §4.1.2 (pp. 55-58), Eq. 4.15
+      elemental subroutine fprota(cos,sin,a,b)
+
+          !  ..scalar arguments..
+          real(FP_REAL), intent(in)    :: cos,sin
+          real(FP_REAL), intent(inout) :: a,b
+
+          ! ..local scalars..
+          real(FP_REAL) :: stor1,stor2
+
+          !  ..
+          stor1 = a
+          stor2 = b
+          b = cos*stor2+sin*stor1
+          a = cos*stor1-sin*stor2
+          return
+
+      end subroutine fprota
+
+
+      !> @brief Convert constrained polar spline coefficients to standard form.
+      !!
+      !! Transforms the coefficients of a constrained bicubic spline (as
+      !! computed by fppola with origin-continuity constraints) into the
+      !! standard B-spline coefficient representation. The constrained form
+      !! encodes the origin conditions via cosine-weighted combinations;
+      !! this routine expands them into independent coefficients.
+      !!
+      !! @param[in]     nu     Number of radial knots
+      !! @param[in]     nv     Number of angular knots
+      !! @param[in]     if1    Origin constraint type (position)
+      !! @param[in]     if2    Origin constraint type (derivative)
+      !! @param[in]     cosi   Cosine integral values
+      !! @param[in]     ratio  Knot ratio for origin constraint
+      !! @param[in,out] c      Constrained coefficients on entry; work on exit
+      !! @param[in,out] f      Standard B-spline coefficients on exit
+      !! @param[in]     ncoff  Number of coefficients
+      !!
+      !! @see Dierckx, Ch. 11, §11.1 (pp. 197-205), Eq. 11.3-11.5
+      !! @see fppola — polar fitting; fprpsp — spherical variant
+      pure subroutine fprppo(nu,nv,if1,if2,cosi,ratio,c,f,ncoff)
+
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in) :: ratio
+      integer(FP_SIZE), intent(in) :: if1,if2,nu,nv,ncoff
+      !  ..array arguments
+      real(FP_REAL), intent(inout) :: c(ncoff),f(ncoff)
+      real(FP_REAL), intent(in) :: cosi(5,nv)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,iopt,ii,j,k,l,nu4,nvv
+      !  ..
+      nu4  = nu-4
+      nvv  = nv-7
+      iopt = if1+1
+      f    = zero
+      i    = 0
+      j    = 0
+
+      main_loop: do l=1,nu4
+         ii = i
+         if (l==nu4 .and. if2/=0) then
+
+            exit main_loop
+
+         elseif (l>iopt) then
+
+             do k=1,nvv
+                i = i+1
+                j = j+1
+                f(i) = c(j)
+             end do
+
+         elseif (l==1) then
+
+             do k=1,nvv
+                i = i+1
+                f(i) = c(1)
+             end do
+             j = 1
+
+         elseif (l==2) then
+
+             do k=1,nvv
+                i = i+1
+                f(i) = c(1)+c(2)*cosi(1,k)+c(3)*cosi(2,k)
+             end do
+             j = 3
+
+
+         elseif (l==3) then
+
+             do k=1,nvv
+                i = i+1
+                f(i) = c(1)+ratio*(c(2)*cosi(1,k)+c(3)*cosi(2,k))+ &
+                       c(4)*cosi(3,k)+c(5)*cosi(4,k)+c(6)*cosi(5,k)
+             end do
+             j = 6
+
+         end if
+
+         do k=1,3
+            ii   = ii+1
+            i    = i+1
+            f(i) = f(ii)
+         end do
+
+      end do main_loop
+
+      c = f
+
+      return
+      end subroutine fprppo
+
+      !> @brief Convert constrained spherical spline coefficients to standard form.
+      !!
+      !! Transforms the coefficients of a constrained bicubic spline (as
+      !! computed by fpsphe with pole-continuity constraints) into the
+      !! standard B-spline coefficient representation. The constrained form
+      !! encodes pole conditions via cosine/sine-weighted combinations at
+      !! \f$ \theta = 0 \f$ and \f$ \theta = \pi \f$.
+      !!
+      !! @param[in]     nt     Number of \f$ \theta \f$-knots
+      !! @param[in]     np     Number of \f$ \phi \f$-knots
+      !! @param[in]     co     Cosine values for pole constraints
+      !! @param[in]     si     Sine values for pole constraints
+      !! @param[in,out] c      Constrained coefficients on entry; work on exit
+      !! @param[in,out] f      Standard B-spline coefficients on exit
+      !! @param[in]     ncoff  Number of coefficients
+      !!
+      !! @see Dierckx, Ch. 11, §11.2 (pp. 205-213), Eq. 11.14-11.16
+      !! @see fpsphe — spherical fitting; fprppo — polar variant
+      pure subroutine fprpsp(nt,np,co,si,c,f,ncoff)
+          !  ..
+          !  ..scalar arguments
+          integer(FP_SIZE), intent(in)    :: nt,np,ncoff
+
+          !  ..array arguments
+          real(FP_REAL), intent(in)    :: co(np),si(np)
+          real(FP_REAL), intent(inout) :: c(ncoff),f(ncoff) ! f is a working array
+
+          !  ..local scalars
+          real(FP_REAL) :: cn,c1,c2,c3
+          integer(FP_SIZE) :: i,ii,j,k,l,ncof,npp,np4,nt4
+          !  ..
+          nt4 = nt-4
+          np4 = np-4
+          npp = np4-3
+          ncof = 6+npp*(nt4-4)
+          c1 = c(1)
+          cn = c(ncof)
+          f(1:np4)             = c1
+          f(ncoff-np4+1:ncoff) = cn
+
+          i = np4
+          j = 1
+          do l=3,nt4
+             ii = i
+             if (l==3 .or. l==nt4) then
+                if (l==nt4) c1 = cn
+                c2 = c(j+1)
+                c3 = c(j+2)
+                j = j+2
+                do k=1,npp
+                   i = i+1
+                   f(i) = c1+c2*co(k)+c3*si(k)
+                end do
+             else
+                do k=1,npp
+                   i = i+1
+                   j = j+1
+                   f(i) = c(j)
+                end do
+             endif
+
+             do k=1,3
+                ii = ii+1
+                i = i+1
+                f(i) = f(ii)
+             end do
+          end do
+
+          c(1:ncoff) = f(1:ncoff)
+
+      return
+      end subroutine fprpsp
+
+
+      !> @brief Fetch and advance to the next branch in the constraint-set tree.
+      !!
+      !! Extracts the constraint indices of the branch ending at terminal node
+      !! `merk` (length `nbind`) into the array `ibind(1:nbind)`. Then advances
+      !! `merk` to point to the next branch of the same length, or sets
+      !! `merk = 1` if no further branch exists.
+      !!
+      !! Used by the Theil-Van de Panne procedure (§7.2) to enumerate candidate
+      !! active-constraint sets level by level.
+      !!
+      !! @param[in]     maxtr  Size of the tree arrays
+      !! @param[in]     up     Parent pointers
+      !! @param[in]     left   Left-child pointers
+      !! @param[in]     right  Right-child pointers
+      !! @param[in]     info   Constraint index stored at each node
+      !! @param[in,out] merk   On entry, terminal node of the branch to fetch.
+      !!                       On exit, terminal node of the next branch of
+      !!                       length `nbind`, or 1 if none.
+      !! @param[out]    ibind  Constraint indices of the fetched branch, length `nbind`
+      !! @param[in]     nbind  Required branch length
+      !!
+      !! @see Dierckx, Ch. 7, §7.2.4 (pp. 125-130)
+      !! @see fpadno, fpdeno, fpfrno — companion tree operations
+      pure subroutine fpseno(maxtr,up,left,right,info,merk,ibind,nbind)
+
+          !  ..scalar arguments..
+          integer(FP_SIZE), intent(in)    :: maxtr   ! Tree array sizes
+          integer(FP_SIZE), intent(inout) :: merk    ! (in) terminal node of the branch
+          integer(FP_SIZE), intent(in)    :: nbind
+          !  ..array arguments..
+          integer(FP_SIZE), intent(in)    :: up(maxtr),left(maxtr),right(maxtr),info(maxtr)
+          integer(FP_SIZE), intent(out)   :: ibind(nbind)
+          !  ..scalar arguments..
+          integer(FP_SIZE) :: i,j,k
+          !  ..
+          k = merk
+          j = nbind
+          do i=1,nbind
+             ibind(j) = info(k)
+             k = up(k)
+             j = j-1
+          end do
+
+          do
+              k = right(merk)
+              if (k/=0) exit
+              merk = up(merk)
+              if (merk<=1) return
+          end do
+
+          do
+              merk = k
+              k = left(merk)
+              if (k==0) exit
+          end do
+
+      end subroutine fpseno
+
+
+      !> @brief Driver for spherical grid smoothing spline with knot selection.
+      !!
+      !! Outer iteration loop for fitting a smoothing spline on a spherical
+      !! grid. Manages knot selection in \f$ \theta \f$ and \f$ \phi \f$
+      !! directions and the smoothing-parameter search, delegating grid
+      !! computation to fpopsp. Handles pole constraints at both
+      !! \f$ \theta = 0 \f$ and \f$ \theta = \pi \f$.
+      !!
+      !! @param[in]     iopt    Fitting options
+      !! @param[in]     ider    Derivative specification flags
+      !! @param[in]     u       Co-latitude grid \f$ \theta \f$, length `mu`
+      !! @param[in]     mu      Number of \f$ \theta \f$-points
+      !! @param[in]     v       Longitude grid \f$ \phi \f$, length `mv`
+      !! @param[in]     mv      Number of \f$ \phi \f$-points
+      !! @param[in]     r       Data values, length `mr`
+      !! @param[in]     mr      Length of `r`
+      !! @param[in]     r0      North-pole value
+      !! @param[in]     r1      South-pole value
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nuest   Max \f$ \theta \f$-knots
+      !! @param[in]     nvest   Max \f$ \phi \f$-knots
+      !! @param[in]     tol     Smoothing condition tolerance
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     nc      Length of coefficient array
+      !! @param[in,out] nu      Number of \f$ \theta \f$-knots
+      !! @param[in,out] tu      \f$ \theta \f$-knot vector
+      !! @param[in,out] nv      Number of \f$ \phi \f$-knots
+      !! @param[in,out] tv      \f$ \phi \f$-knot vector
+      !! @param[in,out] c       B-spline coefficients
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fp0     Initial residual
+      !! @param[in,out] fpold   Previous residual
+      !! @param[in,out] reducu  Residual reduction in \f$ \theta \f$
+      !! @param[in,out] reducv  Residual reduction in \f$ \phi \f$
+      !! @param[in,out] fpintu  Residual sums per \f$ \theta \f$-interval
+      !! @param[in,out] fpintv  Residual sums per \f$ \phi \f$-interval
+      !! @param[in,out] dr      Pole derivative parameters
+      !! @param[in]     step    Search step for pole parameter optimization
+      !! @param[in,out] lastdi  Last direction of knot addition
+      !! @param[in,out] nplusu  Number of \f$ \theta \f$-knots to add
+      !! @param[in,out] nplusv  Number of \f$ \phi \f$-knots to add
+      !! @param[in,out] lastu0  Last north-pole knot change flag
+      !! @param[in,out] lastu1  Last south-pole knot change flag
+      !! @param[in,out] nru     \f$ \theta \f$-knot interval indices
+      !! @param[in,out] nrv     \f$ \phi \f$-knot interval indices
+      !! @param[in,out] nrdatu  Interior data counts per \f$ \theta \f$-interval
+      !! @param[in,out] nrdatv  Interior data counts per \f$ \phi \f$-interval
+      !! @param[in,out] wrk     Work array
+      !! @param[in]     lwrk    Length of `wrk`
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 11, §11.2 (pp. 205-213)
+      !! @see fpopsp — grid computation; fpsphe — scattered spherical fitting
+      pure subroutine fpspgr(iopt,ider,u,mu,v,mv,r,mr,r0,r1,s, &
+                             nuest,nvest,tol,maxit,nc,nu,tu,nv,tv,c,fp,fp0,fpold,reducu, &
+                             reducv,fpintu,fpintv,dr,step,lastdi,nplusu,nplusv,lastu0, &
+                             lastu1,nru,nrv,nrdatu,nrdatv,wrk,lwrk,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: mu,mv,mr,nuest,nvest,maxit,nc,lwrk
+      integer(FP_SIZE), intent(inout) :: nu,nv,lastdi,nplusu,nplusv,lastu0,lastu1
+      integer(FP_FLAG), intent(out)   :: ier
+      real(FP_REAL), intent(in)    :: r0,r1,s,tol
+      real(FP_REAL), intent(inout) :: fp,fp0,fpold,reducu,reducv
+      !  ..array arguments..
+      integer(FP_SIZE), intent(in)    :: iopt(3),ider(4)
+      integer(FP_SIZE), intent(inout) :: nru(mu),nrv(mv),nrdatu(nuest),nrdatv(nvest)
+      real(FP_REAL), intent(in)    :: u(mu),v(mv),r(mr)
+      real(FP_REAL), intent(inout) :: fpintu(nuest),fpintv(nvest),dr(6),tu(nuest),tv(nvest),c(nc),&
+                                     wrk(lwrk),step(2)
+      !  ..local scalars..
+      real(FP_REAL) :: acc,fpms,f1,f2,f3,p,p1,p2,p3,vb,ve,rmax,rmin,rn
+      integer(FP_SIZE) :: i,ifbu,ifbv,ifsu,ifsv,istart,iter,i1,i2,j,ju,ktu,l,l1,l2,l3,l4,mpm,mumin, &
+                 mu0,mu1,nn,nplu,nplv,npl1,nrintu,nrintv,nue,numax,nve,nvmax
+      !  ..local arrays..
+      logical(FP_BOOL) :: check1,check3,success
+      integer(FP_SIZE) :: idd(4)
+      real(FP_REAL) :: drr(6)
+
+      !   set constants
+      real(FP_REAL), parameter :: period = pi2
+
+      !   initialization
+      ier   = FITPACK_OK
+      ifsu  = 0
+      ifsv  = 0
+      ifbu  = 0
+      ifbv  = 0
+      nplu  = 0
+      nplv  = 0
+      p     = -one
+      mumin = 4 - merge(1,0,ider(1)>=0) - merge(1,0,iopt(2)==1 .and. ider(2)==1) &
+                - merge(1,0,ider(3)>=0) - merge(1,0,iopt(3)==1 .and. ider(4)==1)
+      if (mumin==0) mumin = 1
+
+      vb = v(1)
+      ve = vb+period
+
+      ! acc denotes the absolute tolerance for the root of f(p)=s.
+      acc = tol*s
+
+      ! numax and nvmax denote the number of knots needed for interpolation.
+      numax = mu+6+iopt(2)+iopt(3)
+      nvmax = mv+7
+      nue   = min(numax,nuest)
+      nve   = min(nvmax,nvest)
+      
+      ! initialize wrk(1:4)
+      if (iopt(1)==0) then         
+        fp0       = zero
+        fpold     = zero
+        reducu    = zero
+        reducv    = zero   
+      endif  
+
+      ! *****
+      ! part 1: determination of the number of knots and their position.
+      ! *****
+      !  given a set of knots we compute the least-squares spline sinf(u,v) and the corresponding sum of
+      !  squared residuals fp = f(p=inf).
+      !  if iopt(1)=-1  sinf(u,v) is the requested approximation.
+      !  if iopt(1)>=0  we check whether we can accept the knots:
+      !    if fp <= s we will continue with the current set of knots.
+      !    if fp >  s we will increase the number of knots and compute the corresponding least-squares spline
+      !               until finally fp <= s.
+      !    the initial choice of knots depends on the value of s and iopt.
+      !    if s=0 we have spline interpolation; in that case the number of knots in the u-direction equals
+      !     nu=numax=mu+6+iopt(2)+iopt(3) and in the v-direction nv=nvmax=mv+7.
+      !    if s>0 and
+      !      iopt(1)=0 we first compute the least-squares polynomial,i.e. a spline without interior knots:
+      !                nu=8 ; nv=8.
+      !      iopt(1)=1 we start with the set of knots found at the last call of the routine, except for the
+      !                case that s > fp0; then we compute the least-squares polynomial directly.
+      ! *****
+
+      if (iopt(1)>=0) then
+
+          if (s<=zero) then
+
+              !  if s = 0, s(u,v) is an interpolating spline.
+              nu = numax
+              nv = nvmax
+
+              !  test whether the required storage space exceeds the available one.
+              if (nu>nuest .or. nv>nvest) then
+                 ier = FITPACK_INSUFFICIENT_STORAGE
+                 return
+              end if
+
+              !  find the position of the knots in the v-direction.
+              tv(1:mv+7) = [v(mv-2:mv)-period,v(1:mv),ve,v(2:4)+period]
+
+              !  if not all the derivative values g(i,j) are given, we will first
+              !  estimate these values by computing a least-squares spline
+              idd = ider
+              if(idd(1)==0) idd(1) = 1
+              if(idd(1)>0)  dr(1) = r0
+              if(idd(3)==0) idd(3) = 1
+              if(idd(3)>0)  dr(4) = r1
+              if(ider(1)<0 .or. (iopt(2)/=0 .and. ider(2)==0) .or. &
+                 ider(3)<0 .or. (iopt(3)/=0 .and. ider(4)==0)) then
+
+                  ! we set up the knots in the u-direction for computing the least-squares spline.
+                  i1 = 3
+                  i2 = mu-2
+                  nu = 4
+                  do i=1,mu
+                     if (i1>i2) exit
+                     nu = nu+1
+                     tu(nu) = u(i1)
+                     i1 = i1+2
+                  end do
+                  do i=1,4
+                     tu(i) = zero
+                     nu = nu+1
+                     tu(nu) = pi
+                  end do
+
+                  ! we compute the least-squares spline for estimating the derivatives.
+                  call fpopsp(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,r,mr,r0,r1,dr,iopt,idd,         &
+                              tu,nu,tv,nv,nuest,nvest,p,step,c,nc,fp,fpintu,fpintv,nru,nrv, &
+                              wrk,lwrk)
+                  ifsu = 0
+
+              end if
+
+              ! if all the derivatives at the origin are known, we compute the
+              ! interpolating spline.
+              ! we set up the knots in the u-direction, needed for interpolation.
+              nn = numax-8
+              if (nn/=0) then
+                  ju = 2-iopt(2)
+                  do l=1,nn
+                    tu(l+4) = u(ju)
+                    ju = ju+1
+                  end do
+                  nu = numax
+                  l  = nu
+                  do i=1,4
+                     tu(i) = zero
+                     tu(l) = pi
+                     l = l-1
+                  end do
+              endif
+
+              ! we compute the interpolating spline.
+              call fpopsp(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,r,mr,r0,r1,dr,iopt,idd,         &
+                          tu,nu,tv,nv,nuest,nvest,p,step,c,nc,fp,fpintu,fpintv,nru,nrv, &
+                          wrk,lwrk)
+                          
+              ier = FITPACK_INTERPOLATING_OK
+              fp  = zero
+              return
+
+          else
+
+              !  if s>0 our initial choice of knots depends on the value of iopt(1).
+              ier = FITPACK_OK
+
+              if (iopt(1)/=0) step = -step
+
+              if (fp0<=s .or. iopt(1)==0) then
+
+                  !  if iopt(1)=0 or iopt(1)=1 and fp0 <= s,we start computing the least-
+                  !  squares polynomial (which is a spline without interior knots).
+                  ier       = FITPACK_LEASTSQUARES_OK
+                  idd       = [ider(1),IONE,ider(3),IONE]
+                  nu        = 8
+                  nv        = 8
+                  nrdatu(1) = mu-2+iopt(2)+iopt(3)
+                  nrdatv(1) = mv-1
+                  lastdi    = KNOT_DIM_NONE
+                  nplusu    = 0
+                  nplusv    = 0
+                  fp0       = zero
+                  fpold     = zero
+                  reducu    = zero
+                  reducv    = zero
+                  lastu0    = 0     ! force step(1)/step(2) (rmax-rmin per pole) to be computed on
+                  lastu1    = 0     ! the first pass; step and the last* caches are inout persistent
+                  step      = zero  ! state, uninitialized on a fresh fit (F77 relied on zeroed statics)
+
+              else
+
+                  !  if iopt(1)=1 and fp0 > s we start computing the least-squares spline
+                  !  according to the set of knots found at the last call of the routine.
+                  !  we determine the number of grid coordinates u(i) inside each knot
+                  !  interval (tu(l),tu(l+1)).
+                  l = 5
+                  j = 1
+                  nrdatu(1) = 0
+                  mu0 = 2-iopt(2)
+                  mu1 = mu-1+iopt(3)
+                  do i=mu0,mu1
+                    nrdatu(j) = nrdatu(j)+1
+                    if (u(i)>=tu(l)) then
+                        nrdatu(j) = nrdatu(j)-1
+                        l = l+1
+                        j = j+1
+                        nrdatu(j) = 0
+                    endif
+                  end do
+                  !  we determine the number of grid coordinates v(i) inside each knot
+                  !  interval (tv(l),tv(l+1)).
+                  l = 5
+                  j = 1
+                  nrdatv(1) = 0
+                  do i=2,mv
+                    nrdatv(j) = nrdatv(j)+1
+                    if (v(i)>=tv(l)) then
+                       nrdatv(j) = nrdatv(j)-1
+                       l = l+1
+                       j = j+1
+                       nrdatv(j) = 0
+                    endif
+                  end do
+                  idd = ider
+
+              endif
+
+          endif
+
+      endif
+
+      !  main loop for the different sets of knots.mpm=mu+mv is a safe upper
+      !  bound for the number of iterations
+      mpm = mu+mv
+      iterations: do iter=1,mpm
+         ! find nrintu (nrintv) which is the number of knot intervals in the
+         ! u-direction (v-direction).
+         nrintu = nu-7
+         nrintv = nv-7
+         
+         ! find the position of the additional knots which are needed for the
+         ! b-spline representation of s(u,v).
+         i = nu
+         do j=1,4
+            tu(j) = zero
+            tu(i) = pi
+            i = i-1
+         end do
+         l1 = 4
+         l2 = l1
+         l3 = nv-3
+         l4 = l3
+         tv(l2) = vb
+         tv(l3) = ve
+         do j=1,3
+            l1 = l1+1
+            l2 = l2-1
+            l3 = l3+1
+            l4 = l4-1
+            tv(l2) = tv(l4)-pi2
+            tv(l3) = tv(l1)+pi2
+         end do
+
+         ! find an estimate of the range of possible values for the optimal derivatives at the origin.
+         ktu = max(mumin,nrdatu(1)+2-iopt(2))
+         if (ktu/=lastu0) then
+             l       = min(mr,mv*ktu)
+             rmin    = min(r0,minval(r(1:l)))
+             rmax    = max(r0,maxval(r(1:l)))
+             step(1) = rmax-rmin
+             lastu0  = ktu
+         endif
+
+         ktu = max(mumin,nrdatu(nrintu)+2-iopt(3))
+         if (ktu/=lastu1) then
+            l    = min(mr,mv*ktu)
+            rmin = min(r1,minval(r(mr-l+1:mr)))
+            rmax = max(r1,maxval(r(mr-l+1:mr)))
+            step(2) = rmax-rmin
+            lastu1 = ktu
+         endif
+
+         ! find the least-squares spline sinf(u,v).
+         call fpopsp(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,r,mr,r0,r1,dr,iopt, &
+                     idd,tu,nu,tv,nv,nuest,nvest,p,step,c,nc,fp,fpintu,fpintv,nru, &
+                     nrv,wrk,lwrk)
+                     
+         step = abs(step)
+         if (ier==FITPACK_LEASTSQUARES_OK) fp0 = fp
+
+         ! test whether the least-squares spline is an acceptable solution.
+         if (iopt(1)<0) return
+         fpms = fp-s; if (abs(fpms) < acc) return ! success
+
+         ! if f(p=inf) < s, we accept the choice of knots.
+         if (fpms<zero) exit iterations
+
+         ! if nu=numax and nv=nvmax, sinf(u,v) is an interpolating spline
+         if(nu==numax .and. nv==nvmax) then
+            ier = FITPACK_INTERPOLATING_OK
+            fp  = zero
+            return
+         endif
+
+         ! increase the number of knots.
+         ! if nu=nue and nv=nve we cannot further increase the number of knots
+         ! because of the storage capacity limitation.
+         if (nu==nue .and. nv==nve) then
+            ier = FITPACK_INSUFFICIENT_STORAGE
+            return
+         endif
+
+         if(ider(1)==0) fpintu(1)      = fpintu(1)     +(r0-dr(1))**2
+         if(ider(3)==0) fpintu(nrintu) = fpintu(nrintu)+(r1-dr(4))**2
+         ier = FITPACK_OK
+
+         ! adjust the parameter reducu or reducv according to the direction
+         ! in which the last added knots were located.
+         first_knot: if (lastdi==KNOT_DIM_NONE) then
+
+            nplv = 3
+            idd(2) = ider(2)
+            idd(4) = ider(4)
+            fpold = fp
+
+         else first_knot
+
+            select case (lastdi)
+               case (KNOT_DIM_1); reducu = fpold-fp
+               case (KNOT_DIM_2); reducv = fpold-fp
+            end select
+
+            ! store the sum of squared residuals for the current set of knots.
+            fpold = fp
+
+            ! find nplu, the number of knots we should add in the u-direction.
+            nplu = 1
+            if (nu/=8) then
+               rn   = nplusu
+               npl1 = nplusu*2
+               if (reducu>acc) npl1 = fp_knots_to_add(rn,fpms,reducu) ! guard the division: skip it when reducu<=acc
+               nplu = min(nplusu*2,max(npl1,nplusu/2,1))
+            endif
+
+            ! find nplv, the number of knots we should add in the v-direction.
+            nplv = 3
+            if (nv/=8) then
+               rn   = nplusv
+               npl1 = nplusv*2
+               if (reducv>acc) npl1 = fp_knots_to_add(rn,fpms,reducv) ! guard the division: skip it when reducv<=acc
+               nplv = min(nplusv*2,max(npl1,nplusv/2,1))
+            endif
+
+         endif first_knot
+
+         ! test whether we are going to add knots in the u- or v-direction.
+         lastdi = new_knot_dimension(nu,nplu,nue,nv,nplv,nve,lastdi)
+
+         choose_dim: if (lastdi==KNOT_DIM_2) then
+
+            ! addition in the v-direction.
+            nplusv = nplv
+            ifsv   = 0
+
+            add_v_knots: do l=1,nplusv
+
+               ! add a new knot in the v-direction.
+               istart = 1
+               call fpknot(v,mv,tv,nv,fpintv,nrdatv,nrintv,nvest,istart)
+
+               ! test whether we cannot further increase the number of knots in the v-direction.
+               if (nv==nve) exit add_v_knots
+
+            end do add_v_knots
+
+        else choose_dim
+
+            ! addition in the u-direction.
+            nplusu = nplu
+            ifsu   = 0
+            istart = merge(1,0,iopt(2)==0)
+            add_u_knots: do l=1,nplusu
+
+               ! add a new knot in the u-direction
+               call fpknot(u,mu,tu,nu,fpintu,nrdatu,nrintu,nuest,istart)
+
+               ! test whether we cannot further increase the number of knots in the u-direction.
+               if (nu==nue) exit add_u_knots
+
+            end do add_u_knots
+
+        endif choose_dim
+
+      ! restart the computations with the new set of knots.
+      end do iterations
+
+      ! test whether the least-squares polynomial is a solution of our approximation problem.
+      if (ier==FITPACK_LEASTSQUARES_OK) return
+
+      ! **********************************************************************************************
+      ! part 2: determination of the smoothing spline sp(u,v)
+      ! **********************************************************************************************
+      !  we have determined the number of knots and their position. we now compute the b-spline
+      !  coefficients of the smoothing spline sp(u,v). this smoothing spline depends on the parameter
+      !  p in such a way that
+      !    f(p) = sumi=1,mu(sumj=1,mv((z(i,j)-sp(u(i),v(j)))**2)
+      !  is a continuous, strictly decreasing function of p. moreover the least-squares polynomial
+      !  corresponds to p=0 and the least-squares spline to p=infinity. then iteratively we have to
+      !  determine the positive value of p such that f(p)=s. the process which is proposed here makes
+      !  use of rational interpolation. f(p) is approximated by a rational function r(p)=(u*p+v)/(p+w);
+      !  three values of p (p1,p2,p3) with corresponding values of f(p) (f1=f(p1)-s,f2=f(p2)-s,
+      !  f3=f(p3)-s) are used to calculate the new value of p such that r(p)=s.
+      !  convergence is guaranteed by taking f1 > 0 and f3 < 0.
+      ! **********************************************************************************************
+
+      !  initial value for p.
+      p1   = zero
+      f1   = fp0-s
+      p3   = -one
+      f3   = fpms
+      p    = one
+      drr  = dr
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+
+      !  iteration process to find the root of f(p)=s.
+      find_root: do iter = 1,maxit
+      
+         ! find the smoothing spline sp(u,v) and the corresponding sum f(p).
+         call fpopsp(ifsu,ifsv,ifbu,ifbv,u,mu,v,mv,r,mr,r0,r1,drr,iopt, &
+                     idd,tu,nu,tv,nv,nuest,nvest,p,step,c,nc,fp,fpintu, &
+                     fpintv,nru,nrv,wrk,lwrk)
+
+         ! test whether the approximation sp(u,v) is an acceptable solution.
+         fpms = fp-s; if (abs(fpms)<=acc) return ! success
+         
+         ! find the new value of p and carry out one more step.
+         call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+         if (.not.success) then
+            ier = FITPACK_S_TOO_SMALL
+            return
+         end if
+
+      end do find_root
+
+      ! max number of iterations exceeded
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fpspgr
+
+
+      !> @brief Core algorithm for spline fitting on the sphere.
+      !!
+      !! Fits a smooth bivariate spline to data on the unit sphere using
+      !! coordinates \f$ (\theta, \phi) \f$ where \f$ \theta \in [0, \pi] \f$
+      !! is co-latitude and \f$ \phi \in [0, 2\pi) \f$ is longitude. The
+      !! spline is periodic in \f$ \phi \f$ and must satisfy pole-continuity
+      !! conditions at \f$ \theta = 0 \f$ and \f$ \theta = \pi \f$ (Eq. 11.12):
+      !!
+      !! \f[
+      !!     s(0, \phi) = \text{const}, \quad
+      !!     s(\pi, \phi) = \text{const}
+      !!     \tag{11.12}
+      !! \f]
+      !!
+      !! with derivative conditions analogous to the polar case (Eq. 11.14-11.16).
+      !! The algorithm follows the same iterative framework as fpsurf with
+      !! additional handling for pole constraints and the periodic
+      !! \f$ \phi \f$-direction.
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue
+      !! @param[in]     m       Number of data points
+      !! @param[in]     teta    Co-latitude values \f$ \theta \f$, length `m`
+      !! @param[in]     phi     Longitude values \f$ \phi \f$, length `m`
+      !! @param[in]     r       Data values, length `m`
+      !! @param[in]     w       Data weights, length `m`
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     ntest   Max \f$ \theta \f$-knots
+      !! @param[in]     npest   Max \f$ \phi \f$-knots
+      !! @param[in]     eta     Rank-deficiency tolerance factor
+      !! @param[in]     tol     Smoothing condition tolerance
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     ib1     Bandwidth parameter
+      !! @param[in]     ib3     Extended bandwidth parameter
+      !! @param[in]     nc      Length of coefficient array
+      !! @param[in]     ncc     Auxiliary coefficient dimension
+      !! @param[in]     intest  Length of `fpint`
+      !! @param[in]     nrest   Length of `index`
+      !! @param[in,out] nt      Number of \f$ \theta \f$-knots
+      !! @param[in,out] tt      \f$ \theta \f$-knot vector
+      !! @param[in,out] np      Number of \f$ \phi \f$-knots
+      !! @param[in,out] tp      \f$ \phi \f$-knot vector
+      !! @param[in,out] c       B-spline coefficients
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] sup     Upper bound for residual
+      !! @param[in,out] fpint   Work: residual sums per panel
+      !! @param[in,out] coord   Work: coordinates
+      !! @param[in,out] f       Work: RHS vector
+      !! @param[in,out] ff      Work: RHS copy
+      !! @param[in,out] row     Work: observation row
+      !! @param[in,out] coco    Work: cosine values for pole constraints
+      !! @param[in,out] cosi    Work: cosine integrals for pole constraints
+      !! @param[in,out] a       Work: band matrix
+      !! @param[in,out] q       Work: extended band matrix
+      !! @param[in,out] bt      Work: \f$ \theta \f$-discontinuity coefficients
+      !! @param[in,out] bp      Work: \f$ \phi \f$-discontinuity coefficients
+      !! @param[in,out] spt     Work: \f$ \theta \f$-B-spline values
+      !! @param[in,out] spp     Work: \f$ \phi \f$-B-spline values
+      !! @param[in,out] h       Work vector
+      !! @param[in,out] index   Work: panel sorting indices
+      !! @param[in,out] nummer  Work: data-to-panel mapping
+      !! @param[in,out] wrk     Work array
+      !! @param[in]     lwrk    Length of `wrk`
+      !! @param[out]    ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 11, §11.2 (pp. 205-213), Eq. 11.12-11.16
+      !! @see fprpsp — spherical representation; fpopsp — spherical operations
+      pure subroutine fpsphe(iopt,m,teta,phi,r,w,s,ntest,npest,eta,tol,maxit, &
+                             ib1,ib3,nc,ncc,intest,nrest,nt,tt,np,tp,c,fp,sup,fpint,coord,f, &
+                             ff,row,coco,cosi,a,q,bt,bp,spt,spp,h,index,nummer,wrk,lwrk,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: iopt,m,ntest,npest,maxit,ib1,ib3,nc,ncc,intest,nrest,lwrk
+      integer(FP_FLAG), intent(out)   :: ier
+      integer(FP_SIZE), intent(inout) :: nt,np
+      real(FP_REAL), intent(in)    :: s,eta,tol
+      real(FP_REAL), intent(inout) :: fp,sup
+
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: teta(m),phi(m),r(m),w(m)
+      real(FP_REAL), intent(inout) :: tt(ntest),tp(npest),c(nc),f(ncc),&
+                                    row(npest),coco(npest),cosi(npest), &
+                                    fpint(intest),coord(intest),ff(nc),bt(ntest,5),bp(npest,5),&
+                                    a(ncc,ib1),q(ncc,ib3),spt(m,4),spp(m,4),h(ib3),wrk(lwrk)
+      integer(FP_SIZE), intent(inout) ::  index(nrest),nummer(m)
+ 
+      !  ..local scalars..
+      real(FP_REAL) :: aa,acc,arg,cn,co,c1,dmax,d1,d2,eps,fac1,fac2,facc,facs,fn,fpmax,fpms,f1,f2,f3,htj, &
+                     p,pinv,piv,p1,p2,p3,ri,si,sigma,sq,store,wi,rn
+      integer(FP_SIZE) :: i,iband,iband1,iband3,iband4,ii,ij,il,in,irot,iter,i1,i2,j,jlt,jrot,j1,j2,l,la,lf,lh,ll,lp,&
+                 lt,lwest,l1,l2,l4,ncof,ncoff,npp,np4,nreg,nrint,nrr,nr1,ntt,nt4,nt6,num,num1,rank
+      logical(FP_BOOL) :: check1,check3,success
+      !  ..local arrays..
+      real(FP_REAL), dimension(MAX_ORDER+1) :: hp,ht
+
+      eps  = sqrt(eta)
+      fpms = huge(zero)
+
+      ! calculation of acc, the absolute tolerance for the root of f(p)=s.
+      acc = tol*s
+
+      ! Initializations
+      ier    = FITPACK_OK
+      lwest  = 0
+      ntt    = 0
+      iband1 = 0
+      
+      bootstrap: if (iopt>=0) then
+
+          !  if iopt=0 we begin by computing the weighted least-squares polynomial of the form
+          !     s(teta,phi) = c1*f1(teta) + cn*fn(teta)
+          !  where f1(teta) and fn(teta) are the cubic polynomials satisfying
+          !     f1(0) = 1, f1(pi) = f1'(0) = f1'(pi) = 0 ; fn(teta) = 1-f1(teta).
+          !  the corresponding weighted sum of squared residuals gives the upper
+          !  bound sup for the smoothing factor s.
+          if (iopt==0 .or. (iopt>0 .and. s>=sup)) then
+
+              sup  = zero
+              d1   = zero
+              d2   = zero
+              c1   = zero
+              cn   = zero
+              aa   = zero
+              fac1 = pi*(one + half)
+              fac2 = two/pi**3
+              initial_poly: do i=1,m
+                  wi  = w(i)
+                  ri  = r(i)*wi
+                  arg = teta(i)
+                  fn  = fac2*(fac1-arg)*arg**2
+                  f1  = (one-fn)*wi
+                  fn  = fn*wi
+                  if (not_equal(fn,zero)) then
+                      call fpgivs(fn,d1,co,si)
+                      call fprota(co,si,f1,aa)
+                      call fprota(co,si,ri,cn)
+                  endif
+                  if (not_equal(f1,zero)) then
+                      call fpgivs(f1,d2,co,si)
+                      call fprota(co,si,ri,c1)
+                  endif
+                  sup = sup+ri*ri
+              end do initial_poly
+
+              if (not_equal(d2,zero)) c1 = c1/d2
+              if (not_equal(d1,zero)) cn = (cn-aa*c1)/d1
+
+              !  find the b-spline representation of this least-squares polynomial
+              nt       = 8
+              np       = 8
+              c(1:8)   = c1
+              c(9:16)  = cn
+              tt(1:4)  = zero
+              tt(5:8)  = pi
+              tp(1:4)  = zero
+              tp(5:8)  = pi2
+              fp       = sup
+
+              ! test whether the least-squares polynomial is an acceptable solution
+              fpms = sup-s
+              if (fpms<acc) then
+                  ier = FITPACK_LEASTSQUARES_OK
+                  return
+              end if
+
+          endif
+
+          !  test whether we cannot further increase the number of knots.
+          sixty: if (iopt==0 .or. (iopt>0 .and. (s>=sup .or. np<11))) then
+
+              if (npest<11 .or. ntest<9) then
+                  ier = FITPACK_INSUFFICIENT_STORAGE
+                  return
+              end if
+
+              !  find the initial set of interior knots of the spherical spline in case iopt = 0.
+              np      = 11
+              tp(5:7) = pi*[half,one,onep5]
+              nt      = 9
+              tt(5)   = tp(5)
+          endif sixty
+
+      endif bootstrap
+
+
+      !  ************************************************************************************************************
+      !  part 1 : computation of least-squares spherical splines.
+      !  ************************************************************************************************************
+      !  if iopt1<0 we compute the least-squares spherical spline according to the given set of knots.
+      !  if iopt1>=0 we compute least-squares spherical splines with increasing numbers of knots until the
+      !  corresponding sum f(p=inf)<=s.
+      !  the initial set of knots then depends on the value of iopt1:
+      !    if iopt1=0 we start with one interior knot in the teta-direction (pi/2) and and three in the
+      !               phi-direction (pi/2,pi,3*pi/2).
+      !    if iopt1>0 we start with the set of knots found at the last call of the routine.
+      !  ************************************************************************************************************
+
+      !  main loop for the different sets of knots. m is a safe upper bound for the number of trials.
+      compute_knots: do iter=1,m
+
+          ! find the position of the additional knots which are needed for the
+          ! b-spline representation of s(teta,phi).
+          tp(1:4)     = [tp(np-6:np-4)-pi2, zero]
+          tp(np-3:np) = [pi2, tp(5:7)+pi2]
+
+          tt(1:4)     = zero
+          tt(nt-3:nt) = pi
+
+          ! find nrint, the total number of knot intervals and nreg, the number
+          ! of panels in which the approximation domain is subdivided by the
+          ! intersection of knots.
+          ntt   = nt-7
+          npp   = np-7
+          nrr   = npp/2
+          nr1   = nrr+1
+          nrint = ntt+npp
+          nreg  = ntt*npp
+
+          ! arrange the data points according to the panel they belong to.
+          call fporde(teta,phi,m,DEGREE_3,DEGREE_3,tt,nt,tp,np,nummer,index,nreg)
+
+          ! find the b-spline coefficients coco and cosi of the cubic spline
+          ! approximations sc(phi) and ss(phi) for cos(phi) and sin(phi).
+          coco(1:npp) = zero
+          cosi(1:npp) = zero
+          a(1:npp,1:npp) = zero
+
+          ! the coefficients coco and cosi are obtained from the conditions
+          ! sc(tp(i))=cos(tp(i)),resp. ss(tp(i))=sin(tp(i)),i=4,5,...np-4.
+          get_coefs: do i=1,npp
+              l2 = i+3
+              arg = tp(l2)
+              hp = fpbspl(tp,np,DEGREE_3,arg,l2)
+
+              row(1:npp) = zero
+              ll = i
+              do j=1,3
+                 if (ll>npp) ll = 1
+                 row(ll) = row(ll)+hp(j)
+                 ll = ll+1
+              end do
+
+              facc = cos(arg)
+              facs = sin(arg)
+
+              do j=1,npp
+                  piv = row(j)
+                  if (equal(piv,zero)) cycle
+
+                  call fpgivs(piv,a(j,1),co,si)
+                  call fprota(co,si,facc,coco(j))
+                  call fprota(co,si,facs,cosi(j))
+                  if (j<npp) then
+                      j1 = j+1
+                      i2 = 1
+                      do l=j1,npp
+                         i2 = i2+1
+                         call fprota(co,si,row(l),a(j,i2))
+                      end do
+                  endif
+              end do
+          end do get_coefs
+
+          coco(:npp) = fpback(a,coco,npp,npp,ncc)
+          cosi(:npp) = fpback(a,cosi,npp,npp,ncc)
+
+          ! find ncof, the dimension of the spherical spline and ncoff, the
+          ! number of coefficients in the standard b-spline representation.
+          nt4 = nt-4
+          np4 = np-4
+          ncoff = nt4*np4
+          ncof = 6+npp*(ntt-1)
+
+          ! find the bandwidth of the observation matrix a.
+          if (ntt<4) then
+             iband = ncof
+          elseif (ntt==4) then
+             iband = 3*(npp+1)
+          else
+             iband = 4*npp
+          end if
+          iband1 = iband-1
+
+          ! initialize the observation matrix a.
+          f(1:ncof) = zero
+          a(1:ncof,1:iband) = zero
+
+          ! initialize the sum of squared residuals.
+          fp = zero
+
+          ! fetch the data points in the new order. main loop for the different panels.
+          panels: do num=1,nreg
+              ! fix certain constants for the current panel; jrot records the column
+              ! number of the first non-zero element in a row of the observation
+              ! matrix according to a data point of the panel.
+              num1 = num-1
+              lt   = num1/npp
+              l1   = lt+4
+              lp   = num1-lt*npp+1
+              l2   = lp+3
+              lt   = lt+1
+              jrot = merge(3+(lt-3)*npp,0,lt>2)
+
+              ! test whether there are still data points in the current panel.
+              in = index(num)
+              points_left: do while (in/=0)
+                  ! fetch a new data point.
+                  wi = w(in)
+                  ri = r(in)*wi
+
+                  ! evaluate for the teta-direction, the 4 non-zero b-splines at teta(in)
+                  ht = fpbspl(tt,nt,DEGREE_3,teta(in),l1)
+
+                  ! evaluate for the phi-direction, the 4 non-zero b-splines at phi(in)
+                  hp = fpbspl(tp,np,DEGREE_3,phi(in),l2)
+
+                  ! store the value of these b-splines in spt and spp resp.
+                  spp(in,1:4) = hp(1:4)
+                  spt(in,1:4) = ht(1:4)
+
+                  ! initialize the new row of observation matrix.
+                  h(1:iband) = zero
+
+                  ! calculate the non-zero elements of the new row by making the cross
+                  ! products of the non-zero b-splines in teta- and phi-direction and
+                  ! by taking into account the conditions of the spherical splines.
+                  row(1:npp) = zero
+
+                  ! take into account the condition (3) of the spherical splines.
+                  ll = lp
+                  do i=1,4
+                     if (ll>npp) ll=1
+                     row(ll) = row(ll)+hp(i)
+                     ll = ll+1
+                  end do
+
+                  ! take into account the other conditions of the spherical splines.
+                  if (lt<=2 .or. lt>=(ntt-1)) then
+                     facc = dot_product(row(:npp),coco(:npp))
+                     facs = dot_product(row(:npp),cosi(:npp))
+                  else
+                     facc = zero
+                     facs = zero
+                  endif
+
+                  ! fill in the non-zero elements of the new row.
+                  j1 = 0
+                  new_row: do j =1,4
+                     jlt = j+lt
+                     htj = ht(j)
+                     if (jlt==3) then
+                         h(1) = h(1)+htj
+                         h(2) = facc*htj
+                         h(3) = facs*htj
+                         j1 = 3
+                     elseif (jlt==nt4) then
+                         h(j1+1:j1+3) = htj*[facc,facs,one]
+                         j1 = j1+2
+                     elseif (jlt>2 .and. jlt<=nt4) then
+                         h(j1+1:j1+npp) = row(1:npp)*htj
+                         j1 = j1+npp
+                     else
+                         j1 = j1+1
+                         h(j1) = h(j1)+htj
+                     endif
+                  end do new_row
+                  h(:iband) = h(:iband)*wi
+
+                  ! rotate the row into triangle by givens transformations.
+                  call fp_rotate_row(h, iband, a, ri, f, jrot)
+
+                  ! add the contribution of the row to the sum of squares of residual
+                  ! right hand sides.
+                  fp = fp+ri**2
+
+                  ! find the number of the next data point in the panel.
+                  in = nummer(in)
+              end do points_left
+          end do panels
+
+          !  find dmax, the maximum value for the diagonal elements in the reduced triangle.
+          dmax = max(zero,maxval(a(:ncof,1)))
+
+          ! check whether the observation matrix is rank deficient.
+          sigma = eps*dmax
+
+          if (any(a(1:ncof,1)<=sigma)) then
+
+                ! in case of rank deficiency, find the minimum norm solution.
+                lwest = ncof*iband+ncof+iband
+                if (lwest>lwrk) then
+                   ier = lwest
+                   return
+                end if
+
+                lf = 1
+                lh = lf+ncof
+                la = lh+iband
+                ff(1:ncof) = zero
+                q(1:ncof,1:iband) = a(1:ncof,1:iband)
+                call fprank(q,ff,ncof,iband,ncc,sigma,c,sq,rank,wrk(la),wrk(lf),wrk(lh))
+                q(1:ncof,1) = q(1:ncof,1)/dmax
+
+                ! add to the sum of squared residuals, the contribution of reducing the rank.
+                fp = fp+sq
+            else
+
+                ! backward substitution in case of full rank.
+                c(:ncof) = fpback(a,f,ncof,iband,ncc)
+                rank = ncof
+                q(1:ncof,1) = a(1:ncof,1)/dmax
+
+            endif
+
+            ! find the coefficients in the standard b-spline representation of the spherical spline.
+            call fprpsp(nt,np,coco,cosi,c,ff,ncoff)
+
+            ! test whether the least-squares spline is an acceptable solution.
+            fpms = fp-s
+            if (iopt<0 .or. abs(fpms)<=acc) then
+              if (fp<=zero) then
+                  ier = FITPACK_INTERPOLATING_OK
+                  fp  = zero
+              else
+                  if(ncof/=rank) ier = -rank
+              endif
+              return
+            endif
+
+            ! if f(p=inf) < s, accept the choice of knots.
+            if (fpms<zero) exit compute_knots
+
+            ! test whether we cannot further increase the number of knots.
+            if (m<ncof) then
+                ier = FITPACK_TOO_MANY_KNOTS
+                return
+            end if
+
+            ! search where to add a new knot.
+            ! find for each interval the sum of squared residuals fpint for the data points having the
+            ! coordinate belonging to that knot interval. calculate also coord which is the same sum,
+            ! weighted by the position of the data points considered.
+            fpint(:nrint) = zero
+            coord(:nrint) = zero
+
+            do num=1,nreg
+                num1 = num-1
+                lt   = num1/npp
+                l1   = lt+1
+                lp   = num1-lt*npp
+                l2   = lp+1+ntt
+                jrot = lt*np4+lp
+                in   = index(num)
+
+                do while (in/=0)
+                  store = zero
+                  i1 = jrot
+                  do i=1,4
+                     store = store + spt(in,i)*dot_product(spp(in,1:4),c(i1+1:i1+4))
+                     i1 = i1+np4
+                  end do
+
+                  store = (w(in)*(r(in)-store))**2
+                  fpint(l1) = fpint(l1)+store
+                  coord(l1) = coord(l1)+store*teta(in)
+                  fpint(l2) = fpint(l2)+store
+                  coord(l2) = coord(l2)+store*phi(in)
+                  in = nummer(in)
+                end do
+            end do
+
+            ! find the interval for which fpint is maximal on the condition that
+            ! there still can be added a knot.
+            l1 = merge(ntt+1,    1,ntest<nt+1)
+            l2 = merge(ntt  ,nrint,npest<np+2)
+
+            ! test whether we cannot further increase the number of knots.
+            if (l1>l2) then
+                ier = FITPACK_INSUFFICIENT_STORAGE
+                return
+            end if
+
+            add_knot: do
+
+                i     = maxloc(fpint(l1:l2),1,fpint(l1:l2)>zero)
+                l     = l1+i-1
+
+                if (i==0) then
+                    ier = FITPACK_OVERLAPPING_KNOTS
+                    return
+                end if
+
+                fpmax = fpint(l)
+
+                ! calculate the position of the new knot.
+                arg = coord(l)/fpint(l)
+
+                ! test in what direction the new knot is going to be added.
+                choose_direction: if (l<=ntt) then
+
+                   ! addition in the teta-direction
+                   l4 = l+4
+                   fpint(l) = zero
+                   fac1 = tt(l4)-arg
+                   fac2 = arg-tt(l4-1)
+
+                else choose_direction
+
+                   ! addition in the phi-direction
+                   l4 = l+4-ntt
+                   if (arg>=pi) then
+                      arg = arg-pi
+                      l4 = l4-nrr
+                   endif
+
+                   fpint(l) = zero
+                   fac1 = tp(l4)-arg
+                   fac2 = arg-tp(l4-1)
+
+                endif choose_direction
+
+                ! Suitable location
+                if (fac1<=(ten*fac2) .and. fac2<=(ten*fac1)) then
+
+                    ! Place knot
+                    place_knot: if (l<=ntt) then
+
+                        ! Place in teta coordinate
+                        j = nt
+                        do i=l4,nt
+                           tt(j+1) = tt(j)
+                           j = j-1
+                        end do
+                        tt(l4) = arg
+                        nt = nt+1
+
+                    else place_knot
+
+                        ! Place in phi coordinate
+                        ll = nrr+4
+                        j = ll
+                        do i=l4,ll
+                           tp(j+1) = tp(j)
+                           j = j-1
+                        end do
+                        tp(l4) = arg
+                        np = np+2
+                        nrr = nrr+1
+                        do i=5,ll
+                           j = i+nrr
+                           tp(j) = tp(i)+pi
+                        end do
+
+                    endif place_knot
+
+                    exit add_knot
+
+                end if
+
+            end do add_knot
+
+      !  restart the computations with the new set of knots.
+      end do compute_knots
+
+      ! ************************************************************************************************************
+      ! part 2: determination of the smoothing spherical spline.
+      ! ************************************************************************************************************
+      ! we have determined the number of knots and their position. we now compute the coefficients of the
+      ! smoothing spline sp(teta,phi). the observation matrix a is extended by the rows of a matrix, expres-
+      ! sing that sp(teta,phi) must be a constant function in the variable phi and a cubic polynomial in the
+      ! variable teta. the corresponding weights of these additional rows are set to 1/(p). iteratively we then have
+      ! to determine the value of p such that f(p) = sum((w(i)*(z(i)-sp(teta(i),phi(i))))**2)  be = s.
+      ! we already know that the least-squares polynomial corresponds to p=0, and that the least-squares
+      ! spherical spline corresponds to p=infinity. the iteration process makes use of rational interpolation.
+      ! since f(p) is a convex and strictly decreasing function of p, it can be approximated by a rational
+      ! function of the form r(p) = (u*p+v)/(p+w). three values of p (p1,p2,p3) with corresponding values of
+      ! f(p) (f1=f(p1)-s,f2=f(p2)-s,f3=f(p3)-s) are used to calculate the new value of p such that r(p)=s.
+      ! convergence is guaranteed by taking f1>0,f3<zero
+      ! ************************************************************************************************************
+
+      ! evaluate the discontinuity jumps of the 3-th order derivative of the b-splines at the knots
+      call fpdisc(tt,nt,DEGREE_5,bt,ntest) ! tt(l),l=5,...,nt-4.
+      call fpdisc(tp,np,DEGREE_5,bp,npest) ! tp(l),l=5,...,np-4.
+
+      !  initial value for p.
+      p1 = zero
+      f1 = sup-s
+      p3 = -one
+      f3 = fpms
+      p  = sum(a(1:ncof,1))
+      rn = ncof
+      p  = rn/p
+
+      ! find the bandwidth of the extended observation matrix.
+      iband4 = merge(ncof,iband+3,ntt<=4)
+      iband3 = iband4 -1
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+
+      ! iteration process to find the root of f(p)=s.
+      iterations: do iter=1,maxit
+
+          pinv = one/p
+
+          ! store the triangularized observation matrix into q.
+          ff(1:ncof) = f(1:ncof)
+          q(1:ncof,1:iband4) = zero
+          q(1:ncof,1:iband)  = a(1:ncof,1:iband)
+
+          ! extend the observation matrix with the rows of a matrix, expressing
+          ! that for teta=cst. sp(teta,phi) must be a constant function.
+          nt6 = nt-6
+          const_teta: do i=5,np4
+              ii = i-4
+              row(1:npp) = zero
+              ll = ii
+              do l=1,5
+                 if (ll>npp) ll=1
+                 row(ll) = row(ll)+bp(ii,l)
+                 ll = ll+1
+              end do
+              facc = dot_product(row(1:npp),coco(1:npp))
+              facs = dot_product(row(1:npp),cosi(1:npp))
+
+              do j=1,nt6
+                  ! initialize the new row.
+                  h(1:iband) = zero
+
+                  ! fill in the non-zero elements of the row. jrot records the column
+                  ! number of the first non-zero element in the row.
+                  jrot = 4+(j-2)*npp
+                  if (j>1 .and. j<nt6) then
+                      h(1:npp) = row(1:npp)
+                  else
+                      h(1) = facc 
+                      h(2) = facs
+                      if(j==1) jrot = 2
+                  endif
+
+                  h(1:iband) = h(1:iband)*pinv
+                  ri = zero
+
+                  ! rotate the new row into triangle by givens transformations.
+                  call fp_rotate_shifted(h, iband, q, ncc, ri, ff, jrot, ncof)
+              end do
+          end do const_teta
+
+          ! extend the observation matrix with the rows of a matrix expressing
+          ! that for phi=cst. sp(teta,phi) must be a cubic polynomial.
+          const_phi: do i=5,nt4
+              ii = i-4
+              do j=1,npp
+                  ! initialize the new row
+                  h(1:iband4) = zero
+
+                  ! fill in the non-zero elements of the row. jrot records the column
+                  ! number of the first non-zero element in the row.
+                  j1 = 1
+                  fill_in: do l=1,5
+                      il = ii+l
+                      ij = npp
+
+                      if (il==3 .or. il==nt4) then
+                          if (il==3) then
+                              j1 = 1
+                              j2 = 2
+                              ij = j+2
+                          else
+                              j1 = j1+3-j
+                              j2 = j1-2
+                              ij = 0
+                          endif
+                          h(j2:j2+1) = bt(ii,l)*[coco(j),cosi(j)]
+                      endif
+                      h(j1) = h(j1)+bt(ii,l)
+                      j1 = j1+ij
+                  end do fill_in
+
+                  h(:iband4) = pinv*h(:iband4)
+                  ri = zero
+                  jrot = merge(3+j+(ii-3)*npp,1,ii>2)
+
+                  ! rotate the new row into triangle by givens transformations.
+                  call fp_rotate_shifted(h, iband4, q, ncc, ri, ff, jrot, ncof)
+
+              end do
+          end do const_phi
+
+          ! find dmax, the maximum value for the diagonal elements in the reduced triangle.
+          dmax  = max(zero,maxval(q(1:ncof,1)))
+
+          ! check whether the matrix is rank deficient.
+          sigma = eps*dmax
+
+          if (all(q(1:ncof,1)>sigma)) then
+
+              ! backward substitution in case of full rank.
+              c(:ncof) = fpback(q,ff,ncof,iband4,ncc)
+              rank = ncof
+
+          else
+
+              ! In case of rank deficiency, find the minimum norm solution
+              lwest = ncof*iband4+ncof+iband4
+              if (lwest>lwrk) then
+                 ier = lwest
+                 return
+              end if
+              lf = 1
+              lh = lf+ncof
+              la = lh+iband4
+              call fprank(q,ff,ncof,iband4,ncc,sigma,c,sq,rank,wrk(la),wrk(lf),wrk(lh))
+
+          end if
+
+          q(1:ncof,1) = q(1:ncof,1)/dmax
+
+          ! find the coefficients in the standard b-spline representation of the spherical spline.
+          call fprpsp(nt,np,coco,cosi,c,ff,ncoff)
+
+          ! compute f(p).
+          fp = zero
+          get_fp: do num = 1,nreg
+              num1 = num-1
+              lt   = num1/npp
+              lp   = num1-lt*npp
+              jrot = lt*np4+lp
+              in   = index(num)
+
+              do while (in/=0)
+                  store = zero
+                  i1 = jrot
+                  do i=1,4
+                     store = store+spt(in,i)*dot_product(spp(in,1:4),c(i1+1:i1+4))
+                     i1 = i1+np4
+                  end do
+                  fp = fp+(w(in)*(r(in)-store))**2
+                  in = nummer(in)
+              end do
+          end do get_fp
+
+          ! test whether the approximation sp(teta,phi) is an acceptable solution
+          fpms = fp-s
+          if (abs(fpms)<=acc) then
+              if (ncof/=rank) ier = -rank
+              return
+          end if
+
+          ! find the new value of p and carry out one more step.
+          call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+          if (.not.success) then
+             ier = FITPACK_S_TOO_SMALL
+             return
+          end if
+
+      end do iterations
+
+      ! the maximum allowable number of iterations has been reached.
+      ier = FITPACK_MAXIT
+      return
+
+      end subroutine fpsphe
+
+
+      !> @brief Evaluate a parametric bicubic tensor-product spline surface.
+      !!
+      !! Computes the values of a \f$ d \f$-dimensional bicubic spline surface
+      !! \f$ (s_1(u,v), \ldots, s_d(u,v)) \f$ at the grid points
+      !! \f$ (u_i, v_j) \f$, \f$ i = 1, \ldots, m_u \f$, \f$ j = 1, \ldots, m_v \f$.
+      !!
+      !! For each dimension, the evaluation uses the tensor-product decomposition:
+      !!
+      !! \f[
+      !!     s(u, v) = \sum_{i} \left( \sum_{j} c_{i,j} \, M_{j,4}(v) \right) N_{i,4}(u)
+      !! \f]
+      !!
+      !! This is the computational core called by `surev` after input validation.
+      !!
+      !! @param[in]  idim  Number of coordinate dimensions
+      !! @param[in]  tu    Knot vector in \f$ u \f$, length `nu`
+      !! @param[in]  nu    Number of knots in \f$ u \f$
+      !! @param[in]  tv    Knot vector in \f$ v \f$, length `nv`
+      !! @param[in]  nv    Number of knots in \f$ v \f$
+      !! @param[in]  c     B-spline coefficients, length `(nu-4)*(nv-4)*idim`
+      !! @param[in]  u     Evaluation points in \f$ u \f$, length `mu`
+      !! @param[in]  mu    Number of evaluation points in \f$ u \f$
+      !! @param[in]  v     Evaluation points in \f$ v \f$, length `mv`
+      !! @param[in]  mv    Number of evaluation points in \f$ v \f$
+      !! @param[out] f     Surface values, length `mu * mv * idim`
+      !! @param[out] wu    B-spline basis values in \f$ u \f$, `wu(mu, 4)`
+      !! @param[out] wv    B-spline basis values in \f$ v \f$, `wv(mv, 4)`
+      !! @param[out] lu    Knot interval indices in \f$ u \f$, length `mu`
+      !! @param[out] lv    Knot interval indices in \f$ v \f$, length `mv`
+      !!
+      !! @see Dierckx, Ch. 2, §2.1.2 (pp. 28-30), Eq. 2.14-2.17
+      pure subroutine fpsuev(idim,tu,nu,tv,nv,c,u,mu,v,mv,f,wu,wv,lu,lv)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in) :: idim,nu,nv,mu,mv
+      !  ..array arguments..
+      integer(FP_SIZE), intent(out)    :: lu(mu),lv(mv)
+      real(FP_REAL), intent(in) :: tu(nu),tv(nv),c((nu-4)*(nv-4)*idim),u(mu),v(mv)
+      real(FP_REAL), intent(out) :: wu(mu,4),wv(mv,4),f(mu*mv*idim)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,i1,j,j1,k,l,l1,l3,m,nuv,nu4,nv4
+      real(FP_REAL) :: arg,sp,tb,te
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+
+      ! Process u
+      nu4 = nu-4
+      tb = tu(4)
+      te = tu(nu4+1)
+      l  = 4
+      do i=1,mu
+        arg = min(max(tb,u(i)),te)
+        l = fp_knot_interval(tu, arg, l, nu4)
+        l1 = l + 1
+        h = fpbspl(tu,nu,DEGREE_3,arg,l)
+        lu(i) = l-4
+        wu(i,1:4) = h(1:4)
+      end do
+
+      ! Process v
+      nv4 = nv-4
+      tb = tv(4)
+      te = tv(nv4+1)
+      l = 4
+      do i=1,mv
+         arg = min(max(v(i),tb),te)
+         l = fp_knot_interval(tv, arg, l, nv4)
+         l1 = l + 1
+         h = fpbspl(tv,nv,DEGREE_3,arg,l)
+         lv(i) = l-4
+         wv(i,1:4) = h(1:4)
+      end do
+
+      m = 0
+      nuv = nu4*nv4
+      dims: do k=1,idim
+        l3 = (k-1)*nuv
+        do i=1,mu
+          l = lu(i)*nv4+l3
+          h(1:4) = wu(i,1:4)
+          do j=1,mv
+            l1 = l+lv(j)
+            sp = zero
+            do i1=1,4
+              do j1=1,4
+                sp = sp+c(l1+j1)*h(i1)*wv(j,j1)
+              end do
+              l1 = l1+nv4
+            end do
+            m = m+1
+            f(m) = sp
+          end do
+         end do
+      end do dims
+      return
+      end subroutine fpsuev
+
+
+      !> @brief Core algorithm for bivariate tensor-product spline surface fitting.
+      !!
+      !! Fits a tensor-product spline surface \f$ s(x,y) \f$ of degrees
+      !! \f$ k_x \f$ and \f$ k_y \f$ to scattered data by minimizing:
+      !!
+      !! \f[
+      !!     \sum_{i=1}^{m} \bigl( w_i (z_i - s(x_i, y_i)) \bigr)^2
+      !!     \leq S
+      !!     \tag{9.2}
+      !! \f]
+      !!
+      !! The B-spline representation has \f$ (g+k_x+1)(h+k_y+1) \f$
+      !! coefficients on the knot grid \f$ \{t_x\} \times \{t_y\} \f$.
+      !! The algorithm iterates:
+      !!
+      !! 1. **Knot placement** in \f$ x \f$ and \f$ y \f$ based on residuals
+      !! 2. **QR factorization** of the observation matrix via Givens
+      !!    rotations, with rank-deficiency handling via fprank (Eq. 9.7-9.10)
+      !! 3. **Smoothing-parameter search** via rational interpolation
+      !!
+      !! Data points are sorted into knot-interval panels using fporde for
+      !! efficient row-by-row processing.
+      !!
+      !! @param[in]     iopt    0 = new fit, 1 = continue
+      !! @param[in]     m       Number of data points
+      !! @param[in,out] x       Data \f$ x \f$-coordinates, length `m`
+      !! @param[in,out] y       Data \f$ y \f$-coordinates, length `m`
+      !! @param[in]     z       Data values, length `m`
+      !! @param[in]     w       Data weights, length `m`
+      !! @param[in]     xb      Left \f$ x \f$-boundary
+      !! @param[in]     xe      Right \f$ x \f$-boundary
+      !! @param[in]     yb      Lower \f$ y \f$-boundary
+      !! @param[in]     ye      Upper \f$ y \f$-boundary
+      !! @param[in]     kxx     Degree in \f$ x \f$
+      !! @param[in]     kyy     Degree in \f$ y \f$
+      !! @param[in]     s       Smoothing factor \f$ S \geq 0 \f$
+      !! @param[in]     nxest   Max knots in \f$ x \f$
+      !! @param[in]     nyest   Max knots in \f$ y \f$
+      !! @param[in]     eta     Rank-deficiency tolerance factor
+      !! @param[in]     tol     Smoothing condition tolerance
+      !! @param[in]     maxit   Maximum smoothing-parameter iterations
+      !! @param[in]     nmax    Max of `nxest`, `nyest`
+      !! @param[in]     km1     \f$ \max(k_x, k_y) + 1 \f$
+      !! @param[in]     km2     \f$ k_x + k_y + 2 \f$
+      !! @param[in]     ib1     \f$ k_x k_y + 2 \f$
+      !! @param[in]     ib3     \f$ k_x k_y + \max(k_x, k_y) + 2 \f$
+      !! @param[in]     nc      Length of coefficient array
+      !! @param[in]     intest  Length of `fpint`
+      !! @param[in]     nrest   Length of `index`
+      !! @param[in,out] nx0     Number of \f$ x \f$-knots
+      !! @param[in,out] tx      \f$ x \f$-knot vector
+      !! @param[in,out] ny0     Number of \f$ y \f$-knots
+      !! @param[in,out] ty      \f$ y \f$-knot vector
+      !! @param[in,out] c       B-spline coefficients
+      !! @param[in,out] fp      Weighted sum of squared residuals
+      !! @param[in,out] fp0     Initial unweighted residual sum
+      !! @param[in,out] fpint   Work: residual sums per panel
+      !! @param[in,out] coord   Work: coordinates
+      !! @param[in,out] f       Work: RHS vector
+      !! @param[in,out] ff      Work: RHS copy
+      !! @param[in,out] a       Work: band matrix
+      !! @param[in,out] q       Work: extended band matrix
+      !! @param[in,out] bx      Work: \f$ x \f$-discontinuity coefficients
+      !! @param[in,out] by      Work: \f$ y \f$-discontinuity coefficients
+      !! @param[in,out] spx     Work: \f$ x \f$-B-spline values
+      !! @param[in,out] spy     Work: \f$ y \f$-B-spline values
+      !! @param[in,out] h       Work vector
+      !! @param[in,out] index   Work: panel sorting indices
+      !! @param[in,out] nummer  Work: data-to-panel mapping
+      !! @param[in,out] wrk     Work array
+      !! @param[in]     lwrk    Length of `wrk`
+      !! @param[in,out] ier     Error flag
+      !!
+      !! @see Dierckx, Ch. 9, §9.1-9.2 (pp. 147-167), Eq. 9.2-9.10
+      !! @see fporde — panel sorting; fprank — rank-deficient solver
+      pure subroutine fpsurf(iopt,m,x,y,z,w,xb,xe,yb,ye,kxx,kyy, &
+                             s,nxest, nyest,eta,tol,maxit,nmax,km1,km2,ib1,ib3,nc,intest, &
+                             nrest,nx0,tx,ny0,ty,c,fp,fp0,fpint,coord,f,ff,a,q,bx,by,spx, &
+                             spy,h,index,nummer,wrk,lwrk,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: xb,xe,yb,ye,s,eta,tol
+      real(FP_REAL), intent(inout) :: fp,fp0
+      integer(FP_SIZE), intent(in)    :: iopt,m,kxx,kyy,nxest,nyest,maxit,nmax,km1,km2,ib1,ib3, &
+                                    nc,intest,nrest,lwrk
+      integer(FP_SIZE), intent(inout) :: nx0,ny0
+      integer(FP_FLAG), intent(inout) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: z(m),w(m)
+      real(FP_REAL), intent(inout) :: x(m),y(m),tx(nmax),ty(nmax),c(nc),fpint(intest),coord(intest),&
+                                    f(nc),ff(nc),a(nc,ib1),q(nc,ib3),bx(nmax,km2),by(nmax,km2), &
+                                    spx(m,km1),spy(m,km1),h(ib3),wrk(lwrk)
+      integer(FP_SIZE), intent(inout) :: index(nrest),nummer(m)
+
+      !  ..local scalars..
+      real(FP_REAL) :: acc,arg,dmax,fac1,fac2,fpmax,fpms,f1,f2,f3,hxi,p,pinv,p1,p2,p3,sigma,&
+                     sq,store,wi,x0,x1,y0,y1,zi,eps
+      integer(FP_SIZE) :: i,iband,iband1,iband3,iband4,ii,in,iter,i1,j,jrot,&
+                 jxy,j1,kx,kx1,kx2,ky,ky1,ky2,l,la,lf,lh,lwest,lx,ly,l1,l2,n,ncof,nk1x,nk1y,nminx,&
+                 nminy,nreg,nrint,num,num1,nx,nxe,nxx,ny,nye,nyy,rank
+      logical(FP_BOOL) :: interchanged,check1,check3,success
+
+      !  ..local arrays..
+      real(FP_REAL), dimension(MAX_ORDER+1) :: hx,hy
+
+      ! **********************************************************************************************
+      !  part 1: determination of the number of knots and their position
+      ! **********************************************************************************************
+      !  given a set of knots we compute the least-squares spline sinf(x,y), and the corresponding
+      !  weighted sum of squared residuals fp=f(p=inf).
+      !  if iopt=-1 sinf(x,y) is the requested approximation.
+      !  if iopt=0 or iopt=1 we check whether we can accept the knots:
+      !     if fp <=s we will continue with the current set of knots.
+      !     if fp > s we will increase the number of knots and compute the orresponding least-squares
+      !        spline until finally fp<=s.
+      !  the initial choice of knots depends on the value of s and iopt.
+      !  if iopt=0 we first compute the least-squares polynomial of degree kx in x and ky in y;
+      !     nx=nminx=2*kx+2 and ny=nminy=2*ky+2.
+      !     fp0=f(0) denotes the corresponding weighted sum of squared residuals
+      !  if iopt=1 we start with the set of knots found at the last call of the routine, except for
+      !     the case that s >=fp0; then we compute the least-squares polynomial directly.
+      !  eventually the independent variables x and y (and the corresponding parameters) will be
+      !  switched if this can reduce the bandwidth of the system to be solved.
+      ! **********************************************************************************************
+
+      ! interchanged denotes whether or not the directions have been inter changed.
+      interchanged = .false.
+      x0 = xb
+      x1 = xe
+      y0 = yb
+      y1 = ye
+      kx = kxx
+      ky = kyy
+      kx1 = kx+1
+      ky1 = ky+1
+      nxe = nxest
+      nye = nyest
+      eps = sqrt(eta)
+      fpms = huge(zero)
+
+      ! calculation of acc, the absolute tolerance for the root of f(p)=s.
+      acc = tol*s
+
+      bootstrap: if (iopt>=0) then
+
+          if (iopt==0 .or. fp0<=s) then
+
+              !  initialization for the least-squares polynomial.
+              nminx = 2*kx1
+              nminy = 2*ky1
+              nx    = nminx
+              ny    = nminy
+              ier   = FITPACK_LEASTSQUARES_OK
+
+          else
+
+              nx = nx0
+              ny = ny0
+
+          end if
+
+      else bootstrap
+
+          nx = nx0
+          ny = ny0
+
+      endif bootstrap
+
+
+      !  initialize variables
+      nxx    = nx-2*kx1+1
+      nyy    = ny-2*ky1+1
+      iband1 = kx*(ny-ky1)+ky
+
+      !  main loop for the different sets of knots. m is a safe upper bound for the number of trials.
+      compute_knots: do iter=1,m
+
+          !  find the position of the additional knots which are needed for the
+          !  b-spline representation of s(x,y).
+          tx(1:kx1)    = x0
+          tx(nx-kx:nx) = x1
+          ty(1:ky1)    = y0
+          ty(ny-ky:ny) = y1
+
+          !  find nrint, the total number of knot intervals and nreg, the number
+          !  of panels in which the approximation domain is subdivided by the
+          !  intersection of knots.
+          nxx   = nx-2*kx1+1
+          nyy   = ny-2*ky1+1
+          nrint = nxx+nyy
+          nreg  = nxx*nyy
+
+          !  find the bandwidth of the observation matrix a.
+          !  if necessary, interchange the variables x and y, in order to obtain a minimal bandwidth.
+          iband1 = kx*(ny-ky1)+ky
+          l      = ky*(nx-kx1)+kx
+
+          do_interchange: if (iband1>l) then
+              iband1 = l
+              interchanged = .not.interchanged
+              call fitpack_swap(x,y)
+              call fitpack_swap(x0,y0)
+              call fitpack_swap(x1,y1)
+              n  = min(nx,ny)
+              call fitpack_swap(tx ,ty)
+              call fitpack_swap(nx ,ny)
+              call fitpack_swap(nxe,nye)
+              call fitpack_swap(nxx,nyy)
+              call fitpack_swap(kx ,ky)
+              kx1 = kx+1
+              ky1 = ky+1
+          endif do_interchange
+
+          iband = iband1+1
+
+          ! arrange the data points according to the panel they belong to.
+          call fporde(x,y,m,kx,ky,tx,nx,ty,ny,nummer,index,nreg)
+
+          ! find ncof, the number of b-spline coefficients.
+          nk1x = nx-kx1
+          nk1y = ny-ky1
+          ncof = nk1x*nk1y
+
+          !  initialize the observation matrix a.
+          f(1:ncof) = zero
+          a(1:ncof,1:iband) = zero
+
+          !  initialize the sum of squared residuals.
+          fp = zero
+
+          !  fetch the data points in the new order. main loop for the
+          !  different panels.
+          panels: do num=1,nreg
+
+              !  fix certain constants for the current panel; jrot records the column
+              !  number of the first non-zero element in a row of the observation
+              !  matrix according to a data point of the panel.
+              num1 = num-1
+              lx   = num1/nyy
+              l1   = lx+kx1
+              ly   = num1-lx*nyy
+              l2   = ly+ky1
+              jrot = lx*nk1y+ly
+
+              !  test whether there are still data points in the panel.
+              in = index(num)
+              points_left: do while (in/=0)
+
+                  ! fetch a new data point.
+                  wi = w(in)
+                  zi = z(in)*wi
+
+                  ! evaluate for the x-direction, the (kx+1) non-zero b-splines at x(in).
+                  hx = fpbspl(tx,nx,kx,x(in),l1)
+
+                  ! evaluate for the y-direction, the (ky+1) non-zero b-splines at y(in).
+                  hy = fpbspl(ty,ny,ky,y(in),l2)
+
+                  ! store the value of these b-splines in spx and spy respectively.
+                  spx(in,1:kx1) = hx(1:kx1)
+                  spy(in,1:ky1) = hy(1:ky1)
+
+                  ! initialize the new row of observation matrix.
+                  h(1:iband) = zero
+
+                  ! calculate the non-zero elements of the new row by making the cross
+                  ! products of the non-zero b-splines in x- and y-direction.
+                  i1 = 0
+                  do i=1,kx1
+                      hxi = hx(i)
+                      j1 = i1
+                      do j=1,ky1
+                          j1 = j1+1
+                          h(j1) = hxi*hy(j)*wi
+                      end do
+                      i1 = i1+nk1y
+                  end do
+
+                  ! rotate the row into triangle by givens transformations .
+                  call fp_rotate_row(h, iband, a, zi, f, jrot)
+
+                  ! add the contribution of the row to the sum of squares of residual right hand sides.
+                  fp = fp+zi**2
+
+                  ! find the number of the next data point in the panel.
+                  in = nummer(in)
+              end do points_left
+          end do panels
+
+          !  find dmax, the maximum value for the diagonal elements in the reduced triangle.
+          dmax = max(zero,maxval(a(1:ncof,1)))
+
+          ! check whether the observation matrix is rank deficient.
+          sigma = eps*dmax
+
+          if (all(a(1:ncof,1)>sigma)) then
+
+             ! backward substitution in case of full rank.
+             c(:ncof) = fpback(a,f,ncof,iband,nc)
+             rank = ncof
+             q(:ncof,1) = a(:ncof,1)/dmax
+
+          else
+
+             ! in case of rank deficiency, find the minimum norm solution.
+             ! check whether there is sufficient working space
+             lwest = ncof*iband+ncof+iband
+             if (lwest>lwrk) then
+                 ier = lwest
+                 call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+                 return
+             end if
+
+             ff(1:ncof) = f(1:ncof)
+             q(1:ncof,1:iband)=a(1:ncof,1:iband)
+             lf = 1
+             lh = lf+ncof
+             la = lh+iband
+             call fprank(q,ff,ncof,iband,nc,sigma,c,sq,rank,wrk(la),wrk(lf),wrk(lh))
+             q(1:ncof,1)=q(1:ncof,1)/dmax
+
+             ! add to the sum of squared residuals, the contribution of reducing the rank.
+             fp = fp+sq
+
+          endif
+
+          if (ier==FITPACK_LEASTSQUARES_OK) fp0 = fp
+
+          !  test whether the least-squares spline is an acceptable solution.
+          fpms = fp-s
+
+          if (iopt<0 .or. abs(fpms)<=acc) then
+              if (fp<=zero) then
+                 ier = FITPACK_INTERPOLATING_OK
+                 fp = zero
+              endif
+              if (ncof/=rank) ier = -rank
+              call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+              return
+          endif
+
+          ! test whether we can accept the choice of knots.
+          if (fpms<zero) exit compute_knots
+
+          ! test whether we cannot further increase the number of knots.
+          if (m<ncof) then
+              ier = FITPACK_TOO_MANY_KNOTS
+              call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+              return
+          endif
+
+          ier = FITPACK_OK
+
+          !  search where to add a new knot.
+          !  find for each interval the sum of squared residuals fpint for the
+          !  data points having the coordinate belonging to that knot interval.
+          !  calculate also coord which is the same sum, weighted by the position
+          !  of the data points considered.
+          fpint(:nrint) = zero
+          coord(:nrint) = zero
+          do num=1,nreg
+              num1 = num-1
+              lx   = num1/nyy
+              l1   = lx+1
+              ly   = num1-lx*nyy
+              l2   = ly+1+nxx
+              jrot = lx*nk1y+ly
+              in   = index(num)
+              do while (in/=0)
+                  store = zero
+                  i1 = jrot
+                  do i=1,kx1
+                    store = store+spx(in,i)*dot_product(spy(in,1:ky1),c(i1+1:i1+ky1))
+                    i1 = i1+nk1y
+                  end do
+                  store     = (w(in)*(z(in)-store))**2
+                  fpint(l1) = fpint(l1)+store
+                  coord(l1) = coord(l1)+store*x(in)
+                  fpint(l2) = fpint(l2)+store
+                  coord(l2) = coord(l2)+store*y(in)
+                  in = nummer(in)
+              end do
+          end do
+
+          !  find the interval for which fpint is maximal on the condition that
+          !  there still can be added a knot.
+
+          add_knot: do
+
+              l = 0
+              fpmax = zero
+              l1 = merge(nxx+1,    1,nx==nxe)
+              l2 = merge(nxx  ,nrint,ny==nye)
+
+              if (l1>l2) then
+                 ier = FITPACK_INSUFFICIENT_STORAGE
+                 call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+                 return
+              endif
+
+              l = 0
+              do i=l1,l2
+                  if (fpmax<fpint(i)) then
+                     l = i
+                     fpmax = fpint(i)
+                  endif
+              end do
+
+              ! test whether we cannot further increase the number of knots.
+              if (l==0) then
+                  ier = FITPACK_OVERLAPPING_KNOTS
+                  call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+                  return
+              end if
+
+              ! calculate the position of the new knot.
+              arg = coord(l)/fpint(l)
+
+              ! test in what direction the new knot is going to be added.
+              choose_direction: if (l<=nxx) then
+                  ! addition in the x-direction.
+                  jxy      = l+kx1
+                  fpint(l) = zero
+                  fac1     = tx(jxy)-arg
+                  fac2     = arg-tx(jxy-1)
+              else choose_direction
+                  ! addition in the y-direction.
+                  jxy      = l+ky1-nxx
+                  fpint(l) = zero
+                  fac1     = ty(jxy)-arg
+                  fac2     = arg-ty(jxy-1)
+              endif choose_direction
+
+              ! Suitable location
+              if (fac1<=(ten*fac2) .and. fac2<=(ten*fac1)) then
+
+                  ! Place knot
+                  place_knot: if (l<=nxx) then
+                      j = nx
+                      do i=jxy,nx
+                         tx(j+1) = tx(j)
+                         j = j-1
+                      end do
+                      tx(jxy) = arg
+                      nx = nx+1
+                  else place_knot
+                      j = ny
+                      do i=jxy,ny
+                         ty(j+1) = ty(j)
+                         j = j-1
+                      end do
+                      ty(jxy) = arg
+                      ny = ny+1
+                  end if place_knot
+
+                  exit add_knot
+
+              end if
+
+          end do add_knot
+          !  restart the computations with the new set of knots.
+      end do compute_knots
+
+      ! test whether the least-squares polynomial is a solution of our approximation problem.
+      if (ier==FITPACK_LEASTSQUARES_OK) then
+          call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+          return
+      endif
+
+      ! **********************************************************************************************
+      ! part 2: determination of the smoothing spline sp(x,y)
+      ! **********************************************************************************************
+      !  we have determined the number of knots and their position. we now compute the b-spline
+      !  coefficients of the smoothing spline sp(x,y). the observation matrix a is extended by the
+      !  rows of a matrix, expressing that sp(x,y) must be a polynomial of degree kx in x and ky in y.
+      !  the corresponding weights of these additional rows are set to 1./p.  iteratively we than have
+      !  to determine the value of p such that f(p)=sum((w(i)*(z(i)-sp(x(i),y(i))))**2) be = s.
+      !  we already know that the least-squares polynomial corresponds to p=0  and that the least-squares
+      !  spline corresponds to p=infinity. the iteration process which is proposed here makes use of
+      !  rational interpolation. since f(p) is a convex and strictly decreasing function of p, it can be
+      !  approximated by a rational function r(p)=(u*p+v)/(p+w). three values of p(p1,p2,p3) with
+      !  corresponding values of f(p) (f1=f(p1)-s,f2=f(p2)-s,f3=f(p3)-s) are used to calculate the
+      !  new value of p such that r(p)=s. convergence is guaranteed by taking f1 > 0 and f3 < 0.                                                   c
+      ! **********************************************************************************************
+
+      kx2 = kx1+1
+      ky2 = ky1+1
+
+      !  if there are interior knots in the x-direction,
+      !  evaluate the discotinuity jumps of the kx-th order derivative of
+      !  the b-splines at the knots tx(l),l=kx+2,...,nx-kx-1.
+      if (nk1x/=kx1) call fpdisc(tx,nx,kx2,bx,nmax)
+
+      !  if there are interior knots in the y-direction,
+      !  evaluate the discontinuity jumps of the ky-th order derivative of
+      !  the b-splines at the knots ty(l),l=ky+2,...,ny-ky-1.
+      if (nk1y/=ky1) call fpdisc(ty,ny,ky2,by,nmax)
+
+      !  initial value for p.
+      p1  = zero
+      f1  = fp0-s
+      p3  = -one
+      f3  = fpms
+      p   = sum(a(:ncof,1))/ncof
+
+      !  find the bandwidth of the extended observation matrix.
+      iband3 = kx1*nk1y
+      iband4 = iband3 +1
+      check1 = FP_FALSE
+      check3 = FP_FALSE
+
+      ! iteration process to find the root of f(p)=s.
+      root_iterations: do iter=1,maxit
+          pinv = one/p
+
+          ! store the triangularized observation matrix into q.
+          ff(1:ncof) = f(1:ncof)
+          q(1:ncof,1:iband) = a(1:ncof,1:iband)
+          q(1:ncof,iband+1:iband4) = zero
+
+          constant_x: if (nk1y/=ky1) then
+
+              ! extend the observation matrix with the rows of a matrix, expressing
+              ! that for x=cst. sp(x,y) must be a polynomial in y of degree ky.
+              do i=ky2,nk1y
+                  ii = i-ky1
+                  do j=1,nk1x
+
+                      ! initialize the new row.
+                      h(1:iband) = zero
+
+                      ! fill in the non-zero elements of the row. jrot records the column
+                      ! number of the first non-zero element in the row.
+                      h(1:ky2) = by(ii,1:ky2)*pinv
+                      zi   = zero
+                      jrot = (j-1)*nk1y+ii
+
+                      ! rotate the new row into triangle by givens transformations without square roots.
+                      call fp_rotate_shifted(h, iband, q, nc, zi, ff, jrot, ncof)
+                  end do
+              end do
+
+          end if constant_x
+
+          constant_y: if (nk1x/=kx1) then
+
+              ! extend the observation matrix with the rows of a matrix expressing
+              ! that for y=cst. sp(x,y) must be a polynomial in x of degree kx.
+              do i=kx2,nk1x
+                  ii = i-kx1
+                  do j=1,nk1y
+                      ! initialize the new row
+                      h(1:iband4) = zero
+
+                      ! fill in the non-zero elements of the row. jrot records the column
+                      ! number of the first non-zero element in the row.
+                      j1 = 1
+                      do l=1,kx2
+                          h(j1) = bx(ii,l)*pinv
+                          j1 = j1+nk1y
+                      end do
+
+                      zi = zero
+                      jrot = (i-kx2)*nk1y+j
+
+                      !  rotate the new row into triangle by givens transformations .
+                      call fp_rotate_shifted(h, iband4, q, nc, zi, ff, jrot, ncof)
+                  end do ! 631
+
+              end do
+
+          endif constant_y
+
+          ! find dmax, the maximum value for the diagonal elements in the reduced triangle.
+          dmax = max(zero,maxval(q(1:ncof,1),1))
+
+          ! check whether the matrix is rank deficient.
+          sigma = eps*dmax
+
+          if (all(q(1:ncof,1)>sigma)) then
+
+             ! backward substitution in case of full rank.
+             c(:ncof) = fpback(q,ff,ncof,iband4,nc)
+             rank = ncof
+
+          else
+
+             ! in case of rank deficiency, find the minimum norm solution.
+             lwest = ncof*iband4+ncof+iband4
+             if (lwest>lwrk) then
+                ier = lwest
+                call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+                return
+             end if
+
+             lf = 1
+             lh = lf+ncof
+             la = lh+iband4
+             call fprank(q,ff,ncof,iband4,nc,sigma,c,sq,rank,wrk(la),wrk(lf),wrk(lh))
+
+          endif
+
+          q(1:ncof,1) = q(1:ncof,1)/dmax
+
+          ! compute f(p).
+          fp = zero
+          get_fp: do num = 1,nreg
+              num1 = num-1
+              lx = num1/nyy
+              ly = num1-lx*nyy
+              jrot = lx*nk1y+ly
+              in = index(num)
+              do while (in/=0)
+                  store = zero
+                  i1 = jrot
+                  do i=1,kx1
+                    store = store+spx(in,i)*dot_product(spy(in,1:ky1),c(i1+1:i1+ky1))
+                    i1 = i1+nk1y
+                  end do
+                  fp = fp+(w(in)*(z(in)-store))**2
+                  in = nummer(in)
+              end do
+          end do get_fp
+
+          ! test whether the approximation sp(x,y) is an acceptable solution.
+          fpms = fp-s
+          if (abs(fpms)<=acc) then
+             if (ncof/=rank) ier = -rank
+             call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+             return
+          end if
+
+          ! find the new value of p and carry out one more step.
+          call root_finding_iterate(p1,f1,p2,f2,p3,f3,p,fpms,acc,check1,check3,success)
+          if (.not.success) then
+             ier = FITPACK_S_TOO_SMALL
+             call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+             return
+          end if
+
+      end do root_iterations
+
+      ! the maximum allowable number of iterations has been reached.
+      ier = FITPACK_MAXIT
+
+      ! test whether x and y are in the original order.
+      call sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+      return
+
+      contains
+
+          !> @brief Restore original x/y ordering if axes were interchanged.
+          !!
+          !! When fpsurf interchanges the \f$ x \f$- and \f$ y \f$-axes for
+          !! efficiency (ensuring more knots in the outer loop direction),
+          !! this routine swaps them back on exit so the caller sees the
+          !! original orientation.
+          pure subroutine sort_xy(interchanged,m,nmax,nc,nk1x,nk1y,iopt,l1,l2,c,f,x,y,tx,ty,nx,ny,nx0,ny0)
+              logical(FP_BOOL), intent(in) :: interchanged
+              integer(FP_SIZE), intent(in) :: m,nmax,nc,iopt,nk1x,nk1y
+              integer(FP_SIZE), intent(inout) :: l1,l2,nx,ny,nx0,ny0
+              real(FP_REAL), intent(inout) :: x(m),y(m),tx(nmax),ty(nmax),c(nc),f(nc)
+
+              integer(FP_SIZE) :: i,j,n,ncof
+
+              restore_xy: if (interchanged) then
+
+                  ! if not, interchange x and y once more.
+                  ncof = nk1x*nk1y
+
+                  ! Sort c using f as a temporary array
+                  l1 = 1
+                  do i=1,nk1x
+                    l2 = i
+                    do j=1,nk1y
+                      f(l2) = c(l1)
+                      l1 = l1+1
+                      l2 = l2+nk1x
+                    end do
+                  end do
+                  c(1:ncof) = f(1:ncof)
+
+                  n = min(nx,ny)
+                  call fitpack_swap(x,y)
+                  call fitpack_swap(tx,ty)
+                  call fitpack_swap(nx,ny)
+
+              endif restore_xy
+
+              if (iopt>=0) then
+                 nx0 = nx
+                 ny0 = ny
+              endif
+
+          end subroutine sort_xy
+
+      end subroutine fpsurf
+
+      !> @brief Solve a small symmetric linear system by Cholesky factorization.
+      !!
+      !! Solves the \f$ n \times n \f$ symmetric positive definite system
+      !! \f$ A \, b = g \f$ with \f$ n \leq 6 \f$ using Cholesky
+      !! decomposition. On exit, `g` contains the solution \f$ b \f$.
+      !!
+      !! Used by fpopdi and fpopsp for the small optimization problems that
+      !! determine the optimal origin/pole boundary parameters.
+      !!
+      !! @param[in,out] a  Symmetric matrix, dimension `(6, 6)`. Only the
+      !!                   first `n` rows and columns are used.
+      !! @param[in]     n  System dimension (\f$ n \leq 6 \f$)
+      !! @param[in,out] g  On entry, right-hand side. On exit, solution.
+      pure subroutine fpsysy(a,n,g)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    ::  n
+      !  ..array arguments..
+      real(FP_REAL), intent(inout) :: a(6,6)
+      real(FP_REAL), intent(inout) :: g(6)
+
+      !  ..local scalars..
+      real(FP_REAL) :: fac
+      integer(FP_SIZE) :: i,i1,j,k
+      !  ..
+      g(1) = g(1)/a(1,1)
+      if (n==1) return
+      !  decomposition of the symmetric matrix (a) = (l) * (d) *(l)'  with (l) a unit lower triangular
+      !  matrix and (d) a diagonal matrix
+      a(2:n,1) = a(2:n,1)/a(1,1)
+
+      do i=2,n
+         i1 = i-1
+         do k=i,n
+            fac = a(k,i)
+            do j=1,i1
+               fac = fac-a(j,j)*a(k,j)*a(i,j)
+            end do
+            a(k,i) = fac
+            if (k>i) a(k,i) = fac/a(i,i)
+         end do
+      end do
+      !  solve the system (l)*(d)*(l)'*(b) = (g).
+
+      !  first step : solve (l)*(d)*(c) = (g).
+      do i=2,n
+         i1 = i-1
+         fac = g(i)
+         do j=1,i1
+            fac = fac-g(j)*a(j,j)*a(i,j)
+         end do
+         g(i) = fac/a(i,i)
+      end do
+
+      !  second step : solve (l)'*(b) = (c)
+      i = n
+      do j=2,n
+         i1 = i
+         i = i-1
+         fac = g(i)
+         do k=i1,n
+            fac = fac-g(k)*a(k,i)
+         end do
+         g(i) = fac
+      end do
+      return
+      end subroutine fpsysy
+
+
+      !> @brief Triangularize the tensor-product system for non-periodic grids.
+      !!
+      !! Reduces the \f$ (m + n - 7) \times (n - 4) \f$ augmented observation
+      !! matrix to upper triangular form using Givens rotations (Eq. 10.8),
+      !! simultaneously transforming the \f$ m \times mm \times d \f$ data
+      !! matrix \f$ Z \f$ into the \f$ (n-4) \times mm \times d \f$ RHS
+      !! matrix \f$ Q \f$. Used in the second phase of the Kronecker product
+      !! decomposition for parametric grid surfaces (fppasu via fpgrpa).
+      !!
+      !! @param[in]     m       Number of grid points in this direction
+      !! @param[in]     mm      Number of columns in the RHS (other direction size)
+      !! @param[in]     idim    Number of surface dimensions \f$ d \f$
+      !! @param[in]     n       Number of knots in this direction
+      !! @param[in]     nr      Knot interval indices, length `m`
+      !! @param[in]     sp      B-spline values at grid points, `(m, 4)`
+      !! @param[in]     p       Smoothing parameter
+      !! @param[in]     b       Discontinuity jump matrix, `(n, 5)`
+      !! @param[in]     z       Data matrix, length \f$ m \cdot mm \cdot d \f$
+      !! @param[out]    a       Triangularized band matrix, `(n, 5)`
+      !! @param[out]    q       Transformed RHS, length \f$ (n-4) \cdot mm \cdot d \f$
+      !! @param[out]    right   Work: RHS row vector, length \f$ mm \cdot d \f$
+      !!
+      !! @see Dierckx, Ch. 10, §10.2 (pp. 170-172), Eq. 10.8
+      !! @see fptrpe — periodic variant; fp_rotate_row_stride — stride rotation
+      pure subroutine fptrnp(m,mm,idim,n,nr,sp,p,b,z,a,q,right)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in) :: p
+      integer(FP_SIZE), intent(in) :: m,mm,idim,n
+      !  ..array arguments..
+      real(FP_REAL), intent(in)  :: sp(m,4),b(n,5),z(m*mm*idim)
+      real(FP_REAL), intent(out) :: q((n-4)*mm*idim),a(n,5),right(mm*idim)
+      integer(FP_SIZE), intent(in)  :: nr(m)
+
+      !  ..local scalars..
+      real(FP_REAL) :: pinv
+      integer     :: i,iband,irot,it,ii,j,jj,l,mid,nmd,m2,m3,nrold,n4,number,n1
+      !  ..local arrays..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+      !  ..subroutine references..
+      !    fpgivs,fprota
+      !  ..
+      pinv = merge(one/p,one,p>zero)
+      n4   = n-4
+      mid  = mm*idim
+      m2   = m*mm
+      m3   = n4*mm
+      !  reduce the matrix (a) to upper triangular form (r) using givens
+      !  rotations. apply the same transformations to the rows of matrix z
+      !  to obtain the mm x (n-4) matrix g.
+      !  store matrix (r) into (a) and g into q.
+      !  initialization.
+      nmd         = n4*mid
+      q(1:nmd)    = zero
+      a(1:n4,1:5) = zero
+
+
+      !  iband denotes the bandwidth of the matrices (a) and (r).
+      iband = 4
+      nrold  = 0
+      number = nr(1)
+      rows: do it=1,m
+         number = nr(it)
+         increase_old: do ! 150
+             if (nrold/=number) then
+
+                 if (p<=zero) then
+                    nrold = nrold+1
+                    cycle increase_old
+                 end if
+                 iband = 5
+                 ! fetch a new row of matrix (b).
+                 n1 = nrold+1
+                 h(1:5) = b(n1,1:5)*pinv
+                 !  find the appropriate column of q.
+                 right(1:mid) = zero
+                 irot = nrold
+
+             else
+                 ! fetch a new row of matrix (sp).
+                 h(iband) = zero
+                 h(1:4) = sp(it,1:4)
+                 ! find the appropriate column of q.
+                 j = 0
+                 do ii=1,idim
+                   l = (ii-1)*m2+(it-1)*mm
+                   do jj=1,mm
+                     j = j+1
+                     l = l+1
+                     right(j) = z(l)
+                   end do
+                 end do
+                 irot = number
+             endif
+
+             ! rotate the new row of matrix (a) into triangle.
+             call fp_rotate_row_stride(h, iband, a, n, right, q, n4, mid, irot)
+
+             if (nrold==number) cycle rows
+             nrold = nrold+1
+         end do increase_old
+      end do rows
+      return
+      end subroutine fptrnp
+
+
+      !> @brief Triangularize the tensor-product system for periodic grids.
+      !!
+      !! Periodic variant of fptrnp. Reduces the \f$ (m + n - 7) \times (n - 7) \f$
+      !! cyclic band matrix to upper triangular form using two-matrix Givens
+      !! rotations (fp_rotate_2mat_stride), simultaneously transforming the
+      !! data matrix \f$ Z \f$ into the RHS matrix \f$ Q \f$. The periodicity
+      !! wraps the last columns into the first, creating the block-triangular
+      !! structure stored in `a` (main) and `aa` (periodic block).
+      !!
+      !! @param[in]     m       Number of grid points in this direction
+      !! @param[in]     mm      Number of columns in the RHS
+      !! @param[in]     idim    Number of surface dimensions \f$ d \f$
+      !! @param[in]     n       Number of knots in this direction
+      !! @param[in]     nr      Knot interval indices, length `m`
+      !! @param[in]     sp      B-spline values at grid points, `(m, 4)`
+      !! @param[in]     p       Smoothing parameter
+      !! @param[in]     b       Discontinuity jump matrix, `(n, 5)`
+      !! @param[in]     z       Data matrix, length \f$ m \cdot mm \cdot d \f$
+      !! @param[out]    a       Triangularized band matrix (main block), `(n, 5)`
+      !! @param[out]    aa      Triangularized periodic block, `(n, 4)`
+      !! @param[out]    q       Transformed RHS, length \f$ (n-7) \cdot mm \cdot d \f$
+      !! @param[out]    right   Work: RHS row vector, length \f$ mm \cdot d \f$
+      !!
+      !! @see Dierckx, Ch. 10, §10.2 (pp. 170-172), Eq. 10.8 (periodic)
+      !! @see fptrnp — non-periodic variant; fp_rotate_2mat_stride — periodic rotation
+      pure subroutine fptrpe(m,mm,idim,n,nr,sp,p,b,z,a,aa,q,right)
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in) :: p
+      integer(FP_SIZE), intent(in) :: m,mm,idim,n
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: sp(m,4),b(n,5),z(m*mm*idim)
+      real(FP_REAL), intent(out) :: q((n-7)*mm*idim),right(mm*idim),a(n,5),aa(n,4)
+      integer(FP_SIZE), intent(in) :: nr(m)
+
+      !  ..local scalars..
+      real(FP_REAL) :: pinv
+      integer(FP_SIZE) :: i,irot,it,ii,j,jj,l,mid,nmd,m2,m3,nrold,n4,number,n1,n7,n11,m1
+      integer(FP_SIZE) :: jk,jper,l0,l1,ik
+      !  ..local arrays..
+      real(FP_REAL) :: h(DEGREE_3+2),h1(DEGREE_3+2),h2(DEGREE_3+1)
+
+      !  ..
+      pinv = merge(one/p,one,p>zero)
+      n4   = n-4
+      n7   = n-7
+      n11  = n-11
+      mid  = mm*idim
+      m2   = m*mm
+      m3   = n7*mm
+      m1   = m-1
+
+      !  we determine the matrix (a) and then we reduce her to upper triangular form (r) using givens
+      !  rotations. we apply the same transformations to the rows of matrix z to obtain the (mm) x (n-7)
+      !  matrix g. we store matrix (r) into a and aa, g into q. the n7 x n7 upper triangular matrix (r)
+      !  has the form
+      !             | a1 '     |
+      !       (r) = |    ' a2  |
+      !             |  0 '     |
+      !  with (a2) a n7 x 4 matrix and (a1) a n11 x n11 upper triangular matrix of bandwidth 5.
+
+      !  initialization.
+      jper  = 0
+      nrold = 0
+      nmd   = n7*mid
+      q (1:nmd)  = zero
+      aa(1:n4,:) = zero
+      a (1:n4,:) = zero
+
+      iterate: do it=1,m1
+         number = nr(it)
+         inner: do
+             if (nrold==number) then
+
+                ! fetch a new row of matrix (sp)
+                h = [sp(it,:),zero]
+                ! find the appropriate row of q.
+                j = 0
+                do ii=1,idim
+                   l = (ii-1)*m2+(it-1)*mm
+                   do jj=1,mm
+                      j = j+1
+                      l = l+1
+                      right(j) = z(l)
+                   end do
+                end do
+
+             elseif (p<=zero) then
+                nrold = nrold+1
+                cycle inner
+             else
+
+                ! fetch a new row of matrix (b).
+                n1 = nrold+1
+                h = b(n1,:)*pinv
+                ! find the appropriate row of q.
+                right(:mid) = zero
+
+             endif
+
+             ! test whether there are non-zero values in the new row of (a)
+             ! corresponding to the b-splines n(j,*),j=n7+1,...,n4.
+             if (nrold>=n11) then
+
+                 if (jper==0) then
+                    ! initialize the matrix (aa).
+                    jk = n11+1
+                    do i=1,4
+                       ik = jk
+                       do j=1,5
+                          if (ik<=0) exit
+                          aa(ik,i) = a(ik,j)
+                          ik = ik-1
+                       end do
+                       jk = jk+1
+                    end do
+                    jper = 1
+                 endif
+
+                 ! if one of the non-zero elements of the new row corresponds to one of
+                 ! the b-splines n(j;*),j=n7+1,...,n4,we take account of the periodicity
+                 ! conditions for setting up this row of (a).
+                 h1 = zero
+                 h2 = zero
+                 j  = nrold-n11
+                 do i=1,5
+                    j  = j+1
+                    l0 = j
+                    l1 = l0-4
+                    do while (l1>max(0,n11))
+                       l0 = l1-n11
+                       l1 = l0-4
+                    end do
+                    if (l1>0) then
+                       h1(l1) = h(i)
+                    else
+                       h2(l0) = h2(l0) + h(i)
+                    endif
+                 end do
+
+                 ! rotate the new row of (a) into triangle.
+                 call fp_rotate_2mat_stride(h1, 5, h2, 4, a, aa, n, &
+                                            right, q, n7, mid, 1, n11)
+
+             else
+
+                ! rotation into triangle of the new row of (a), in case the elements
+                ! corresponding to the b-splines n(j;*),j=n7+1,...,n4 are all zero.
+                call fp_rotate_row_stride(h, 5, a, n, right, q, n7, mid, nrold)
+             endif
+
+             if (nrold==number) exit inner
+
+             nrold = nrold+1
+
+         end do inner
+      end do iterate
+      return
+      end subroutine fptrpe
+
+
+      !  subroutine insert inserts a new knot x into a spline function s(x) of degree k and calculates
+      !  the b-spline representation of s(x) with respect to the new set of knots. in addition, if
+      !  iopt/=0, s(x) will be considered as a periodic spline with period per=t(n-k)-t(k+1) satisfying
+      !  the boundary constraints
+      !       t(i+n-2*k-1) = t(i)+per  ,i=1,2,...,2*k+1
+      !       c(i+n-2*k-1) = c(i)      ,i=1,2,...,k
+      !  in that case, the knots and b-spline coefficients returned will also satisfy the periodic BCs, i.e.
+      !       tt(i+nn-2*k-1) = tt(i)+per  ,i=1,2,...,2*k+1
+      !       cc(i+nn-2*k-1) = cc(i)      ,i=1,2,...,k
+
+      !> @brief Insert a single knot into a spline, returning a new B-spline representation.
+      !!
+      !! Inserts the knot \f$ x \f$ into the B-spline representation of \f$ s(x) \f$ using
+      !! the Boehm knot insertion algorithm. The spline itself is unchanged; only its
+      !! representation (knots and coefficients) is updated.
+      !!
+      !! Can be called with output arrays aliased to input arrays to replace the
+      !! representation in place: `call insert(iopt,t,n,c,k,x,t,n,c,nest,ier)`.
+      !!
+      !! @param[in]  iopt  Periodicity flag: `0` = non-periodic; `/=0` = periodic spline.
+      !! @param[in]  t     Input knot positions (length `nest`).
+      !! @param[in]  n     Number of knots before insertion.
+      !! @param[in]  c     Input B-spline coefficients (length `nest`).
+      !! @param[in]  k     Degree of the spline.
+      !! @param[in]  x     Location of the knot to insert.
+      !!   Must satisfy \f$ t_{k+1} \le x \le t_{n-k} \f$.
+      !! @param[out] tt    Output knot positions (length `nest`).
+      !! @param[out] nn    Number of knots after insertion (\f$ n + 1 \f$).
+      !! @param[out] cc    Output B-spline coefficients (length `nest`).
+      !! @param[in]  nest  Array dimension. Must satisfy `nest > n`.
+      !! @param[out] ier   Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 1, §1.3.4 (pp. 13--14), Eq. 1.46--1.48; fpinst — knot insertion kernel
+      pure subroutine insert(iopt,t,n,c,k,x,tt,nn,cc,nest,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)  :: iopt,n,k,nest
+      integer(FP_SIZE), intent(out) :: nn
+      integer(FP_FLAG), intent(out) :: ier
+      real(FP_REAL),    intent(in)  :: x
+      !  ..array arguments..
+      real(FP_REAL), intent(in)  :: t(nest),c(nest)
+      real(FP_REAL), intent(out) :: tt(nest),cc(nest)
+      !  ..local scalars..
+      integer(FP_SIZE) :: kk,k1,l,nk,nk1
+      !  ..
+      !  before starting computations a data check is made. if the input data
+      !  are invalid control is immediately repassed to the calling program.      
+      ier = FITPACK_INPUT_ERROR
+      if (nest<=n) then 
+         tt = t
+         cc = c
+         nn = n
+         return
+      endif  
+      k1 = k+1
+      nk = n-k
+      if (x<t(k1) .or. x>t(nk)) then 
+         tt = t
+         cc = c
+         nn = n
+         return
+      endif        
+      !  search for knot interval t(l) <= x < t(l+1).
+      nk1 = nk-1
+      l = fp_knot_interval(t, x, k1, nk1)
+
+      !  no interval found in whole range
+      if (t(l)>=t(l+1)) then 
+         tt = t
+         cc = c
+         nn = n
+         return
+      endif        
+
+      if (iopt/=0) then
+         kk = 2*k
+         if (l<=kk .and. l>=(n-kk)) then 
+             tt = t
+             cc = c
+             nn = n
+             return
+         end if
+      endif
+
+      ier = FITPACK_OK
+      !  insert the new knot.
+      call fpinst(iopt,t,n,c,k,x,l,tt,nn,cc,nest)
+
+      end subroutine insert
+
+      !> @brief Insert a single knot into a spline in place (avoiding aliasing issues).
+      !!
+      !! Wrapper around insert that uses temporary arrays to safely update the knot
+      !! and coefficient arrays in place, avoiding the aliasing of input/output arguments
+      !! present in the original Fortran 77 calling convention.
+      !!
+      !! @param[in]     iopt  Periodicity flag: `0` = non-periodic; `/=0` = periodic.
+      !! @param[in,out] t     Knot positions (length `nest`). Updated on exit.
+      !! @param[in,out] n     Number of knots. Updated to \f$ n + 1 \f$ on exit.
+      !! @param[in,out] c     B-spline coefficients (length `nest`). Updated on exit.
+      !! @param[in]     k     Degree of the spline.
+      !! @param[in]     x     Location of the knot to insert.
+      !! @param[in]     nest  Array dimension. Must satisfy `nest > n`.
+      !! @param[out]    ier   Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @see insert — non-aliased variant
+      pure subroutine insert_inplace(iopt,t,n,c,k,x,nest,ier)
+
+          integer(FP_SIZE), intent(in)    :: iopt,k,nest
+          integer(FP_FLAG), intent(out)   :: ier
+          real(FP_REAL),    intent(in)    :: x
+          integer(FP_SIZE), intent(inout) :: n
+          !  ..array arguments..
+          real(FP_REAL), intent(inout) :: t(nest),c(nest)
+
+          ! Temporary storage
+          real(FP_REAL) :: tt(nest),cc(nest)
+          integer(FP_SIZE) :: nn
+
+          ! Call insert
+          call insert(iopt,t,n,c,k,x,tt,nn,cc,nest,ier)
+
+          ! Return values
+          t = tt
+          c = cc
+          n = nn
+
+      end subroutine insert_inplace
+
+
+      !> @brief Determine a smooth parametric spline curve approximation.
+      !!
+      !! Given \f$ m \f$ ordered points \f$ \mathbf{x}_i \in \mathbb{R}^{\text{idim}} \f$ with
+      !! weights \f$ w_i > 0 \f$ and parameter values \f$ u_i \f$, computes an open parametric
+      !! spline curve \f$ \mathbf{s}(u) = (s_1(u),\ldots,s_{\text{idim}}(u)) \f$ of degree
+      !! \f$ k \f$ on \f$ [u_b, u_e] \f$.
+      !!
+      !! If `ipar=0`, parameter values are computed automatically from cumulative
+      !! chord lengths: \f$ u_i = v_i / v_m \f$ where \f$ v_i = v_{i-1} + \|\mathbf{x}_i - \mathbf{x}_{i-1}\| \f$,
+      !! with \f$ u_b = 0 \f$ and \f$ u_e = 1 \f$.
+      !!
+      !! Smoothness is controlled by requiring
+      !! \f$ F(p) = \sum w_i^2 \|\mathbf{x}_i - \mathbf{s}(u_i)\|^2 \le S \f$.
+      !!
+      !! @param[in]     iopt  Computation mode: `-1` (LSQ), `0` (new smoothing), `1` (continue).
+      !! @param[in]     ipar  Parameter mode: `0` = automatic, `1` = user-supplied.
+      !! @param[in]     idim  Dimension of the curve, \f$ 1 \le \text{idim} \le 10 \f$.
+      !! @param[in]     m     Number of data points, \f$ m > k \f$.
+      !! @param[in,out] u     Parameter values (length \f$ m \f$). Output when `ipar=0`.
+      !! @param[in]     mx    Declared dimension of `x`, \f$ \ge \text{idim} \times m \f$.
+      !! @param[in]     x     Data coordinates (length `mx`): `x(idim*(i-1)+j)` = \f$ j \f$-th
+      !!   coordinate of point \f$ i \f$.
+      !! @param[in,out] w     Weights (length \f$ m \f$), strictly positive.
+      !! @param[in,out] ub    Lower parameter bound. Set to 0 when `ipar=0`.
+      !! @param[in,out] ue    Upper parameter bound. Set to 1 when `ipar=0`.
+      !! @param[in]     k     Spline degree, \f$ 1 \le k \le 5 \f$. Cubic recommended.
+      !! @param[in,out] s     Smoothing factor \f$ S \ge 0 \f$.
+      !! @param[in]     nest  Over-estimate of total knots. `nest=m+k+1` always suffices.
+      !! @param[in,out] n     Total number of knots.
+      !! @param[in,out] t     Knot positions (length `nest`).
+      !! @param[in]     nc    Declared dimension of `c`, \f$ \ge \text{nest} \times \text{idim} \f$.
+      !! @param[in,out] c     B-spline coefficients (length `nc`).
+      !! @param[out]    fp    Weighted sum of squared residuals.
+      !! @param[in,out] wrk   Real workspace, length \f$ \ge m(k+1) + \text{nest}(6+\text{idim}+3k) \f$.
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace (length `nest`).
+      !! @param[out]    ier   Error flag (same codes as curfit).
+      !!
+      !! @see Dierckx, Ch. 6, §6.3; fppara — core parametric fitting algorithm
+      pure subroutine parcur(iopt,ipar,idim,m,u,mx,x,w,ub,ue,k,s,nest,n,t,nc,c,fp,wrk,lwrk,iwrk,ier)
+
+      !  ..scalar arguments..
+      real(FP_REAL), intent(inout) :: ub,ue,s
+      real(FP_REAL), intent(out) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,ipar,idim,m,mx,k,nest,lwrk,nc
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: x(idim,m)
+      real(FP_REAL), intent(inout) :: u(m),w(m),t(nest),c(nc),wrk(lwrk)
+      integer(FP_SIZE), intent(inout) :: iwrk(nest)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ia,ib,ifp,ig,iq,iz,j,k1,k2,lwest,nmin,ncc
+
+
+      !  we set up the parameters tol and maxit
+      integer(FP_SIZE), parameter :: maxit = 20
+      real(FP_REAL), parameter :: tol = smallnum03
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      if (iopt<(-1) .or. iopt>1)       return
+      if (ipar<0 .or. ipar>1)          return
+      if (idim<=0 .or. idim>MAX_IDIM)  return
+      if (k<=0 .or. k>5)               return
+
+      k1 = k+1
+      k2 = k1+1
+      nmin = 2*k1
+      if (m<k1 .or. nest<nmin)         return
+      ncc = nest*idim
+      if (mx<m*idim .or. nc<ncc)       return
+      lwest = m*k1+nest*(6+idim+3*k)
+      if (lwrk<lwest)                  return
+
+      ! Normalize coordinates
+      if (ipar==0 .and. iopt<=0) then
+
+          ! Point coordinates are stored in x(:), offset by idim values
+          u(1) = zero
+          do i=2,m
+             u(i) = u(i-1) + norm2(x(:,i)-x(:,i-1))
+          end do
+          if (u(m)<=zero) return
+
+          u(2:) = u(2:)/u(m)
+          ub    = zero
+          ue    = one
+          u(m)  = ue
+      endif
+
+      if (ub>u(1) .or. ue<u(m) .or. w(1)<=zero) return
+      if (any(u(1:m-1)>=u(2:) .or. w(2:)<=zero)) return
+      if (iopt<0) then
+          if (n<nmin .or. n>nest) return
+          j = n
+          do i=1,k1
+             t(i) = ub
+             t(j) = ue
+             j = j-1
+          end do
+          ier = fpchec(u,m,t,n,k); if (ier/=FITPACK_OK) return
+
+      else
+
+          if (s<zero) return
+          if (equal(s,zero) .and. nest<(m+k1)) return
+
+          ier = FITPACK_OK
+
+      endif
+
+      ! we partition the working space and determine the spline curve.
+      ifp = 1
+      iz = ifp+nest
+      ia = iz+ncc
+      ib = ia+nest*k1
+      ig = ib+nest*k2
+      iq = ig+nest*k2
+         call fppara(iopt,idim,m,u,mx,x,w,ub,ue,k,s,nest,tol,maxit,k1,k2, &
+                     n,t,ncc,c,fp,wrk(ifp),wrk(iz),wrk(ia),wrk(ib),wrk(ig),wrk(iq),iwrk,ier)
+      return
+      end subroutine parcur
+
+
+
+      !> @brief B-spline coefficients of a partial-derivative spline (any dimension).
+      !!
+      !! The partial derivative \f$ \partial^{\nu_1+\cdots+\nu_d} s / \partial x_1^{\nu_1}\cdots
+      !! \partial x_d^{\nu_d} \f$ of a tensor-product spline is itself a tensor-product spline of
+      !! per-axis degrees \f$ k_d-\nu_d \f$ over the trimmed knot vectors \f$ t(\nu_d{+}1:n_d{-}\nu_d,d) \f$.
+      !! This routine returns that spline's coefficients. The 1-D B-spline derivative recurrence is applied
+      !! `nu(d)` times along each axis `d`; after each axis the tensor is repacked contiguously (the N-D
+      !! replacement for the 2-D "gaps + compaction" trick). Every output coefficient is a single
+      !! independent expression (no summation), so at dims=2 the result reduces to the classic bivariate
+      !! coefficient transform regardless of the fiber-iteration order.
+      !!
+      !! @param[in]  dims  Number of axes (domain dimension)
+      !! @param[in]  t     Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]  n     Number of knots per axis, `n(dims)`
+      !! @param[in]  c     Input B-spline coefficient tensor, flat row-major (first axis slowest)
+      !! @param[in]  k     Spline degree per axis, `k(dims)`
+      !! @param[in]  nu    Derivative order per axis, \f$ 0 \le \nu_d < k_d \f$
+      !! @param[out] newc  Derivative coefficients, packed contiguously at the front (row-major over the
+      !!                   reduced tensor of size \f$ \prod_d (n(d)-k(d)-1-\nu_d) \f$); must be sized
+      !!                   \f$ \ge \prod_d (n(d)-k(d)-1) \f$
+      !! @param[out] ier   FITPACK_OK on success, FITPACK_INPUT_ERROR on bad input
+      !!
+      !! @see pardtc, parder, pardeu; todo/fitpack_nd_grids.md
+      pure subroutine pardtc(dims,t,n,c,k,nu,newc,ier)
+          integer(FP_DIM),  intent(in)  :: dims
+          integer(FP_SIZE), intent(in)  :: n(dims),k(dims),nu(dims)
+          real(FP_REAL),    intent(in)  :: t(:,:),c(:)
+          real(FP_REAL),    intent(out) :: newc(:)
+          integer(FP_FLAG), intent(out) :: ier
+
+          integer(FP_DIM)  :: d
+          integer(FP_SIZE) :: nk1(dims),cur(dims),curn(dims),str(dims),strn(dims),idx(dims)
+          integer(FP_SIZE) :: nc,ncn,p,o,i,l1,l2,src_lo,src_hi
+          real(FP_REAL)    :: ak,fac,tmp(size(newc))
+
+          ier = FITPACK_INPUT_ERROR
+          if (any(nu<0) .or. any(nu>=k)) return
+          ier = FITPACK_OK
+
+          nk1        = n-k-1
+          nc         = product(nk1)
+          newc(1:nc) = c(1:nc)
+          cur        = nk1
+
+          !  differentiate one axis at a time; after each pass repack into a fresh contiguous tensor
+          axes: do d=1,dims
+             if (nu(d)==0) cycle axes
+             passes: do p=1,nu(d)
+                ak   = real(k(d)-p+1, FP_REAL)       ! running degree before this pass (= 2-D "ak")
+                str  = fp_grid_strides(dims,cur)     ! current (old) layout
+                curn = cur; curn(d) = cur(d)-1       ! one fewer coefficient along axis d
+                strn = fp_grid_strides(dims,curn)    ! new layout
+                ncn  = product(curn)
+                do o=0,ncn-1
+                   idx = fp_grid_unravel(dims,o,curn)   ! reduced multi-index; o == its flat offset
+                   i   = idx(d)
+                   l1  = p + i                          ! knot addressing identical to 2-D pardtc
+                   l2  = i + k(d) + 1
+                   fac = t(l2,d) - t(l1,d)
+                   src_lo = fp_grid_index(dims,idx,str)
+                   if (fac>zero) then
+                      idx(d) = i+1
+                      src_hi = fp_grid_index(dims,idx,str)
+                      tmp(o+1) = (newc(src_hi+1)-newc(src_lo+1))*ak/fac
+                   else
+                      tmp(o+1) = newc(src_lo+1)         ! coincident knots: keep source (2-D semantics)
+                   end if
+                end do
+                newc(1:ncn) = tmp(1:ncn)
+                cur = curn
+             end do passes
+          end do axes
+          return
+      end subroutine pardtc
+
+      !> @brief Evaluate a partial derivative of a tensor-product spline on a grid (any dimension).
+      !!
+      !! Computes the derivative coefficients via `pardtc`, then evaluates the resulting reduced-degree
+      !! spline on the grid through the N-D evaluation front-end `ndspev`. The flat real workspace is
+      !! carved into `[nc derivative coefficients | ndspev basis scratch]`, mirroring 2-D parder.
+      !!
+      !! @param[in]     dims  Number of axes (domain dimension)
+      !! @param[in]     t     Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]     n     Number of knots per axis, `n(dims)`
+      !! @param[in]     c     B-spline coefficient tensor, flat row-major (first axis slowest)
+      !! @param[in]     k     Spline degree per axis, `k(dims)`
+      !! @param[in]     nu    Derivative order per axis, \f$ 0 \le \nu_d < k_d \f$
+      !! @param[in]     xg    Per-axis evaluation grids; column \f$ d \f$ is `xg(1:m(d),d)`
+      !! @param[in]     m     Number of evaluation points per axis, `m(dims)`
+      !! @param[out]    z     Derivative values, flat row-major, length `product(m)`
+      !! @param[in,out] wrk   Real workspace, length \f$ \ge \prod_d nk1_d + \max_d m_d\,(\max_d(k_d{-}\nu_d){+}1)\,d \f$
+      !! @param[in]     lwrk  Declared dimension of `wrk`
+      !! @param[in,out] iwrk  Integer workspace, length \f$ \ge \max_d m_d \cdot dims \f$
+      !! @param[in]     kwrk  Declared dimension of `iwrk`
+      !! @param[out]    ier   FITPACK_OK on success, FITPACK_INPUT_ERROR on bad input/workspace
+      !!
+      !! @see parder, pardtc, ndspev; todo/fitpack_nd_grids.md
+      pure subroutine parder(dims,t,n,c,k,nu,xg,m,z,wrk,lwrk,iwrk,kwrk,ier)
+          integer(FP_DIM),  intent(in)    :: dims
+          integer(FP_SIZE), intent(in)    :: n(dims),k(dims),nu(dims),m(dims),lwrk,kwrk
+          real(FP_REAL),    intent(in)    :: t(:,:),c(:),xg(:,:)
+          real(FP_REAL),    intent(out)   :: z(:)
+          real(FP_REAL),    intent(inout) :: wrk(lwrk)
+          integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+          integer(FP_FLAG), intent(out)   :: ier
+
+          integer(FP_DIM)  :: d
+          integer(FP_SIZE) :: nk1(dims),kn(dims),nn(dims),nc,maxm,maxk1,lev,lwest,kwest
+          real(FP_REAL)    :: ttrim(maxval(n),dims)
+
+          ier   = FITPACK_INPUT_ERROR
+          if (any(nu<0) .or. any(nu>=k)) return
+          if (any(m<1)) return
+
+          nk1   = n-k-1
+          nc    = product(nk1)
+          kn    = k-nu
+          nn    = n-2*nu
+          maxm  = maxval(m)
+          maxk1 = maxval(kn)+1
+          lev   = maxm*maxk1*dims
+          lwest = nc + lev
+          kwest = maxm*dims
+          if (lwrk<lwest .or. kwrk<kwest) return
+
+          !  derivative coefficients (packed at the front of wrk)
+          call pardtc(dims,t,n,c,k,nu,wrk(1:nc),ier)
+          if (.not.FITPACK_SUCCESS(ier)) return
+
+          !  trimmed per-axis knot vectors of the derivative spline
+          ttrim = zero
+          do d=1,dims
+             ttrim(1:nn(d),d) = t(nu(d)+1:n(d)-nu(d),d)
+          end do
+
+          !  evaluate the reduced-degree spline on the grid
+          call ndspev(dims,ttrim,nn,wrk(1:nc),kn,xg,m,z, &
+                      wrk(nc+1:nc+lev),lev,iwrk(1:kwest),kwest,ier)
+          return
+      end subroutine parder
+
+      !> @brief Evaluate a partial derivative of a tensor-product spline at scattered points (any dimension).
+      !!
+      !! Scattered-point counterpart of `parder`: derivative coefficients via `pardtc`, then a
+      !! per-point evaluation via `ndspeu`. Only the derivative coefficients need workspace.
+      !!
+      !! @param[in]     dims  Number of axes (domain dimension)
+      !! @param[in]     t     Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]     n     Number of knots per axis, `n(dims)`
+      !! @param[in]     c     B-spline coefficient tensor, flat row-major (first axis slowest)
+      !! @param[in]     k     Spline degree per axis, `k(dims)`
+      !! @param[in]     nu    Derivative order per axis, \f$ 0 \le \nu_d < k_d \f$
+      !! @param[in]     xg    Point coordinates, `xg(d,i)` is the axis-\f$ d \f$ coordinate of point \f$ i \f$
+      !!                      (point \f$ i \f$ = contiguous column `xg(:,i)`)
+      !! @param[in]     m     Number of evaluation points, \f$ m \ge 1 \f$
+      !! @param[out]    z     Derivative values at the points, `z(m)`
+      !! @param[in,out] wrk   Real workspace, length \f$ \ge \prod_d (n(d)-k(d)-1) \f$
+      !! @param[in]     lwrk  Declared dimension of `wrk`
+      !! @param[out]    ier   FITPACK_OK on success, FITPACK_INPUT_ERROR on bad input/workspace
+      !!
+      !! @see pardeu, pardtc, ndspeu; todo/fitpack_nd_grids.md
+      pure subroutine pardeu(dims,t,n,c,k,nu,xg,m,z,wrk,lwrk,ier)
+          integer(FP_DIM),  intent(in)    :: dims
+          integer(FP_SIZE), intent(in)    :: n(dims),k(dims),nu(dims),m,lwrk
+          real(FP_REAL),    intent(in)    :: t(:,:),c(:)
+          real(FP_REAL),    intent(in), contiguous :: xg(:,:)   ! passed straight to ndspeu (no pack)
+          real(FP_REAL),    intent(out)   :: z(m)
+          real(FP_REAL),    intent(inout) :: wrk(lwrk)
+          integer(FP_FLAG), intent(out)   :: ier
+
+          integer(FP_DIM)  :: d
+          integer(FP_SIZE) :: nk1(dims),kn(dims),nn(dims),nc
+          real(FP_REAL)    :: ttrim(maxval(n),dims)
+
+          ier = FITPACK_INPUT_ERROR
+          if (any(nu<0) .or. any(nu>=k)) return
+          if (m<1) return
+          nk1 = n-k-1
+          nc  = product(nk1)
+          kn  = k-nu
+          nn  = n-2*nu
+          if (lwrk<nc) return
+
+          call pardtc(dims,t,n,c,k,nu,wrk(1:nc),ier)
+          if (.not.FITPACK_SUCCESS(ier)) return
+
+          ttrim = zero
+          do d=1,dims
+             ttrim(1:nn(d),d) = t(nu(d)+1:n(d)-nu(d),d)
+          end do
+
+          call ndspeu(dims,ttrim,nn,wrk(1:nc),kn,xg,m,z,ier)
+          return
+      end subroutine pardeu
+
+
+
+      !> @brief Fit a smooth parametric surface to gridded data.
+      !!
+      !! Given data points \f$ \mathbf{f}(i,j) \in \mathbb{R}^d \f$ at the grid nodes \f$ (u_i, v_j) \f$,
+      !! \f$ i=1,\ldots,m_u;\; j=1,\ldots,m_v \f$, determines a smooth \f$ d \f$-dimensional bicubic spline
+      !! surface \f$ \mathbf{s}(u,v) = (s_1(u,v),\ldots,s_d(u,v)) \f$ with common knots.
+      !!
+      !! The smoothing factor \f$ s \ge 0 \f$ controls the trade-off:
+      !! \f[
+      !!     \sum_{i,j} \|\mathbf{f}(i,j) - \mathbf{s}(u_i, v_j)\|^2 \le s.
+      !! \f]
+      !! Optional periodicity in \f$ u \f$ and/or \f$ v \f$ is specified via the `ipar` array.
+      !! The result can be evaluated with surev.
+      !!
+      !! @param[in]     iopt  Computation mode: `-1` = least-squares with user knots;
+      !!                      `0` = smoothing, fresh start; `1` = smoothing, continue.
+      !! @param[in]     ipar  Periodicity flags: `ipar(1)=1` for periodic in \f$ u \f$,
+      !!                      `ipar(2)=1` for periodic in \f$ v \f$.
+      !! @param[in]     idim  Dimension of the surface, \f$ 1 \le d \le 3 \f$.
+      !! @param[in]     mu    Number of grid points along \f$ u \f$, \f$ m_u \ge 4 - 2\cdot\text{ipar}(1) \f$.
+      !! @param[in]     u     Strictly increasing \f$ u \f$-grid coordinates (length \f$ m_u \f$).
+      !! @param[in]     mv    Number of grid points along \f$ v \f$, \f$ m_v \ge 4 - 2\cdot\text{ipar}(2) \f$.
+      !! @param[in]     v     Strictly increasing \f$ v \f$-grid coordinates (length \f$ m_v \f$).
+      !! @param[in]     f     Data values, length \f$ m_u \cdot m_v \cdot d \f$:
+      !!                      `f(mu*mv*(l-1)+mv*(i-1)+j)` = \f$ l \f$-th coordinate at \f$ (u_i, v_j) \f$.
+      !! @param[in]     s     Smoothing factor, \f$ s \ge 0 \f$ (ignored when `iopt=-1`).
+      !! @param[in]     nuest Upper bound for \f$ n_u \f$, \f$ \ge 8 \f$.
+      !! @param[in]     nvest Upper bound for \f$ n_v \f$, \f$ \ge 8 \f$.
+      !! @param[in,out] nu    Total number of knots in \f$ u \f$.
+      !! @param[in,out] tu    Knot positions in \f$ u \f$ (length `nuest`).
+      !! @param[in,out] nv    Total number of knots in \f$ v \f$.
+      !! @param[in,out] tv    Knot positions in \f$ v \f$ (length `nvest`).
+      !! @param[out]    c     B-spline coefficients, length \f$ (n_u{-}4)(n_v{-}4) \cdot d \f$.
+      !! @param[in,out] fp    Sum of squared residuals \f$ F_p \f$.
+      !! @param[in,out] wrk   Real workspace (length `lwrk`).
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace (length `kwrk`).
+      !! @param[in]     kwrk  Declared dimension of `iwrk`.
+      !! @param[out]    ier   Error flag: \f$ \le 0 \f$ = success, `1`–`5` = convergence warnings,
+      !!                      `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 10, §10.2 (pp. 215–226); surev — evaluate the parametric surface
+      pure subroutine parsur(iopt,ipar,idim,mu,u,mv,v,f,s,nuest, &
+                             nvest,nu,tu,nv,tv,c,fp,wrk,lwrk,iwrk,kwrk,ier)
+      !          value of nv should be specified on entry.
+      !  tv    : real array of dimension at least (nvest). on successful exit, this array will contain the 
+      !          knots of the splines with respect to the v-variable, i.e. the position of the interior knots
+      !          tv(5:nv-4) as well as the position of the additional knots tv(1:4) and tv(nv-3:nv) needed
+      !          for the b-spline representation. if the computation mode iopt=1 is used,the values of tv(1:nv)
+      !          should be left unchanged between subsequent calls. if the computation mode iopt=-1 is used, 
+      !          the values tv(5:nv-4) must be supplied by the user, before entry. 
+      !          see also the restrictions (ier=10).
+      !  c     : real array of dimension at least (nuest-4)*(nvest-4)*idim. on successful exit, c contains the 
+      !          coefficients of the spline approximation s(u,v)
+      !  fp    : real. unless ier=10, fp contains the sum of squared residuals of the spline surface returned.
+      !  wrk   : real array of dimension (lwrk). used as workspace. if the computation mode iopt=1 is used the 
+      !          values of wrk(1:4) should be left unchanged between subsequent calls.
+      !  lwrk  : integer. on entry lwrk must specify the actual dimension of the array wrk as declared in the 
+      !          calling (sub)program. lwrk must not be too small:
+      !           lwrk >= 4+nuest*(mv*idim+11+4*ipar(1))+nvest*(11+4*ipar(2))+4*(mu+mv)+q*idim 
+      !           where q is the larger of mv and nuest.
+      !  iwrk  : integer array of dimension (kwrk). used as workspace. if the computation mode iopt=1 is used 
+      !          the values of iwrk(1:3) should be left unchanged between subsequent calls.
+      !  kwrk  : integer. on entry kwrk must specify the actual dimension of the array iwrk as declared in the 
+      !          calling (sub)program.   kwrk >= 3+mu+mv+nuest+nvest.
+      !  ier   : integer. unless the routine detects an error, ier contains a non-positive value on exit.
+      !   ier=0  : normal return. the surface returned has a residual sum of squares fp such that 
+      !            abs(fp-s)/s <= tol with tol a relative tolerance set to 0.001 by the program.
+      !   ier=-1 : normal return. the spline surface returned is an interpolating surface (fp=0).
+      !   ier=-2 : normal return. the surface returned is the least-squares polynomial surface. in this extreme 
+      !            case fp gives the upper bound for the smoothing factor s.
+      !   ier=1  : error. the required storage space exceeds the available storage space, as specified by the 
+      !            parameters nuest and nvest. Likely causes : nuest or nvest too small. if these parameters
+      !            are already large, it may also indicate that s is too small the approximation returned is 
+      !            the least-squares surface according to the current set of knots. the parameter fp gives the 
+      !            corresponding sum of squared residuals (fp>s).
+      !   ier=2  : error. a theoretically impossible result was found during the iteration process for finding
+      !            a smoothing surface with fp = s. probably causes : s too small. there is an approximation 
+      !            returned but the corresponding sum of squared residuals does not satisfy the condition
+      !            abs(fp-s)/s < tol.
+      !   ier=3  : error. the maximal number of iterations maxit (set to 20 by the program) allowed for finding
+      !            a smoothing surface with fp=s has been reached. probably causes : s too small there is an 
+      !            approximation returned but the corresponding sum of squared residuals does not satisfy the
+      !            condition abs(fp-s)/s < tol.
+      !   ier=10 : error. on entry, the input data are controlled on validity the following restrictions must
+      !            be satisfied:
+      !            -1<=iopt<=1, 0<=ipar(1)<=1, 0<=ipar(2)<=1, 1 <=idim<=3
+      !            mu >= 4-2*ipar(1),mv >= 4-2*ipar(2), nuest >=8, nvest >= 8,
+      !            kwrk >= 3+mu+mv+nuest+nvest,
+      !            lwrk >= 4+nuest*(mv*idim+11+4*ipar(1))+nvest*(11+4*ipar(2))+4*(mu+mv)+max(nuest,mv)*idim
+      !            u(i-1)<u(i),i=2:mu, v(i-1)<v(i),i=2:mv
+      !            if iopt=-1: 8<=nu<=min(nuest,mu+4+2*ipar(1))
+      !                        u(1)<tu(5)<tu(6)<...<tu(nu-4)<u(mu)
+      !                        8<=nv<=min(nvest,mv+4+2*ipar(2))
+      !                        v(1)<tv(5)<tv(6)<...<tv(nv-4)<v(mv)
+      !            the schoenberg-whitney conditions, i.e. there must be subset of grid co-ordinates
+      !            uu(p) and vv(q) such that
+      !                       tu(p) < uu(p) < tu(p+4) ,p=1:nu-4
+      !                       tv(q) < vv(q) < tv(q+4) ,q=1:nv-4  (see fpchec or fpchep)
+      !            if iopt>=0: s>=0
+      !                       if s=0: nuest>=mu+4+2*ipar(1)
+      !                               nvest>=mv+4+2*ipar(2)
+      !            if one of these conditions is found to be violated,control is immediately repassed to the 
+      !            calling program. in that case there is no approximation returned.
+      !
+      ! further comments:
+      !   by means of the parameter s, the user can control the tradeoff between closeness of fit and
+      !   smoothness of fit of the approximation. if s is too large, the surface will be too smooth and signal 
+      !   will be lost ; if s is too small the surface will pick up too much noise. in the extreme cases the
+      !   program will return an interpolating surface if s=0 and the constrained least-squares polynomial 
+      !   surface if s is very large. between these extremes, a properly chosen s will result in a good
+      !   compromise between closeness of fit and smoothness of fit. to decide whether an approximation, 
+      !   corresponding to a certain s is satisfactory the user is highly recommended to inspect the fits
+      !   graphically.
+      !   recommended values for s depend on the accuracy of the data values. if the user has an idea of the 
+      !   statistical errors on the data, he can also find a proper estimate for s. for, by assuming that, if
+      !   he specifies the right s, parsur will return a surface s(u,v) which exactly reproduces the surface 
+      !   underlying the data he can evaluate the sum(dist(f(i,j)-s(u(i),v(j)))**2) to find a good estimate 
+      !   for s. for example, if he knows that the statistical errors on his f(i,j)- values is not greater 
+      !   than 0.1, he may expect that a good s should have a value not larger than mu*mv*(0.1)**2.
+      !   if nothing is known about the statistical error in f(i,j), s must be determined by trial and error,
+      !   taking account of the comments above. the best is then to start with a very large value of s (to
+      !   determine the le-sq polynomial surface and the corresponding upper bound fp0 for s) and then to 
+      !   progressively decrease the value of s (say by a factor 10 in the beginning, i.e. s=fp0/10,fp0/100,...
+      !   and more carefully as the approximation shows more detail) to obtain closer fits.
+      !   to economize the search for a good s-value the program provides with different modes of computation.
+      !   at the first call of the routine, or whenever he wants to restart with the initial set of knots the 
+      !   user must set iopt=0.
+      !   if iopt = 1 the program will continue with the knots found at the last call of the routine. this will
+      !   save a lot of computation time if parsur is called repeatedly for different values of s. the number
+      !   of knots of the surface returned and their location will depend on the value of s and on the 
+      !   complexity of the shape of the surface underlying the data. if the computation mode iopt = 1
+      !   is used, the knots returned may also depend on the s-values at previous calls (if these were smaller). 
+      !   therefore, if after a number of trials with different s-values and iopt=1,the user can finally accept
+      !   a fit as satisfactory, it may be worthwhile for him to call parsur once more with the chosen value 
+      !   for s but now with iopt=0. indeed, parsur may then return an approximation of the same quality of fit
+      !   but with fewer knots and therefore better if data reduction is also an important objective for the
+      !   user. the number of knots may also depend on the upper bounds nuest and nvest. indeed, if at a 
+      !   certain stage in parsur the number of knots in one direction (say nu) has reached the value of its 
+      !   upper bound (nuest), then from that moment on all subsequent knots are added in the other (v) 
+      !   direction. this may indicate that the value of nuest is too small. on the other hand, it gives the 
+      !   user the option of limiting the number of knots the routine locates in any direction for example, by 
+      !   setting nuest=8 (the lowest allowable value for nuest), the user can indicate that he wants an 
+      !   approximation with splines which are simple cubic polynomials in the variable u.
+      !
+      !  other subroutines required:
+      !    fppasu,fpchec,fpchep,fpknot,fprati,fpgrpa,fptrnp,fpback,fpbacp,fpbspl,fptrpe,fpdisc,fpgivs,fprota
+      !
+      !  author:
+      !    p.dierckx
+      !    dept. computer science, k.u. leuven
+      !    celestijnenlaan 200a, b-3001 heverlee, belgium.
+      !    e-mail : Paul.Dierckx@cs.kuleuven.ac.be
+      !
+      !  latest update : march 1989
+      !  
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: s
+      real(FP_REAL), intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,idim,mu,mv,nuest,nvest,lwrk,kwrk
+      integer(FP_SIZE), intent(inout) :: nu,nv
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: u(mu),v(mv),f(mu*mv*idim)
+      real(FP_REAL), intent(inout) :: tu(nuest),tv(nvest),c((nuest-4)*(nvest-4)*idim),wrk(lwrk)
+      integer(FP_SIZE), intent(in)    :: ipar(2)
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      !  ..local scalars..
+      real(FP_REAL) :: ub,ue,vb,ve,peru,perv
+      integer(FP_SIZE) :: jwrk,kndu,kndv,knru,knrv,kwest,lfpu,lfpv,lwest,lww,nc,mf,mumin,mvmin
+      
+      !  we set up the parameters tol and maxit.
+      integer(FP_SIZE), parameter :: maxit = 20
+      real(FP_REAL), parameter :: tol = smallnum03
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier   = FITPACK_INPUT_ERROR
+      mumin = 4-2*ipar(1)
+      mvmin = 4-2*ipar(2)
+      mf    = mu*mv
+      nc    = (nuest-4)*(nvest-4)
+      lwest = 4+nuest*(mv*idim+11+4*ipar(1))+nvest*(11+4*ipar(2))+4*(mu+mv)+max(nuest,mv)*idim
+      kwest = 3+mu+mv+nuest+nvest
+
+      if (iopt<(-1) .or. iopt>1)      return
+      if (any(ipar<0 .or. ipar>1))    return
+      if (idim<=0 .or. idim>3)        return
+      if (mu<mumin .or. nuest<8)      return
+      if (mv<mvmin .or. nvest<8)      return
+      if (lwrk<lwest .or. kwrk<kwest) return
+      if (any(u(:mu-1)>=u(2:mu)))     return
+      if (any(v(:mv-1)>=v(2:mv)))     return
+
+      if (iopt<0) then
+
+          if (nu<8 .or. nu>nuest) return
+
+          ub = u(1)
+          ue = u(mu)
+
+          u_period: if (ipar(1)==0) then
+              tu(1:4)     = ub
+              tu(nu-3:nu) = ue
+              ier = fpchec(u,mu,tu,nu,DEGREE_3)
+          else u_period
+              peru        = ue-ub
+              tu(1:4)     = [tu(nu-6:nu-4)-peru, ub]
+              tu(nu-3:nu) = [ue, tu(5:7)+peru]
+              ier = fpchep(u,mu,tu,nu,DEGREE_3)
+          endif u_period
+          if (ier/=FITPACK_OK) return
+
+
+          if (nv<8 .or. nv>nvest) return
+
+          vb = v(1)
+          ve = v(mv)
+
+          v_period: if (ipar(2)==0) then
+              tv(1:4)     = vb
+              tv(nv-3:nv) = ve
+              ier = fpchec(v,mv,tv,nv,DEGREE_3)
+          else v_period
+              perv        = ve-vb
+              tv(1:4)     = [tv(nv-6:nv-4)-perv, vb]
+              tv(nv-3:nv) = [ve, tv(5:7)+perv]
+              ier = fpchep(v,mv,tv,nv,DEGREE_3)
+          endif v_period
+          if (ier/=FITPACK_OK) return
+
+      else
+
+          if(s<zero) return
+          if(equal(s,zero) .and. (nuest<(mu+4+2*ipar(1)) .or. &
+                            nvest<(mv+4+2*ipar(2))) )return
+
+          ier = FITPACK_OK
+
+      endif
+
+      !  we partition the working space and determine the spline approximation
+      lfpu = 5
+      lfpv = lfpu+nuest
+      lww  = lfpv+nvest
+      jwrk = lwrk-4-nuest-nvest
+      knru = 4
+      knrv = knru+mu
+      kndu = knrv+mv
+      kndv = kndu+nuest
+      call fppasu(iopt,ipar,idim,u,mu,v,mv,f,mf,s,nuest,nvest, &
+                  tol,maxit,nc,nu,tu,nv,tv,c,fp,wrk(1),wrk(2),wrk(3),wrk(4), &
+                  wrk(lfpu),wrk(lfpv),iwrk(1),iwrk(2),iwrk(3),iwrk(knru), &
+                  iwrk(knrv),iwrk(kndu),iwrk(kndv),wrk(lww),jwrk,ier)
+      return
+      end subroutine parsur
+
+
+      !  given the set of data points (x(i),y(i)) and the set of positive numbers w(i),i=1,2,...,m-1,
+      !  subroutine percur determines a smooth periodic spline approximation of degree k with period
+      !  per=x(m)-x(1).
+      !  iopt=-1: calculate the weighted least-squares periodic spline according to a given set of knots.
+      !  iopt>=0: the number of knots of the spline s(x) and the position t(j),j=1,2,...,n is chosen
+      !           automatically by the routine. the smoothness of s(x) is then achieved by minimalizing
+      !           the discontinuity jumps of the k-th derivative of s(x) at the knots t(j),j=k+2,k+3,...,
+      !           n-k-1. the amount of smoothness is determined by the condition that
+      !           f(p)=sum((w(i)*(y(i)-s(x(i))))**2) be <= s, with s a given nonnegative constant, called
+      !           the smoothing factor.
+      !  the fit s(x) is given in the b-spline representation (b-spline coefficients c(j),j=1:n-k-1) and
+      !  can be evaluated by means of subroutine splev.
+      !> @brief Determine a smooth periodic spline approximation to data.
+      !!
+      !! Given data points \f$ (x_i, y_i) \f$ with weights \f$ w_i > 0 \f$, \f$ i=1,\ldots,m \f$,
+      !! computes a periodic spline \f$ s(x) \f$ of degree \f$ k \f$ with period
+      !! \f$ P = x_m - x_1 \f$. The periodicity means \f$ s(x_1) = s(x_m) \f$ and all
+      !! derivatives match at the boundary.
+      !!
+      !! - If `iopt=-1`: weighted least-squares spline with user-specified knots.
+      !! - If `iopt>=0`: automatic knot placement minimizing the discontinuity jumps
+      !!   of the \f$ k \f$-th derivative, subject to \f$ F(p) \le S \f$.
+      !!
+      !! @param[in]     iopt  Computation mode: `-1` (LSQ), `0` (new smoothing), `1` (continue).
+      !! @param[in]     m     Number of data points, \f$ m > 1 \f$.
+      !! @param[in]     x     Abscissae (strictly ascending). \f$ x_m \f$ defines the period length.
+      !! @param[in]     y     Ordinates \f$ y_1,\ldots,y_{m-1} \f$ (element \f$ y_m \f$ not used).
+      !! @param[in]     w     Weights \f$ w_1,\ldots,w_{m-1} > 0 \f$ (\f$ w_m \f$ not used).
+      !! @param[in]     k     Spline degree, \f$ 1 \le k \le 5 \f$. Cubic (\f$ k=3 \f$) recommended.
+      !! @param[in]     s     Smoothing factor \f$ S \ge 0 \f$ (used when `iopt>=0`).
+      !! @param[in]     nest  Over-estimate of total knots. `nest>=2*k+2`; `nest=m+2*k` always suffices.
+      !! @param[in,out] n     Total number of knots.
+      !! @param[in,out] t     Knot positions (length `nest`).
+      !! @param[in,out] c     B-spline coefficients (length `nest`).
+      !! @param[in,out] fp    Weighted sum of squared residuals.
+      !! @param[in,out] wrk   Real workspace, length \f$ \ge m(k+1) + \text{nest}(8+5k) \f$.
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace (length `nest`).
+      !! @param[in,out] ier   Error flag (same codes as curfit, plus periodic constraints).
+      !!
+      !! @see Dierckx, Ch. 6, §6.1--6.2; fpperi — core periodic fitting algorithm
+      pure subroutine percur(iopt,m,x,y,w,k,s,nest,n,t,c,fp,wrk,lwrk,iwrk,ier)
+
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: s
+      real(FP_REAL), intent(inout) :: fp
+      integer(FP_SIZE), intent(inout) :: n
+      integer(FP_FLAG), intent(inout) :: ier
+      integer(FP_SIZE), intent(in)    :: iopt,m,k,nest,lwrk
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: x(m),y(m),w(m)
+      real(FP_REAL), intent(inout) :: t(nest),c(nest),wrk(lwrk)
+      integer(FP_SIZE), intent(inout) :: iwrk(nest)
+
+      !  ..local scalars..
+      real(FP_REAL) :: per
+      integer(FP_SIZE) :: i,ia1,ia2,ib,ifp,ig1,ig2,iq,iz,i1,i2,j1,j2,k1,k2,lwest,m1,nmin
+
+      !  ..
+      !  we set up the parameters tol and maxit
+      integer(FP_SIZE), parameter :: maxit = 20
+      real(FP_REAL), parameter :: tol = smallnum03
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier   = FITPACK_INPUT_ERROR
+      k1    = k+1
+      k2    = k1+1
+      nmin  = 2*k1
+      m1    = m-1
+      lwest = m*k1+nest*(8+5*k)
+      if (k<=0 .or. k>5)         return
+      if (iopt<(-1) .or. iopt>1) return
+      if (m<2 .or. nest<nmin)    return
+      if (lwrk<lwest)            return
+      if (any(w(:m1)<=zero))     return
+      if (any(x(:m1)>=x(2:m)))   return
+
+      if (iopt>=0) then
+         if (s<zero) return
+         if (equal(s,zero) .and. nest<(m+2*k)) return
+      else
+
+         if (n<=nmin .or. n>nest) return
+
+         per = x(m)-x(1)
+         j1 = k1
+         t(j1) = x(1)
+         i1 = n-k
+         t(i1) = x(m)
+         j2 = j1
+         i2 = i1
+         do i=1,k
+            i1 = i1+1
+            i2 = i2-1
+            j1 = j1+1
+            j2 = j2-1
+            t(j2) = t(i2)-per
+            t(i1) = t(j1)+per
+         end do
+
+         ier = fpchep(x,m,t,n,k)
+         if (ier/=FITPACK_OK) return
+
+      endif
+
+      ier = FITPACK_OK
+      ! we partition the working space and determine the spline approximation.
+      ifp = 1
+      iz  = ifp+nest
+      ia1 = iz+nest
+      ia2 = ia1+nest*k1
+      ib  = ia2+nest*k
+      ig1 = ib+nest*k2
+      ig2 = ig1+nest*k2
+      iq  = ig2+nest*k1
+      call fpperi(iopt,x,y,w,m,k,s,nest,tol,maxit,k1,k2,n,t,c,fp, &
+                  wrk(ifp),wrk(iz),wrk(ia1),wrk(ia2),wrk(ib),wrk(ig1),wrk(ig2),wrk(iq),iwrk,ier)
+      return
+      end subroutine percur
+
+
+      !> @brief Fit a smooth bivariate spline to gridded data on a polar (disc) domain.
+      !!
+      !! Fits a function \f$ f(x,y) \f$ to data \f$ z_{ij} \f$ at the nodes
+      !! \f$ (x,y) = (u_i \cos v_j,\; u_i \sin v_j) \f$ of a radius-angle grid over the disc
+      !! \f$ x^2 + y^2 \le r^2 \f$.
+      !!
+      !! The problem is reduced to fitting a bicubic spline \f$ s(u,v) \f$ on the rectangle
+      !! \f$ 0 \le u \le r,\; v_1 \le v \le v_1 + 2\pi \f$, subject to continuity constraints at
+      !! the origin and periodicity in \f$ v \f$:
+      !! \f[
+      !!     F_p = \sum_{i,j}(z_{ij} - s(u_i,v_j))^2 + (z_0 - s(0,v))^2 \le s.
+      !! \f]
+      !!
+      !! @param[in]     iopt  Integer array(3): `iopt(1)` = computation mode (`-1`/`0`/`1`);
+      !!                      `iopt(2)` = continuity order at origin (`0`/`1`);
+      !!                      `iopt(3)` = `1` to enforce vanishing at boundary.
+      !! @param[in]     ider  Integer array(2): `ider(1)` = origin data flag (`-1`/`0`/`1`);
+      !!                      `ider(2)` = `1` for vanishing derivatives at origin.
+      !! @param[in]     mu    Number of radial grid points.
+      !! @param[in]     u     Strictly increasing radial coordinates (length \f$ m_u \f$), \f$ u_i > 0 \f$.
+      !! @param[in]     mv    Number of angular grid points, \f$ m_v > 3 \f$.
+      !! @param[in]     v     Strictly increasing angles (length \f$ m_v \f$),
+      !!                      \f$ -\pi \le v_1 < \pi,\; v_{m_v} < v_1 + 2\pi \f$.
+      !! @param[in]     z     Data values, length \f$ m_u \cdot m_v \f$: `z(mv*(i-1)+j)` at \f$ (u_i, v_j) \f$.
+      !! @param[in]     z0    Data value at the origin (used when `ider(1)>=0`).
+      !! @param[in]     r     Disc radius, \f$ r \ge u_{m_u} \f$.
+      !! @param[in]     s     Smoothing factor, \f$ s \ge 0 \f$ (ignored when `iopt(1)=-1`).
+      !! @param[in]     nuest Upper bound for \f$ n_u \f$, \f$ \ge 8 \f$.
+      !! @param[in]     nvest Upper bound for \f$ n_v \f$, \f$ \ge 8 \f$.
+      !! @param[in,out] nu    Total number of knots in \f$ u \f$.
+      !! @param[in,out] tu    Knot positions in \f$ u \f$ (length `nuest`).
+      !! @param[in,out] nv    Total number of knots in \f$ v \f$.
+      !! @param[in,out] tv    Knot positions in \f$ v \f$ (length `nvest`).
+      !! @param[out]    c     B-spline coefficients, length \f$ (n_u{-}4)(n_v{-}4) \f$.
+      !! @param[out]    fp    Sum of squared residuals \f$ F_p \f$.
+      !! @param[in,out] wrk   Real workspace (length `lwrk`).
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace (length `kwrk`).
+      !! @param[in]     kwrk  Declared dimension of `iwrk`.
+      !! @param[out]    ier   Error flag: \f$ \le 0 \f$ = success, `1`–`5` = convergence warnings,
+      !!                      `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 11, §11.1 (pp. 237–254); polar — scattered polar variant;
+      !!      evapol — evaluate polar spline at Cartesian point
+       subroutine pogrid(iopt,ider,mu,u,mv,v,z,z0,r,s, &
+                             nuest,nvest,nu,tu,nv,tv,c,fp,wrk,lwrk,iwrk,kwrk,ier)
+      !          -pi <= v(1) < pi , v(mv) < v(1)+2*pi.
+      !  z     : real array of dimension at least (mu*mv).
+      !          before entry, z(mv*(i-1)+j) must be set to the data value at
+      !          the grid point (u(i),v(j)) for i=1,...,mu and j=1,...,mv.
+      !          unchanged on exit.
+      !  z0    : real value. on entry (if ider(1) >=0 ) z0 must specify the
+      !          data value at the origin. unchanged on exit.
+      !  r     : real value. on entry r must specify the radius of the disk.
+      !          r>=u(mu) (>u(mu) if iopt(3)=1). unchanged on exit.
+      !  s     : real. on entry (if iopt(1)>=0) s must specify the smoothing
+      !          factor. s >=0. unchanged on exit.
+      !          for advice on the choice of s see further comments
+      !  nuest : integer. unchanged on exit.
+      !  nvest : integer. unchanged on exit.
+      !          on entry, nuest and nvest must specify an upper bound for the
+      !          number of knots required in the u- and v-directions respect.
+      !          these numbers will also determine the storage space needed by
+      !          the routine. nuest >= 8, nvest >= 8.
+      !          in most practical situation nuest = mu/2, nvest=mv/2, will
+      !          be sufficient. always large enough are nuest=mu+5+iopt(2)+
+      !          iopt(3), nvest = mv+7, the number of knots needed for
+      !          interpolation (s=0). see also further comments.
+      !  nu    : integer.
+      !          unless ier=10 (in case iopt(1)>=0), nu will contain the total
+      !          number of knots with respect to the u-variable, of the spline
+      !          approximation returned. if the computation mode iopt(1)=1 is
+      !          used, the value of nu should be left unchanged between sub-
+      !          sequent calls. in case iopt(1)=-1, the value of nu should be
+      !          specified on entry.
+      !  tu    : real array of dimension at least (nuest).
+      !          on successful exit, this array will contain the knots of the
+      !          spline with respect to the u-variable, i.e. the position of
+      !          the interior knots tu(5),...,tu(nu-4) as well as the position
+      !          of the additional knots tu(1)=...=tu(4)=0 and tu(nu-3)=...=
+      !          tu(nu)=r needed for the b-spline representation.
+      !          if the computation mode iopt(1)=1 is used,the values of tu(1)
+      !          ...,tu(nu) should be left unchanged between subsequent calls.
+      !          if the computation mode iopt(1)=-1 is used, the values tu(5),
+      !          ...tu(nu-4) must be supplied by the user, before entry.
+      !          see also the restrictions (ier=10).
+      !  nv    : integer.
+      !          unless ier=10 (in case iopt(1)>=0), nv will contain the total
+      !          number of knots with respect to the v-variable, of the spline
+      !          approximation returned. if the computation mode iopt(1)=1 is
+      !          used, the value of nv should be left unchanged between sub-
+      !          sequent calls. in case iopt(1) = -1, the value of nv should
+      !          be specified on entry.
+      !  tv    : real array of dimension at least (nvest).
+      !          on successful exit, this array will contain the knots of the
+      !          spline with respect to the v-variable, i.e. the position of
+      !          the interior knots tv(5),...,tv(nv-4) as well as the position
+      !          of the additional knots tv(1),...,tv(4) and tv(nv-3),...,
+      !          tv(nv) needed for the b-spline representation.
+      !          if the computation mode iopt(1)=1 is used,the values of tv(1)
+      !          ...,tv(nv) should be left unchanged between subsequent calls.
+      !          if the computation mode iopt(1)=-1 is used, the values tv(5),
+      !          ...tv(nv-4) must be supplied by the user, before entry.
+      !          see also the restrictions (ier=10).
+      !  c     : real array of dimension at least (nuest-4)*(nvest-4).
+      !          on successful exit, c contains the coefficients of the spline
+      !          approximation s(u,v)
+      !  fp    : real. unless ier=10, fp contains the sum of squared
+      !          residuals of the spline approximation returned.
+      !  wrk   : real array of dimension (lwrk). used as workspace.
+      !          if the computation mode iopt(1)=1 is used the values of
+      !          wrk(1),...,wrk(8) should be left unchanged between subsequent
+      !          calls.
+      !  lwrk  : integer. on entry lwrk must specify the actual dimension of
+      !          the array wrk as declared in the calling (sub)program.
+      !          lwrk must not be too small.
+      !           lwrk >= 8+nuest*(mv+nvest+3)+nvest*21+4*mu+6*mv+q
+      !           where q is the larger of (mv+nvest) and nuest.
+      !  iwrk  : integer array of dimension (kwrk). used as workspace.
+      !          if the computation mode iopt(1)=1 is used the values of
+      !          iwrk(1),.,iwrk(4) should be left unchanged between subsequent
+      !          calls.
+      !  kwrk  : integer. on entry kwrk must specify the actual dimension of
+      !          the array iwrk as declared in the calling (sub)program.
+      !          kwrk >= 4+mu+mv+nuest+nvest.
+      !  ier   : integer. unless the routine detects an error, ier contains a
+      !          non-positive value on exit, i.e.
+      !   ier=0  : normal return. the spline returned has a residual sum of
+      !            squares fp such that abs(fp-s)/s <= tol with tol a relat-
+      !            ive tolerance set to 0.001 by the program.
+      !   ier=-1 : normal return. the spline returned is an interpolating
+      !            spline (fp=0).
+      !   ier=-2 : normal return. the spline returned is the least-squares
+      !            constrained polynomial. in this extreme case fp gives the
+      !            upper bound for the smoothing factor s.
+      !   ier=1  : error. the required storage space exceeds the available
+      !            storage space, as specified by the parameters nuest and
+      !            nvest.
+      !            probably causes : nuest or nvest too small. if these param-
+      !            eters are already large, it may also indicate that s is
+      !            too small
+      !            the approximation returned is the least-squares spline
+      !            according to the current set of knots. the parameter fp
+      !            gives the corresponding sum of squared residuals (fp>s).
+      !   ier=2  : error. a theoretically impossible result was found during
+      !            the iteration process for finding a smoothing spline with
+      !            fp = s. probably causes : s too small.
+      !            there is an approximation returned but the corresponding
+      !            sum of squared residuals does not satisfy the condition
+      !            abs(fp-s)/s < tol.
+      !   ier=3  : error. the maximal number of iterations maxit (set to 20
+      !            by the program) allowed for finding a smoothing spline
+      !            with fp=s has been reached. probably causes : s too small
+      !            there is an approximation returned but the corresponding
+      !            sum of squared residuals does not satisfy the condition
+      !            abs(fp-s)/s < tol.
+      !   ier=10 : error. on entry, the input data are controlled on validity
+      !            the following restrictions must be satisfied.
+      !            -1<=iopt(1)<=1, 0<=iopt(2)<=1, 0<=iopt(3)<=1,
+      !            -1<=ider(1)<=1, 0<=ider(2)<=1, ider(2)=0 if iopt(2)=0.
+      !            mu >= mumin (see above), mv >= 4, nuest >=8, nvest >= 8,
+      !            kwrk>=4+mu+mv+nuest+nvest,
+      !            lwrk >= 8+nuest*(mv+nvest+3)+nvest*21+4*mu+6*mv+
+      !             max(nuest,mv+nvest)
+      !            0< u(i-1)<u(i)<=r,i=2,..,mu, (< r if iopt(3)=1)
+      !            -pi<=v(1)< pi, v(1)<v(i-1)<v(i)<v(1)+2*pi, i=3,...,mv
+      !            if iopt(1)=-1: 8<=nu<=min(nuest,mu+5+iopt(2)+iopt(3))
+      !                           0<tu(5)<tu(6)<...<tu(nu-4)<r
+      !                           8<=nv<=min(nvest,mv+7)
+      !                           v(1)<tv(5)<tv(6)<...<tv(nv-4)<v(1)+2*pi
+      !                    the schoenberg-whitney conditions, i.e. there must
+      !                    be subset of grid co-ordinates uu(p) and vv(q) such
+      !                    that   tu(p) < uu(p) < tu(p+4) ,p=1,...,nu-4
+      !                     (iopt(2)=1 and iopt(3)=1 also count for a uu-value
+      !                           tv(q) < vv(q) < tv(q+4) ,q=1,...,nv-4
+      !                     (vv(q) is either a value v(j) or v(j)+2*pi)
+      !            if iopt(1)>=0: s>=0
+      !                       if s=0: nuest>=mu+5+iopt(2)+iopt(3), nvest>=mv+7
+      !            if one of these conditions is found to be violated,control
+      !            is immediately repassed to the calling program. in that
+      !            case there is no approximation returned.
+      !
+      ! further comments:
+      !   pogrid does not allow individual weighting of the data-values.
+      !   so, if these were determined to widely different accuracies, then
+      !   perhaps the general data set routine polar should rather be used
+      !   in spite of efficiency.
+      !   by means of the parameter s, the user can control the tradeoff
+      !   between closeness of fit and smoothness of fit of the approximation.
+      !   if s is too large, the spline will be too smooth and signal will be
+      !   lost ; if s is too small the spline will pick up too much noise. in
+      !   the extreme cases the program will return an interpolating spline if
+      !   s=0 and the constrained least-squares polynomial(degrees 3,0)if s is
+      !   very large. between these extremes, a properly chosen s will result
+      !   in a good compromise between closeness of fit and smoothness of fit.
+      !   to decide whether an approximation, corresponding to a certain s is
+      !   satisfactory the user is highly recommended to inspect the fits
+      !   graphically.
+      !   recommended values for s depend on the accuracy of the data values.
+      !   if the user has an idea of the statistical errors on the data, he
+      !   can also find a proper estimate for s. for, by assuming that, if he
+      !   specifies the right s, pogrid will return a spline s(u,v) which
+      !   exactly reproduces the function underlying the data he can evaluate
+      !   the sum((z(i,j)-s(u(i),v(j)))**2) to find a good estimate for this s
+      !   for example, if he knows that the statistical errors on his z(i,j)-
+      !   values is not greater than 0.1, he may expect that a good s should
+      !   have a value not larger than mu*mv*(0.1)**2.
+      !   if nothing is known about the statistical error in z(i,j), s must
+      !   be determined by trial and error, taking account of the comments
+      !   above. the best is then to start with a very large value of s (to
+      !   determine the least-squares polynomial and the corresponding upper
+      !   bound fp0 for s) and then to progressively decrease the value of s
+      !   ( say by a factor 10 in the beginning, i.e. s=fp0/10,fp0/100,...
+      !   and more carefully as the approximation shows more detail) to
+      !   obtain closer fits.
+      !   to economize the search for a good s-value the program provides with
+      !   different modes of computation. at the first call of the routine, or
+      !   whenever he wants to restart with the initial set of knots the user
+      !   must set iopt(1)=0.
+      !   if iopt(1) = 1 the program will continue with the knots found at
+      !   the last call of the routine. this will save a lot of computation
+      !   time if pogrid is called repeatedly for different values of s.
+      !   the number of knots of the spline returned and their location will
+      !   depend on the value of s and on the complexity of the shape of the
+      !   function underlying the data. if the computation mode iopt(1) = 1
+      !   is used, the knots returned may also depend on the s-values at
+      !   previous calls (if these were smaller). therefore, if after a number
+      !   of trials with different s-values and iopt(1)=1,the user can finally
+      !   accept a fit as satisfactory, it may be worthwhile for him to call
+      !   pogrid once more with the chosen value for s but now with iopt(1)=0.
+      !   indeed, pogrid may then return an approximation of the same quality
+      !   of fit but with fewer knots and therefore better if data reduction
+      !   is also an important objective for the user.
+      !   the number of knots may also depend on the upper bounds nuest and
+      !   nvest. indeed, if at a certain stage in pogrid the number of knots
+      !   in one direction (say nu) has reached the value of its upper bound
+      !   (nuest), then from that moment on all subsequent knots are added
+      !   in the other (v) direction. this may indicate that the value of
+      !   nuest is too small. on the other hand, it gives the user the option
+      !   of limiting the number of knots the routine locates in any direction
+      !   for example, by setting nuest=8 (the lowest allowable value for
+      !   nuest), the user can indicate that he wants an approximation which
+      !   is a simple cubic polynomial in the variable u.
+      !
+      !  other subroutines required:
+      !    fppogr,fpchec,fpchep,fpknot,fpopdi,fprati,fpgrdi,fpsysy,fpback,
+      !    fpbacp,fpbspl,fpcyt1,fpcyt2,fpdisc,fpgivs,fprota
+      !
+      !  references:
+      !   dierckx p. : fast algorithms for smoothing data over a disc or a
+      !                sphere using tensor product splines, in "algorithms
+      !                for approximation", ed. j.c.mason and m.g.cox,
+      !                clarendon press oxford, 1987, pp. 51-65
+      !   dierckx p. : fast algorithms for smoothing data over a disc or a
+      !                sphere using tensor product splines, report tw73, dept.
+      !                computer science,k.u.leuven, 1985.
+      !   dierckx p. : curve and surface fitting with splines, monographs on
+      !                numerical analysis, oxford university press, 1993.
+      !
+      !  author:
+      !    p.dierckx
+      !    dept. computer science, k.u. leuven
+      !    celestijnenlaan 200a, b-3001 heverlee, belgium.
+      !    e-mail : Paul.Dierckx@cs.kuleuven.ac.be
+      !
+      !  creation date : july 1985
+      !  latest update : march 1989
+      !
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: z0,r,s
+      real(FP_REAL), intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: mu,mv,nuest,nvest,lwrk,kwrk
+      integer(FP_FLAG), intent(out)   :: ier
+      integer(FP_SIZE), intent(inout) :: nu,nv
+      !  ..array arguments..
+      integer(FP_SIZE), intent(in)    :: iopt(3),ider(2)
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      real(FP_REAL), intent(in)    :: u(mu),v(mv),z(mu*mv)
+      real(FP_REAL), intent(inout) :: c((nuest-4)*(nvest-4)),tu(nuest),tv(nvest),wrk(lwrk)
+
+      !  ..local scalars..
+      real(FP_REAL) :: uu,ve,zmax,zmin,zb
+      integer(FP_SIZE) :: jwrk,kndu,kndv,knru,knrv,kwest,l,ldz,lfpu,lfpv,lwest,lww,m,mumin,muu,nc,mv1
+
+      !  set constants
+      integer(FP_SIZE), parameter :: maxit = 20
+      real(FP_REAL), parameter :: tol = smallnum03
+      real(FP_REAL), parameter :: per = pi2
+
+      ve = v(1)+per
+      !  we set up the parameters tol and maxit.
+
+      !  before starting computations, a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+
+      mumin = 4-iopt(3)-ider(2) - merge(1,0,ider(1)>=0)
+      m     = mu*mv
+      nc    = (nuest-4)*(nvest-4)
+      lwest = 8+nuest*(mv+nvest+3)+21*nvest+4*mu+6*mv+max(nuest,mv+nvest)
+      kwest = 4+mu+mv+nuest+nvest
+
+      if (iopt(1)<(-1) .or. iopt(1)>1) return
+      if (iopt(2)<0 .or. iopt(2)>1)    return
+      if (iopt(3)<0 .or. iopt(3)>1)    return
+      if (ider(1)<(-1) .or. ider(1)>1) return
+      if (ider(2)<0 .or. ider(2)>1)    return
+      if (ider(2)==1 .and. iopt(2)==0) return
+      if (mu<mumin .or. mv<4)          return
+      if (nuest<8 .or. nvest<8)        return
+      if (lwrk<lwest .or. kwrk<kwest)  return
+      if (u(1)<=zero .or. u(mu)>r)     return
+
+      if (iopt(3)/=0 .and. equal(u(mu),r)) return
+
+      if (mu>1) then
+         if (any(u(1:mu-1)>=u(2:mu)))  return
+      endif
+
+      if (v(1)<(-pi) .or. v(1)>=pi)    return
+      if (v(mv)>=v(1)+per)             return
+      if (any(v(1:mv-1)>=v(2:mv)))     return
+
+      if (iopt(1)<=0) then
+
+         ! if not given, we compute an estimate for z0.
+         if (ider(1)<0) then
+            zb = sum(z(1:mv))/mv
+         else
+            zb = z0
+         end if
+
+         !  we determine the range of z-values.
+         zmin = min(zb,minval(z(:m)))
+         zmax = max(zb,maxval(z(:m)))
+
+         wrk(5) = zb
+         wrk(6) = zero
+         wrk(7) = zero
+         wrk(8) = zmax -zmin
+         iwrk(4) = mu
+
+      endif
+
+      if (iopt(1)<0) then
+
+          if (nu<8 .or.  nu>nuest) return
+          if (nv<11 .or. nv>nvest) return
+
+          tu(1:4)     = zero
+          tu(nu-3:nu) = r
+
+          l = 9
+          wrk(l) = zero
+          if (iopt(2)/=0) then
+              uu     = min(u(1),tu(5))
+              l      = l+1
+              wrk(l) = uu*half
+          endif
+
+          wrk(l+1:l+mu) = u
+          l = l+mu
+
+          if (iopt(3)/=0) then
+             l      = l+1
+             wrk(l) = r
+          endif
+
+          muu = l-8
+          ier = fpchec(wrk(9),muu,tu,nu,DEGREE_3); if(ier/=FITPACK_OK) return
+
+          tv(1:4)     = [tv(nv-6:nv-4)-per, v(1)]
+          tv(nv-3:nv) = [ve, tv(5:7)+per]
+
+          l = 9
+          wrk(l:l+mv) = [v,ve]
+
+          mv1 = mv+1
+          ier = fpchep(wrk(9),mv1,tv,nv,DEGREE_3)
+          if (ier/=FITPACK_OK) return
+
+      endif
+
+      if (iopt(1)>=0) then
+          if (s<zero) return
+          if (equal(s,zero) .and. (nuest<(mu+5+iopt(2)+iopt(3)) .or. nvest<(mv+7)) ) return
+      endif
+
+      !  we partition the working space and determine the spline approximation
+      ldz  = 5
+      lfpu = 9
+      lfpv = lfpu+nuest
+      lww  = lfpv+nvest
+      jwrk = lwrk-8-nuest-nvest
+      knru = 5
+      knrv = knru+mu
+      kndu = knrv+mv
+      kndv = kndu+nuest
+
+      call fppogr(iopt,ider,u,mu,v,mv,z,m,zb,r,s,nuest,nvest,tol,maxit, &
+                  nc,nu,tu,nv,tv,c,fp,wrk(1),wrk(2),wrk(3),wrk(4),wrk(lfpu), &
+                  wrk(lfpv),wrk(ldz),wrk(8),iwrk(1),iwrk(2),iwrk(3),iwrk(4), &
+                  iwrk(knru),iwrk(knrv),iwrk(kndu),iwrk(kndv),wrk(lww),jwrk,ier)
+      return
+      end subroutine pogrid
+
+
+
+      ! subroutine polar fits a smooth function f(x,y) to a set of data points (x(i),y(i),z(i)) scattered
+      ! arbitrarily over an approximation domain  x**2+y**2 <= rad(atan(y/x))**2. through the transform
+      !    x = u*rad(v)*cos(v) , y = u*rad(v)*sin(v)
+      ! the approximation problem is reduced to the determination of a bi-cubic spline s(u,v) fitting a
+      ! corresponding set of data points (u(i),v(i),z(i)) on the rectangle 0<=u<=1,-pi<=v<=pi.
+
+      !> @brief Fit a smooth bivariate spline to scattered data on a polar domain.
+      !!
+      !! Given weighted data points \f$ (x_i, y_i, z_i, w_i) \f$ on a polar domain bounded by
+      !! \f$ x = r(v)\cos v,\; y = r(v)\sin v \f$ for \f$ -\pi \le v \le \pi \f$, determines a
+      !! bicubic spline \f$ s(u,v) \f$ with \f$ f(x,y) = s(u,v) \f$ satisfying continuity constraints
+      !! at the origin up to order `iopt(2)` and periodicity in \f$ v \f$.
+      !!
+      !! The smoothing factor \f$ s \ge 0 \f$ controls the trade-off:
+      !! \f[
+      !!     \sum_{i=1}^{m} \bigl[w_i\,(z_i - s(u_i, v_i))\bigr]^2 \le s.
+      !! \f]
+      !! The result can be evaluated with evapol.
+      !!
+      !! @param[in]     iopt  Integer array(3): `iopt(1)` = computation mode (`-1`/`0`/`1`);
+      !!                      `iopt(2)` = continuity order at origin (`0`/`1`/`2`);
+      !!                      `iopt(3)` = `1` to enforce vanishing at boundary.
+      !! @param[in]     m     Number of data points, \f$ m \ge 4 - \text{iopt}(2) - \text{iopt}(3) \f$.
+      !! @param[in]     x     Cartesian \f$ x \f$-coordinates (length \f$ m \f$).
+      !! @param[in]     y     Cartesian \f$ y \f$-coordinates (length \f$ m \f$).
+      !! @param[in]     z     Data values (length \f$ m \f$).
+      !! @param[in]     w     Positive weights (length \f$ m \f$).
+      !! @param[in]     rad   External function defining the polar boundary: \f$ r(v) \f$.
+      !! @param[in]     s     Smoothing factor, \f$ s \ge 0 \f$ (ignored when `iopt(1)=-1`).
+      !! @param[in]     nuest Upper bound for \f$ n_u \f$, \f$ \ge 8 \f$.
+      !! @param[in]     nvest Upper bound for \f$ n_v \f$, \f$ \ge 8 \f$.
+      !! @param[in]     eps   Rank-deficiency threshold, \f$ 0 < \varepsilon < 1 \f$.
+      !! @param[in,out] nu    Total number of knots in \f$ u \f$.
+      !! @param[in,out] tu    Knot positions in \f$ u \f$ (length `nuest`).
+      !! @param[in,out] nv    Total number of knots in \f$ v \f$.
+      !! @param[in,out] tv    Knot positions in \f$ v \f$ (length `nvest`).
+      !! @param[in,out] u     Transformed \f$ u \f$-coordinates (length \f$ m \f$).
+      !! @param[in,out] v     Transformed \f$ v \f$-coordinates (length \f$ m \f$).
+      !! @param[out]    c     B-spline coefficients, length \f$ (n_u{-}4)(n_v{-}4) \f$.
+      !! @param[out]    fp    Weighted sum of squared residuals \f$ F_p \f$.
+      !! @param[in,out] wrk1  Real workspace (length `lwrk1`).
+      !! @param[in]     lwrk1 Declared dimension of `wrk1`.
+      !! @param[in,out] wrk2  Secondary workspace for rank-deficient systems (length `lwrk2`).
+      !! @param[in]     lwrk2 Declared dimension of `wrk2`.
+      !! @param[in,out] iwrk  Integer workspace (length `kwrk`).
+      !! @param[in]     kwrk  Declared dimension of `iwrk`.
+      !! @param[out]    ier   Error flag: \f$ \le 0 \f$ = success, `1`–`5` = convergence warnings,
+      !!                      `10` = invalid input, `>10` = `lwrk2` too small.
+      !!
+      !! @see Dierckx, Ch. 11, §11.1 (pp. 237–254); evapol — evaluate the polar spline;
+      !!      pogrid — gridded polar variant
+      pure subroutine polar(iopt,m,x,y,z,w,rad,s,nuest,nvest, &
+                            eps,nu,tu,nv,tv,u,v,c,fp,wrk1,lwrk1,wrk2,lwrk2,iwrk,kwrk,ier)
+      !          in case iopt(1)=-1,the value of nu must be specified on entry
+      !  tu    : real array of dimension at least nuest.
+      !          on successful exit, this array will contain the knots of the spline with respect to the
+      !          u-variable, i.e. the position of the interior knots tu(5),...,tu(nu-4) as well as the
+      !          position of the additional knots tu(1)=...=tu(4)=0 and tu(nu-3)=...=tu(nu)=1 needed for
+      !          the b-spline representation
+      !          if the computation mode iopt(1)=1 is used,the values of tu(1),...,tu(nu) should be left
+      !          unchanged between subsequent calls. if the computation mode iopt(1)=-1 is used,the values
+      !          tu(5),...tu(nu-4) must be supplied by the user, before entry. see also the restrictions.
+      !  nv    : integer.
+      !          unless ier=10 (in case iopt(1)>=0), nv will contain the total number of knots with respect
+      !          to the v-variable, of the spline approximation returned. if the computation mode iopt(1)=1
+      !          is used, the value of nv should be left unchanged between subsequent calls. in case
+      !          iopt(1)=-1, the value of nv should be specified on entry.
+      !  tv    : real array of dimension at least nvest.
+      !          on successful exit, this array will contain the knots of the spline with respect to the
+      !          v-variable, i.e. the position of the interior knots tv(5),...,tv(nv-4) as well as the
+      !          position of the additional knots tv(1),...,tv(4) and tv(nv-3),...,tv(nv) needed for the
+      !          b-spline representation.
+      !          if the computation mode iopt(1)=1 is used, the values of tv(1),...,tv(nv) should be left
+      !          unchanged between subsequent calls. if the computation mode iopt(1)=-1 is used,the values
+      !          tv(5),...tv(nv-4) must be supplied by the user, before entry. see also the restrictions.
+      !  u     : real array of dimension at least (m).
+      !  v     : real array of dimension at least (m).
+      !          on successful exit, u(i),v(i) contains the co-ordinates of the i-th data point with
+      !          respect to the transformed rectangular approximation domain, for i=1,2,...,m.
+      !          if the computation mode iopt(1)=1 is used the values of u(i),v(i) should be left unchanged
+      !          between subsequent calls.
+      !  c     : real array of dimension at least (nuest-4)*(nvest-4). on successful exit, c contains the
+      !          coefficients of the spline approximation s(u,v).
+      !  fp    : real. unless ier=10, fp contains the weighted sum of squared residuals of the spline
+      !          approximation returned.
+      !  wrk1  : real array of dimension (lwrk1). used as workspace.
+      !          if the computation mode iopt(1)=1 is used the value of wrk1(1) should be left unchanged
+      !          between subsequent calls. on exit wrk1(2),wrk1(3),...,wrk1(1+ncof) will contain the
+      !          values d(i)/max(d(i)),i=1,...,ncof=1+iopt(2)*(iopt(2)+3)/2+(nv-7)*(nu-5-iopt(2)-iopt(3))
+      !          with d(i) the i-th diagonal element of the triangular matrix for calculating the b-spline
+      !          coefficients.it includes those elements whose square is < eps which are treated as 0 in
+      !          the case of rank deficiency(ier=-2).
+      !  lwrk1 : integer. on entry lwrk1 must specify the actual dimension of the array wrk1 as declared in
+      !          the calling (sub)program. lwrk1 must not be too small. let
+      !            k = nuest-7, l = nvest-7, p = 1+iopt(2)*(iopt(2)+3)/2,
+      !            q = k+2-iopt(2)-iopt(3) then
+      !          lwrk1 >= 129+10*k+21*l+k*l+(p+l*q)*(1+8*l+p)+8*m
+      !  wrk2  : real array of dimension (lwrk2). used as workspace, but only in the case a rank deficient
+      !          system is encountered.
+      !  lwrk2 : integer. on entry lwrk2 must specify the actual dimension of the array wrk2 as declared
+      !          in the calling (sub)program.
+      !          lwrk2 > 0 . a save upper bound  for lwrk2 = (p+l*q+1)*(4*l+p)+p+l*q where p,l,q are as
+      !          above. if there are enough data points, scattered uniformly over the approximation domain
+      !          and if the smoothing factor s is not too small, there is a good chance that this extra
+      !          workspace is not needed. a lot of memory might therefore be saved by setting lwrk2=1.
+      !  iwrk  : integer array of dimension (kwrk). used as workspace.
+      !  kwrk  : integer. on entry kwrk must specify the actual dimension of the array iwrk as declared in
+      !          the calling (sub)program. kwrk >= m+(nuest-7)*(nvest-7).
+      !  ier   : integer. unless the routine detects an error, ier<=0 on exit, i.e.
+      !   ier=0  : normal return. the spline returned has a residual sum of squares fp such that
+      !            abs(fp-s)/s <= tol with tol a relative tolerance set to 0.001 by the program.
+      !   ier=-1 : normal return. the spline returned is an interpolating spline (fp=0).
+      !   ier=-2 : normal return. the spline returned is the weighted least-squares constrained polynomial.
+      !            in this extreme case fp gives the upper bound for the smoothing factor s.
+      !   ier<-2 : warning. the coefficients of the spline returned have been computed as the minimal norm
+      !            least-squares solution of a (numerically) rank deficient system. (-ier) gives the rank.
+      !            especially if the rank deficiency which can be computed as
+      !            1+iopt(2)*(iopt(2)+3)/2+(nv-7)*(nu-5-iopt(2)-iopt(3))+ier
+      !            is large the results may be inaccurate. they could also depend on the value of eps.
+      !   ier=1  : error. the required storage space exceeds the available storage space, as specified by
+      !            the parameters nuest and nvest. likely causes: nuest or nvest too small. if these
+      !            parameters are already large, it may also indicate that s is too small.
+      !            the approximation returned is the weighted least-squares polar spline according to the
+      !            current set of knots. the parameter fp gives the corresponding weighted sum of squared
+      !            residuals (fp>s).
+      !   ier=2  : error. a theoretically impossible result was found during the iteration process for
+      !            finding a smoothing spline with fp = s. probably causes : s too small or badly chosen
+      !            eps. there is an approximation returned but the corresponding weighted sum of squared
+      !            residuals does not satisfy the condition abs(fp-s)/s < tol.
+      !   ier=3  : error. the maximal number of iterations maxit (set to 20 by the program) allowed for
+      !            finding a smoothing spline with fp=s has been reached. probably causes : s too small
+      !            there is an approximation returned but the corresponding weighted sum of squared
+      !            residuals does not satisfy the condition abs(fp-s)/s < tol.
+      !   ier=4  : error. no more knots can be added because the dimension of the spline
+      !            1+iopt(2)*(iopt(2)+3)/2+(nv-7)*(nu-5-iopt(2)-iopt(3)) already exceeds the number of
+      !            data points m. likely causes : either s or m too small.
+      !            the approximation returned is the weighted least-squares polar spline according to the
+      !            current set of knots. the parameter fp gives the corresponding weighted sum of squared
+      !            residuals (fp>s).
+      !   ier=5  : error. no more knots can be added because the additional knot would (quasi) coincide
+      !            with an old one. likely causes : s too small or too large a weight to an inaccurate data
+      !            point.
+      !            the approximation returned is the weighted least-squares polar spline according to the
+      !            current set of knots. the parameter fp gives the corresponding weighted sum of squared
+      !            residuals (fp>s).
+      !   ier=10 : error. on entry, the input data are controlled on validity the following restrictions
+      !            must be satisfied:
+      !            -1<=iopt(1)<=1 , 0<=iopt(2)<=2 , 0<=iopt(3)<=1 ,
+      !            m>=4-iopt(2)-iopt(3) , nuest>=8 ,nvest >=8, 0<eps<1,
+      !            0<=teta(i)<=pi, 0<=phi(i)<=2*pi, w(i)>0, i=1,...,m
+      !            lwrk1 >= 129+10*k+21*l+k*l+(p+l*q)*(1+8*l+p)+8*m
+      !            kwrk >= m+(nuest-7)*(nvest-7)
+      !            if iopt(1)=-1:9<=nu<=nuest,9+iopt(2)*(iopt(2)+1)<=nv<=nvest
+      !                          0<tu(5)<tu(6)<...<tu(nu-4)<1
+      !                          -pi<tv(5)<tv(6)<...<tv(nv-4)<pi
+      !            if iopt(1)>=0: s>=0
+      !            if one of these conditions is found to be violated,control is immediately repassed to
+      !            the calling program. in that case there is no approximation returned.
+      !   ier>10 : error. lwrk2 is too small, i.e. there is not enough workspace for computing the minimal
+      !            least-squares solution of a rank deficient system of linear equations. ier gives the
+      !            requested value for lwrk2. there is no approximation returned but, having saved the
+      !            information contained in nu,nv,tu,tv,wrk1,u,v and having adjusted the value of lwrk2
+      !            and the dimension of the array wrk2 accordingly, the user can continue at the point the
+      !            program was left, by calling polar with iopt(1)=1.
+      !
+      ! further comments:
+      !  by means of the parameter s, the user can control the tradeoff between closeness of fit and
+      !   smoothness of fit of the approximation. if s is too large, the spline will be too smooth and
+      !   signal will be lost ; if s is too small the spline will pick up too much noise. in the extreme
+      !   cases the program will return an interpolating spline if s=0 and the constrained weighted least-
+      !   squares polynomial if s is very large. between these extremes, a properly chosen s will result
+      !   in a good compromise between closeness of fit and smoothness of fit. to decide whether an appro-
+      !   ximation, corresponding to a certain s is satisfactory the user is highly recommended to inspect
+      !   the fits graphically.
+      !   recommended values for s depend on the weights w(i). if these are taken as 1/d(i) with d(i) an
+      !   estimate of the standard deviation of z(i), a good s-value should be found in the range
+      !   (m-sqrt(2*m),m+sqrt(2*m)). if nothing is known about the statistical error in z(i) each w(i) can
+      !   be set equal to one and s determined by trial and error, taking account of the comments above.
+      !   the best is then to start with a very large value of s ( to determine the least-squares poly-
+      !   nomial and the corresponding upper bound fp0 for s) and then to progressively decrease the value
+      !   of s ( say by a factor 10 in the beginning, i.e. s=fp0/10, fp0/100,...and more carefully as the
+      !   approximation shows more detail) to obtain closer fits.
+      !   to choose s very small is strongly discouraged. this considerably increases computation time and
+      !   memory requirements. it may also cause rank-deficiency (ier<-2) and endager numerical stability.
+      !   to economize the search for a good s-value the program provides with different modes of compu-
+      !   tation. at the first call of the routine, or whenever he wants to restart with the initial set of
+      !   knots the user must set iopt(1)=0.
+      !   if iopt(1)=1 the program will continue with the set of knots found at the last call of the
+      !   routine. this will save a lot of computation time if polar is called repeatedly for different
+      !   values of s.
+      !   the number of knots of the spline returned and their location will depend on the value of s and
+      !   on the complexity of the shape of the function underlying the data. if the computation mode
+      !   iopt(1)=1 is used, the knots returned may also depend on the s-values at previous calls (if these
+      !   were smaller). therefore, if after a number of trials with different s-values and iopt(1)=1,the
+      !   user can finally accept a fit as satisfactory, it may be worthwhile for him to call polar once
+      !   more with the selected value for s but now with iopt(1)=0 indeed, polar may then return an appro-
+      !   ximation of the same quality of fit but with fewer knots and therefore better if data reduction
+      !   is also an important objective for the user.
+      !   the number of knots may also depend on the upper bounds nuest and nvest. indeed, if at a certain
+      !   stage in polar the number of knots in one direction (say nu) has reached the value of its upper
+      !   bound (nuest), then from that moment on all subsequent knots are added in the other (v)
+      !   direction. this may indicate that the value of nuest is too small. on the other hand, it gives
+      !   the user the option of limiting the number of knots the routine locates in any direction
+      !
+      !  other subroutines required:
+      !    fpback,fpbspl,fppola,fpdisc,fpgivs,fprank,fprati,fprota,fporde,fprppo
+      !
+      !  references:
+      !   dierckx p.: an algorithm for fitting data over a circle using tensor
+      !               product splines,j.comp.appl.maths 15 (1986) 161-173.
+      !   dierckx p.: an algorithm for fitting data on a circle using tensor
+      !               product splines, report tw68, dept. computer science,
+      !               k.u.leuven, 1984.
+      !   dierckx p.: curve and surface fitting with splines, monographs on
+      !               numerical analysis, oxford university press, 1993.
+      !
+      !  author:
+      !    p.dierckx
+      !    dept. computer science, k.u. leuven
+      !    celestijnenlaan 200a, b-3001 heverlee, belgium.
+      !    e-mail : Paul.Dierckx@cs.kuleuven.ac.be
+      !
+      !  creation date : june 1984
+      !  latest update : march 1989
+      !
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)     :: s,eps
+      real(FP_REAL), intent(inout)  :: fp
+      integer(FP_SIZE), intent(in)  :: m,nuest,nvest,lwrk1,lwrk2,kwrk
+      integer(FP_SIZE), intent(out) :: nu,nv
+      integer(FP_FLAG), intent(out) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: x(m),y(m),z(m),w(m)
+      real(FP_REAL), intent(out)   :: u(m),v(m),tu(nuest),tv(nvest),c((nuest-4)*(nvest-4))
+      real(FP_REAL), intent(inout) :: wrk1(lwrk1),wrk2(lwrk2)
+      integer(FP_SIZE), intent(in)    :: iopt(3)
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      !  ..user specified function
+#if defined(__GFORTRAN__) && __GNUC__ == 15
+      ! GCC 15 bug #120163: use inline interface instead of procedure(fitpack_polar_boundary)
+      interface
+         pure real(FP_REAL) function rad(theta)
+            import FP_REAL
+            real(FP_REAL), intent(in) :: theta
+         end function rad
+      end interface
+#else
+      procedure(fitpack_polar_boundary) :: rad
+#endif
+      !  ..local scalars..
+      real(FP_REAL) :: dist,r
+      integer(FP_SIZE) :: i,ib1,ib3,ki,kn,kwest,la,lbu,lcc,lcs,lro,lbv,lco,lf,lff,lfp,lh,lq,lsu,lsv,lwest,&
+                 ncest,ncc,nuu,nvv,nreg,nrint,nu4,nv4,iopt1,iopt2,iopt3,ipar,nvmin
+
+      !  set up constants
+      integer(FP_SIZE),  parameter :: maxit = 20
+      real(FP_REAL), parameter :: tol = smallnum03
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid,control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      iopt1 = iopt(1)
+      iopt2 = iopt(2)
+      iopt3 = iopt(3)
+      if (eps<=zero .or. eps>=one) return
+      if (iopt1<(-1) .or. iopt1>1) return
+      if (iopt2<0 .or. iopt2>2)    return
+      if (iopt3<0 .or. iopt3>1)    return
+      if (m<(4-iopt2-iopt3))       return
+      if (nuest<8 .or. nvest<8)    return
+
+      nu4 = nuest-4
+      nv4 = nvest-4
+      ncest = nu4*nv4
+      nuu = nuest-7
+      nvv = nvest-7
+      ipar = 1+iopt2*(iopt2+3)/2
+      ncc = ipar+nvv*(nuest-5-iopt2-iopt3)
+      nrint = nuu+nvv
+      nreg = nuu*nvv
+      ib1 = 4*nvv
+      ib3 = ib1+ipar
+      lwest = ncc*(1+ib1+ib3)+2*nrint+ncest+m*8+ib3+5*nuest+12*nvest
+      kwest = m+nreg
+      if (lwrk1<lwest .or. kwrk<kwest) return
+
+
+      if (iopt1<=0) then
+
+          ! Check weights
+          if (any(w<=zero)) return
+
+          ! Get polar coordinates
+          do i=1,m
+            dist = x(i)**2+y(i)**2
+            if (dist<=zero) then
+                u(i) = zero
+                v(i) = zero
+            else
+                v(i) = atan2(y(i),x(i))
+                r    = rad(v(i));    if (r<=zero) return
+                u(i) = sqrt(dist)/r; if (u(i)>one) return
+            endif
+          end do
+
+      endif
+
+      if (iopt1<0) then
+
+          nuu   = nu-8
+          nvv   = nv-8
+          nvmin = 9+iopt2*(iopt2+1)
+
+          if (nuu<1 .or. nu>nuest) return
+          if (nv<nvmin .or. nv>nvest) return
+
+          tu(4) = zero
+          if (any(tu(5:nuu+4)<=tu(4:nuu+3) .or. tu(5:nuu+4)>=one)) return
+
+          tv(4) = -pi
+          if (any(tv(5:nvv+4)<=tv(4:nvv+3) .or. tv(5:nvv+4)>=pi)) return
+
+      endif
+
+      if (iopt1>=0 .and. s<zero) return
+
+      ier = FITPACK_OK
+
+      !  we partition the working space and determine the spline approximation
+      kn  = 1
+      ki  = kn+m
+      lq  = 2
+      la  = lq+ncc*ib3
+      lf  = la+ncc*ib1
+      lff = lf+ncc
+      lfp = lff+ncest
+      lco = lfp+nrint
+      lh  = lco+nrint
+      lbu = lh+ib3
+      lbv = lbu+5*nuest
+      lro = lbv+5*nvest
+      lcc = lro+nvest
+      lcs = lcc+nvest
+      lsu = lcs+nvest*5
+      lsv = lsu+m*4
+      call fppola(iopt1,iopt2,iopt3,m,u,v,z,w,rad,s,nuest,nvest,eps,tol,       &
+                  maxit,ib1,ib3,ncest,ncc,nrint,nreg,nu,tu,nv,tv,c,fp,wrk1(1), &
+                  wrk1(lfp),wrk1(lco),wrk1(lf),wrk1(lff),wrk1(lro),wrk1(lcc),  &
+                  wrk1(lcs),wrk1(la),wrk1(lq),wrk1(lbu),wrk1(lbv),wrk1(lsu),   &
+                  wrk1(lsv),wrk1(lh),iwrk(ki),iwrk(kn),wrk2,lwrk2,ier)
+      return
+      end subroutine polar
+
+
+      ! subroutine profil calculates the b-spline coefficients of the univariate spline
+      ! if iopt=0, f(y) = s(u,y)
+      ! if iopt=1, g(x) = s(x,u)
+      ! with s(x,y) a bivariate spline of degrees kx and ky, given in the b-spline representation.
+
+      !> @brief Cross-section of a tensor-product spline: fix one axis (any dimension).
+      !!
+      !! Fixing axis `ax` at the value `u` collapses one tensor rank: the result is the coefficient tensor
+      !! of a `dims-1`-D spline over the remaining axes (their knot vectors and degrees are unchanged, in
+      !! their original relative order). The fixed axis' `k(ax)+1` non-zero B-splines at `u` are contracted
+      !! against the coefficient support along that axis. At `dims=2` this reduces to the classic
+      !! bivariate cross-section (the same `fpbspl` values and `dot_product` accumulation).
+      !!
+      !! @param[in]  ax    Axis to fix, \f$ 1 \le ax \le dims \f$
+      !! @param[in]  dims  Number of axes (domain dimension)
+      !! @param[in]  t     Per-axis knot vectors; column \f$ d \f$ is `t(1:n(d),d)`
+      !! @param[in]  n     Number of knots per axis, `n(dims)`
+      !! @param[in]  c     B-spline coefficient tensor, flat row-major (first axis slowest)
+      !! @param[in]  k     Spline degree per axis, `k(dims)`
+      !! @param[in]  u     Value at which axis `ax` is fixed, \f$ t(k(ax){+}1,ax) \le u \le t(nk1(ax){+}1,ax) \f$
+      !! @param[out] cu    Cross-section coefficients: flat row-major over the surviving axes (in original
+      !!                   order, skipping `ax`), length \f$ \prod_{d \ne ax}(n(d)-k(d)-1) \f$
+      !! @param[out] ier   FITPACK_OK on success, FITPACK_INPUT_ERROR on bad input
+      !!
+      !! @see profil, fpbspl; todo/fitpack_nd_grids.md
+      pure subroutine profil(ax,dims,t,n,c,k,u,cu,ier)
+          integer(FP_DIM),  intent(in)  :: ax,dims
+          integer(FP_SIZE), intent(in)  :: n(dims),k(dims)
+          real(FP_REAL),    intent(in)  :: t(:,:),c(:),u
+          real(FP_REAL),    intent(out) :: cu(:)
+          integer(FP_FLAG), intent(out) :: ier
+
+          integer(FP_SIZE) :: nk1(dims),cstride(dims),fidx(dims),oidx(dims-1),osize(dims-1)
+          integer(FP_SIZE) :: k1a,nk1a,l,nout,o,s,coff
+          real(FP_REAL)    :: h(MAX_ORDER+1),csupp(MAX_ORDER+1)
+
+          ier  = FITPACK_INPUT_ERROR
+          if (ax<1 .or. ax>dims) return
+          nk1  = n-k-1
+          k1a  = k(ax)+1
+          nk1a = nk1(ax)
+          if (u<t(k1a,ax) .or. u>t(nk1a+1,ax)) return
+          ier  = FITPACK_OK
+
+          !  non-zero B-splines of the fixed axis at u
+          l = fp_knot_interval(t(1:n(ax),ax), u, k1a, nk1a)
+          h = fpbspl(t(1:n(ax),ax), n(ax), k(ax), u, l)
+
+          cstride = fp_grid_strides(dims,nk1)
+
+          !  sizes of the surviving axes, in original order (all axes except ax)
+          osize = pack(nk1, IDIMS(:dims)/=ax)
+          nout  = product(osize)
+
+          !  for each surviving-axis multi-index, contract the ax-support against h
+          do o=0,nout-1
+             oidx = fp_grid_unravel(dims-1,o,osize)
+             !  full multi-index: axis ax at the support root (1-based l-k1a+1), the rest from oidx
+             fidx = unpack(oidx, IDIMS(:dims)/=ax, l-k1a+1)
+             coff = fp_grid_index(dims,fidx,cstride)     ! 0-based offset of the support root
+             do s=1,k1a
+                csupp(s) = c(coff + (s-1)*cstride(ax) + 1)
+             end do
+             cu(o+1) = dot_product(h(1:k1a),csupp(1:k1a))
+          end do
+          return
+      end subroutine profil
+
+
+      ! given the set of values z(i,j) on the rectangular grid (x(i),y(j)),i=1,...,mx;j=1,...,my, subroutine
+      ! regrid determines a smooth bivariate spline approximation s(x,y) of degrees kx and ky on the rect-
+      ! angle xb <= x <= xe, yb <= y <= ye.
+      ! if iopt = -1 regrid calculates the least-squares spline according to a given set of knots.
+      ! if iopt >= 0 the total numbers nx and ny of these knots and their position tx(j),j=1,...,nx and
+      ! ty(j),j=1,...,ny are chosen automatically by the routine. the smoothness of s(x,y) is then achieved by
+      ! minimalizing the discontinuity jumps in the derivatives of s(x,y) across the boundaries of the
+      ! subpanels (tx(i),tx(i+1))*(ty(j),ty(j+1). the amounth of smoothness is determined by the condition
+      ! that f(p) = sum ((z(i,j)-s(x(i),y(j))))**2) be <= s, with s a given non-negative constant, called the
+      ! smoothing factor. the fit is given in the b-spline representation (b-spline coefficients
+      ! c((ny-ky-1)*(i-1)+j),i=1,...,nx-kx-1;j=1,...,ny-ky-1) and can be evaluated by means of subroutine
+      ! bispev.
+      !> @brief Tensor-product gridded smoothing-spline fit driver for any domain dimension `dims`.
+      !!
+      !! Fits a `dims`-fold tensor-product B-spline to data on a rectangular grid. Validation,
+      !! boundary-knot clamping and Schoenberg-Whitney (`fpchec`) checks are runtime do-loops over the
+      !! `dims` axes; the knot-direction arbiter is the N-D `new_knot_dimension_nd`. At `dims=2` this
+      !! is the engine behind the bivariate grid surface and the fp_regrid_c binding.
+      !!
+      !! WORKSPACE (no allocation): the caller supplies a flat real `wrk(lwrk)` and integer
+      !! `iwrk(kwrk)`, both `target`. regrid carves them into the rank-N work views needed by
+      !! fpregr/fpgrre via pointer bounds remapping. The persistent fit-state lives at fixed offsets:
+      !! wrk(1)=fp0, wrk(2)=fpold, wrk(3:2+dims)=reduc; iwrk(1)=lastdi, iwrk(2:1+dims)=nplus -- so
+      !! preserving wrk/iwrk between calls (with iopt=1) continues from the previous knot set.
+      !!
+      !! Minimum sizes:
+      !!   lwrk >= 2 + dims + nestmax*dims + mmax*(kmax+1)*dims + 2*nestmax*(kmax+2)*dims + mm + mq
+      !!   kwrk >= 1 + dims + mmax*dims + nestmax*dims
+      !! with mmax=maxval(m), nestmax=maxval(nest), kmax=maxval(k), nk1max=nest-(k+1):
+      !!   mq = 2*max_{i=1..dims-1} [ product(nk1max(1:i)) * product(m(i+1:dims)) ]
+      !!   mm = max(nestmax, mmax, product(m(2:dims)), product(nk1max(1:dims-1)))
+      !!
+      !! @param[in] maxit  Optional cap on the smoothing-parameter iterations (default
+      !!                   `REGRID_MAXIT`). Large grids may need more than the default before
+      !!                   `f(p)=s` is met; `FITPACK_MAXIT` reports that the cap was reached.
+      !!
+      !! @see regrid, fpregr; Dierckx, SIAM J.Numer.Anal. 19 (1982) 1286-1304; Ch.5 §5.4.
+      pure subroutine regrid(iopt,dims,m,xg,z,lo,hi,k,s,nest,n,t,c,fp,wrk,lwrk,iwrk,kwrk,ier,maxit)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: iopt
+      integer(FP_DIM),  intent(in)    :: dims
+      real(FP_REAL),    intent(in)    :: s
+      real(FP_REAL),    intent(out)   :: fp
+      integer(FP_SIZE), intent(in)    :: lwrk,kwrk
+      integer(FP_FLAG), intent(out)   :: ier
+      integer(FP_SIZE), intent(in), optional :: maxit
+      !  ..array arguments..
+      integer(FP_SIZE), intent(in)    :: m(dims),k(dims),nest(dims)
+      real(FP_REAL),    intent(in)    :: lo(dims),hi(dims)
+      integer(FP_SIZE), intent(inout) :: n(dims)
+      real(FP_REAL),    intent(in)              :: z(*)           ! flat row-major gridded data (axis 1 slowest)
+      real(FP_REAL),    intent(in),    contiguous :: xg(:,:)
+      real(FP_REAL),    intent(inout), contiguous :: t(:,:)
+      real(FP_REAL),    intent(inout)             :: c(*)
+      real(FP_REAL),    intent(inout), target     :: wrk(lwrk)
+      integer(FP_SIZE), intent(inout), target     :: iwrk(kwrk)
+
+      !  ..parameters..
+      real(FP_REAL),    parameter :: tol = smallnum03
+      !  ..local scalars..
+      integer(FP_DIM)  :: d
+      integer(FP_SIZE) :: nit,nc,lwest,kwest,maxm,maxnest,maxk1,maxk2,mm,mynx,offr,offi,i,bufmax
+      !  ..per-axis arrays..
+      integer(FP_SIZE) :: k1(dims),k2(dims),nmin(dims),nk1max(MAX_IDIM)
+      !  ..workspace views (carved from wrk/iwrk; contiguous by construction)..
+      real(FP_REAL),    pointer, contiguous :: pfpint(:,:),psp(:,:,:),pa(:,:,:),pb(:,:,:),pright(:),pq(:)
+      integer(FP_SIZE), pointer, contiguous :: pnr(:,:),pnrdat(:,:)
+
+      !  before starting computations a data check is made.
+      ier = FITPACK_INPUT_ERROR
+
+      nit  = REGRID_MAXIT
+      if (present(maxit)) nit = max(IONE,maxit)
+
+      k1   = k+1
+      k2   = k+2
+      nmin = 2*k1
+      nc   = product(nest-k1)
+
+      if (any(k<=0) .or. any(k>5))    return
+      if (iopt<(-1) .or. iopt>1)      return
+      if (any(m<k1) .or. any(nest<nmin)) return
+
+      !  per-axis work-array sizing
+      maxm    = maxval(m)
+      maxnest = maxval(nest)
+      maxk1   = maxval(k)+1
+      maxk2   = maxval(k)+2
+      !  q holds two ping-pong buffers (one per intermediate tensor); right holds the widest gathered
+      !  fiber. At dims=2 only the first half is referenced, so the bit-for-bit gate path is unchanged.
+      nk1max(1:dims) = nest-k1
+      bufmax = 0
+      do i=1,dims-1
+         bufmax = max(bufmax, product(nk1max(1:i))*product(m(i+1:dims)))
+      end do
+      mm   = max(maxnest, maxm, product(m(2:dims)), product(nk1max(1:dims-1)), maxval(nk1max(1:dims)))
+      mynx = 2*bufmax
+
+      lwest = (2+dims) + maxnest*dims + maxm*maxk1*dims + 2*maxnest*maxk2*dims + mm + mynx
+      kwest = (1+dims) + maxm*dims + maxnest*dims
+
+      if (lwrk<lwest .or. kwrk<kwest) return
+
+      !  per-axis domain bounds and strict monotonicity of the grid coordinates.
+      do d=1,dims
+         if (lo(d)>xg(1,d) .or. hi(d)<xg(m(d),d)) return
+         if (any(xg(1:m(d)-1,d)>=xg(2:m(d),d)))   return
+      end do
+
+      if (iopt<0) then
+
+          !  least-squares spline on given knots: validate the knot set per axis.
+          do d=1,dims
+             if (n(d)<nmin(d) .or. n(d)>nest(d)) return
+             t(1:k1(d),d)        = lo(d)
+             t(n(d)-k(d):n(d),d) = hi(d)
+             ier = fpchec(xg(1:m(d),d),m(d),t(1:n(d),d),n(d),k(d))
+             if (ier/=FITPACK_OK) return
+          end do
+
+      else
+
+          if (s<zero) return
+          if (equal(s,zero) .and. any(nest<(m+k1))) return
+
+      endif
+
+      !  ---- partition the working space by pointer bounds remapping ----
+      ier  = FITPACK_OK
+      offr = 2+dims                                  ! wrk(1)=fp0, wrk(2)=fpold, wrk(3:2+dims)=reduc
+      pfpint(1:maxnest,1:dims)       => wrk(offr+1:offr+maxnest*dims);          offr = offr+maxnest*dims
+      psp(1:maxk1,1:maxm,1:dims)     => wrk(offr+1:offr+maxm*maxk1*dims);       offr = offr+maxm*maxk1*dims
+      pa(1:maxnest,1:maxk2,1:dims)   => wrk(offr+1:offr+maxnest*maxk2*dims);    offr = offr+maxnest*maxk2*dims
+      pb(1:maxnest,1:maxk2,1:dims)   => wrk(offr+1:offr+maxnest*maxk2*dims);    offr = offr+maxnest*maxk2*dims
+      pright(1:mm)                   => wrk(offr+1:offr+mm);                    offr = offr+mm
+      pq(1:mynx)                     => wrk(offr+1:offr+mynx)
+
+      offi = 1+dims                                  ! iwrk(1)=lastdi, iwrk(2:1+dims)=nplus
+      pnr(1:maxm,1:dims)             => iwrk(offi+1:offi+maxm*dims);            offi = offi+maxm*dims
+      pnrdat(1:maxnest,1:dims)       => iwrk(offi+1:offi+maxnest*dims)
+
+      call fpregr(iopt,dims,xg,m,z,lo,hi,k,s,nest,tol,nit,nc, &
+                     n,t,c,fp,wrk(1),wrk(2),wrk(3:2+dims),iwrk(1),iwrk(2:1+dims), &
+                     pfpint,pnr,pnrdat,psp,pright,pq,pa,pb,ier)
+      return
+
+      end subroutine regrid
+
+
+      !  subroutine spalde evaluates at a point x ALL the derivatives
+      !              (j-1)
+      !      d(j) = s     (x) , j=1,2,...,k1
+      !  of a spline s(x) of order k1 (degree k=k1-1), given in its b-spline representation.
+      !> @brief Evaluate all derivatives of a spline at a single point.
+      !!
+      !! Given a spline \f$ s(x) \f$ of order \f$ k_1 = k + 1 \f$ (degree \f$ k \f$) in B-spline
+      !! representation, computes \f$ d_j = s^{(j-1)}(x) \f$ for \f$ j = 1,\ldots,k_1 \f$
+      !! using the stable recurrence scheme of de Boor.
+      !!
+      !! @param[in]  t    Knot positions (length \f$ n \f$).
+      !! @param[in]  n    Total number of knots.
+      !! @param[in]  c    B-spline coefficients (length \f$ n \f$).
+      !! @param[in]  k1   Order of the spline (\f$ k_1 = k + 1 \f$).
+      !! @param[in]  x    Point where derivatives are evaluated.
+      !!   Must satisfy \f$ t_{k_1} \le x \le t_{n-k_1+1} \f$.
+      !! @param[out] d    Derivative values (length \f$ k_1 \f$):
+      !!   \f$ d(j) = s^{(j-1)}(x) \f$ for \f$ j = 1,\ldots,k_1 \f$.
+      !! @param[out] ier  Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @note At a knot, right derivatives are computed (left derivatives at the right boundary).
+      !!
+      !! @see Dierckx, Ch. 1, §1.3; fpader — derivative computation kernel
+      pure subroutine spalde(t,n,c,k1,x,d,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)      :: n,k1
+      integer(FP_FLAG), intent(out)     :: ier
+
+      real(FP_REAL), intent(in)  :: x
+      !  ..array arguments..
+      real(FP_REAL), intent(in)  :: t(n),c(n)
+      real(FP_REAL), intent(out) :: d(k1)
+
+      !  ..local scalars..
+      integer(FP_SIZE) :: l,nk1
+      !  ..
+      !  before starting computations a data check is made. if the input data
+      !  are invalid control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      nk1 = n-k1
+
+      if (x<t(k1) .or. x>t(nk1+1)) return
+
+      !  search for knot interval t(l) <= x < t(l+1)
+      l = fp_knot_interval(t, x, k1, nk1)
+
+      if(t(l)>=t(l+1)) return
+
+      !  calculate the derivatives.
+      ier = FITPACK_OK
+      call fpader(t,n,c,k1,x,l,d)
+
+      end subroutine spalde
+
+
+      !> @brief Fit a smooth bivariate spline to gridded data on a sphere (latitude-longitude grid).
+      !!
+      !! Given data values \f$ r_{ij} \f$ on the latitude-longitude grid \f$ (u_i, v_j) \f$ with
+      !! \f$ 0 < u_i < \pi \f$ (colatitude), \f$ v_b \le v_j < v_b + 2\pi \f$ (longitude), determines
+      !! a bicubic spline \f$ s(u,v) \f$ satisfying pole continuity constraints (value and optional
+      !! gradient at \f$ u=0 \f$ and \f$ u=\pi \f$) and periodicity in \f$ v \f$:
+      !! \f[
+      !!     \sum_{i,j}(r_{ij} - s(u_i,v_j))^2 + (r_0 - s(0,v))^2 + (r_1 - s(\pi,v))^2 \le s.
+      !! \f]
+      !!
+      !! @param[in]     iopt  Integer array(3): `iopt(1)` = computation mode (`-1`/`0`/`1`);
+      !!                      `iopt(2)` = continuity order at pole \f$ u=0 \f$ (`0`/`1`);
+      !!                      `iopt(3)` = continuity order at pole \f$ u=\pi \f$ (`0`/`1`).
+      !! @param[in]     ider  Integer array(4): pole data/derivative flags — `ider(1)` and `ider(3)`
+      !!                      specify whether data at poles exist; `ider(2)` and `ider(4)` specify
+      !!                      vanishing derivatives.
+      !! @param[in]     mu    Number of latitude grid points, \f$ 0 < u_i < \pi \f$.
+      !! @param[in]     u     Strictly increasing colatitudes (length \f$ m_u \f$).
+      !! @param[in]     mv    Number of longitude grid points, \f$ m_v > 3 \f$.
+      !! @param[in]     v     Strictly increasing longitudes (length \f$ m_v \f$),
+      !!                      \f$ -\pi \le v_1 < \pi,\; v_{m_v} < v_1 + 2\pi \f$.
+      !! @param[in]     r     Data values, length \f$ m_u \cdot m_v \f$:
+      !!                      `r(mv*(i-1)+j)` at \f$ (u_i, v_j) \f$.
+      !! @param[in]     r0    Data value at the north pole \f$ u=0 \f$ (used when `ider(1)>=0`).
+      !! @param[in]     r1    Data value at the south pole \f$ u=\pi \f$ (used when `ider(3)>=0`).
+      !! @param[in]     s     Smoothing factor, \f$ s \ge 0 \f$ (ignored when `iopt(1)=-1`).
+      !! @param[in]     nuest Upper bound for \f$ n_u \f$, \f$ \ge 8 \f$.
+      !! @param[in]     nvest Upper bound for \f$ n_v \f$, \f$ \ge 8 \f$.
+      !! @param[in,out] nu    Total number of knots in \f$ u \f$.
+      !! @param[in,out] tu    Knot positions in \f$ u \f$ (length `nuest`).
+      !! @param[in,out] nv    Total number of knots in \f$ v \f$.
+      !! @param[in,out] tv    Knot positions in \f$ v \f$ (length `nvest`).
+      !! @param[out]    c     B-spline coefficients, length \f$ (n_u{-}4)(n_v{-}4) \f$.
+      !! @param[out]    fp    Sum of squared residuals \f$ F_p \f$.
+      !! @param[in,out] wrk   Real workspace (length `lwrk`).
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace (length `kwrk`).
+      !! @param[in]     kwrk  Declared dimension of `iwrk`.
+      !! @param[out]    ier   Error flag: \f$ \le 0 \f$ = success, `1`–`5` = convergence warnings,
+      !!                      `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 11, §11.2 (pp. 254–270); sphere — scattered spherical variant;
+      !!      bispev — evaluate the result
+      pure subroutine spgrid(iopt,ider,mu,u,mv,v,r,r0,r1,s, &
+                             nuest,nvest,nu,tu,nv,tv,c,fp,wrk,lwrk,iwrk,kwrk,ier) 
+      !          unchanged on exit.
+      !  r1    : real value. on entry (if ider(1) >=0 ) r1 must specify the data value at the pole u=pi. 
+      !          unchanged on exit.
+      !  s     : real. on entry (if iopt(1)>=0) s must specify the smoothing factor. s >=0. unchanged on exit.
+      !          for advice on the choice of s see further comments
+      !  nuest : integer. unchanged on exit.
+      !  nvest : integer. unchanged on exit.
+      !          on entry, nuest and nvest must specify an upper bound for the number of knots required in the
+      !          u- and v-directions respect. these numbers will also determine the storage space needed by
+      !          the routine. nuest >= 8, nvest >= 8. in most practical situation nuest = mu/2, nvest=mv/2,
+      !          will be sufficient. always large enough are nuest=mu+6+iopt(2)+iopt(3), nvest = mv+7, the 
+      !          number of knots needed for interpolation (s=0). see also further comments.
+      !  nu    : integer. unless ier=10 (in case iopt(1)>=0), nu will contain the total number of knots with 
+      !          respect to the u-variable, of the spline approximation returned. if the computation mode 
+      !          iopt(1)=1 is used, the value of nu should be left unchanged between subsequent calls. in case 
+      !          iopt(1)=-1, the value of nu should be specified on entry.
+      !  tu    : real array of dimension at least (nuest).
+      !          on successful exit, this array will contain the knots of the spline with respect to the 
+      !          u-variable, i.e. the position of the interior knots tu(5:nu-4) as well as the position
+      !          of the additional knots tu(1)=...=tu(4)=0 and tu(nu-3:nu)=pi needed for the b-spline 
+      !          representation.
+      !          if the computation mode iopt(1)=1 is used,the values of tu(1:nu) should be left unchanged
+      !          between subsequent calls.
+      !          if the computation mode iopt(1)=-1 is used, the values tu(5:nu-4) must be supplied by the
+      !          user, before entry. see also the restrictions (ier=10).
+      !  nv    : integer. unless ier=10 (in case iopt(1)>=0), nv will contain the total number of knots with 
+      !          respect to the v-variable, of the spline approximation returned. if the computation mode 
+      !          iopt(1)=1 is used, the value of nv should be left unchanged between subsequent calls. in case 
+      !          iopt(1) = -1, the value of nv should be specified on entry.
+      !  tv    : real array of dimension at least (nvest). on successful exit, this array will contain the 
+      !          knots of the spline with respect to the v-variable, i.e. the position of the interior knots 
+      !          tv(5:nv-4) as well as the position of the additional knots tv(1:4) and tv(nv-3:nv)
+      !          needed for the b-spline representation.
+      !          if the computation mode iopt(1)=1 is used,the values of tv(1:nv) should be left unchanged 
+      !          between subsequent calls. if the computation mode iopt(1)=-1 is used, the values tv(5:nv-4),
+      !          must be supplied by the user, before entry. see also the restrictions (ier=10).
+      !  c     : real array of dimension at least (nuest-4)*(nvest-4).
+      !          on successful exit, c contains the coefficients of the spline approximation s(u,v)
+      !  fp    : real. unless ier=10, fp contains the sum of squared residuals of the spline approximation.
+      !  wrk   : real array of dimension (lwrk). used as workspace.
+      !          if the computation mode iopt(1)=1 is used the values of wrk(1:12)should be left unchanged 
+      !          between subsequent calls.
+      !  lwrk  : integer. on entry lwrk must specify the actual dimension of the array wrk as declared in the 
+      !          calling (sub)program.
+      !          lwrk >= 12+nuest*(mv+nvest+3)+nvest*24+4*mu+8*mv+q where q=max(mv+nvest,nuest).
+      !  iwrk  : integer array of dimension (kwrk). used as workspace. if the computation mode iopt(1)=1 is 
+      !          used the values of iwrk(1:5) should be left unchanged between subsequent call.
+      !  kwrk  : integer. on entry kwrk must specify the actual dimension of the array iwrk as declared in 
+      !          the calling (sub)program. kwrk >= 5+mu+mv+nuest+nvest.
+      !  ier   : integer. unless the routine detects an error, ier contains a non-positive error code. 
+      !          Input data restrictions: on entry, the input data are controlled on validity
+      !            the following restrictions must be satisfied.
+      !            -1<=iopt(1)<=1, 0<=iopt(2)<=1, 0<=iopt(3)<=1,
+      !            -1<=ider(1)<=1, 0<=ider(2)<=1, ider(2)=0 if iopt(2)=0.
+      !            -1<=ider(3)<=1, 0<=ider(4)<=1, ider(4)=0 if iopt(3)=0.
+      !            mu >= mumin (see above), mv >= 4, nuest >=8, nvest >= 8,
+      !            kwrk >= 5+mu+mv+nuest+nvest,
+      !            lwrk >= 12+nuest*(mv+nvest+3)+nvest*24+4*mu+8*mv+
+      !             max(nuest,mv+nvest)
+      !            0< u(i-1)<u(i)< pi,i=2,..,mu,
+      !            -pi<=v(1)< pi, v(1)<v(i-1)<v(i)<v(1)+2*pi, i=3,...,mv
+      !            if iopt(1)=-1: 8<=nu<=min(nuest,mu+6+iopt(2)+iopt(3))
+      !                           0<tu(5)<tu(6)<...<tu(nu-4)< pi
+      !                           8<=nv<=min(nvest,mv+7)
+      !                           v(1)<tv(5)<tv(6)<...<tv(nv-4)<v(1)+2*pi
+      !            the schoenberg-whitney conditions, i.e. there must  be subset of grid co-ordinates uu(p) 
+      !           and vv(q) such that
+      !                           tu(p) < uu(p) < tu(p+4) ,p=1,...,nu-4
+      !                     (iopt(2)=1 and iopt(3)=1 also count for a uu-value
+      !                           tv(q) < vv(q) < tv(q+4) ,q=1,...,nv-4
+      !                     (vv(q) is either a value v(j) or v(j)+2*pi)
+      !            if iopt(1)>=0: s>=0
+      !                       if s=0: nuest>=mu+6+iopt(2)+iopt(3), nvest>=mv+7
+      !            if one of these conditions is found to be violated,control is immediately repassed to the 
+      !            calling program. in that case there is no approximation returned.
+      !
+      ! further comments:
+      !   spgrid does not allow individual weighting of the data-values. so, if these were determined to widely
+      !   different accuracies, then perhaps the general data set routine sphere should rather be used
+      !   in spite of efficiency.
+      !   by means of the parameter s, the user can control the tradeoff between closeness of fit and 
+      !   smoothness of fit of the approximation. if s is too large, the spline will be too smooth and signal 
+      !   will be lost ; if s is too small the spline will pick up too much noise. in the extreme cases the 
+      !   program will return an interpolating spline if s=0 and the constrained least-squares polynomial
+      !   (degrees 3,0) if s is very large. between these extremes, a properly chosen s will result in a good
+      !   compromise between closeness of fit and smoothness of fit. to decide whether an approximation, 
+      !   corresponding to a certain s is satisfactory the user is highly recommended to inspect the fits
+      !   graphically.
+      !   recommended values for s depend on the accuracy of the data values. if the user has an idea of the 
+      !   statistical errors on the data, he can also find a proper estimate for s. for, by assuming that,
+      !   if he specifies the right s, spgrid will return a spline s(u,v) which exactly reproduces the function 
+      !   underlying the data he can evaluate the sum((r(i,j)-s(u(i),v(j)))**2) to find a good estimate for 
+      !   this s. for example, if he knows that the statistical errors on his r(i,j)-values is not greater 
+      !   than 0.1, he may expect that a good s should have a value not larger than mu*mv*(0.1)**2.
+      
+      !   if nothing is known about the statistical error in r(i,j), s must be determined by trial and error, 
+      !   taking account of the comments above. the best is then to start with a very large value of s (to
+      !   determine the least-squares polynomial and the corresponding upper bound fp0 for s) and then to 
+      !   progressively decrease the value of s ( say by a factor 10 in the beginning, i.e. s=fp0/10,fp0/100,...
+      !   and more carefully as the approximation shows more detail) to obtain closer fits.
+      !   to economize the search for a good s-value the program provides with different modes of computation. 
+      !   at the first call of the routine, or whenever he wants to restart with the initial set of knots the 
+      !   user must set iopt(1)=0.
+      !   if iopt(1) = 1 the program will continue with the knots found at the last call of the routine. this 
+      !   will save a lot of computation time if spgrid is called repeatedly for different values of s.
+      !   the number of knots of the spline returned and their location will depend on the value of s and on 
+      !   the complexity of the shape of the function underlying the data. if the computation mode iopt(1) = 1
+      !   is used, the knots returned may also depend on the s-values at previous calls (if these were smaller).
+      !   therefore, if after a number of trials with different s-values and iopt(1)=1,the user can finally
+      !   accept a fit as satisfactory, it may be worthwhile for him to call spgrid once more with the chosen 
+      !   value for s but now with iopt(1)=0. indeed, spgrid may then return an approximation of the same 
+      !   quality of fit but with fewer knots and therefore better if data reduction is also an important 
+      !   objective for the user. the number of knots may also depend on the upper bounds nuest and nvest.
+      !   Indeed, if at a certain stage in spgrid the number of knots in one direction (say nu) has reached 
+      !   the value of its upper bound (nuest), then from that moment on all subsequent knots are added in the
+      !   other (v) direction. this may indicate that the value of nuest is too small. on the other hand, it 
+      !   gives the user the option of limiting the number of knots the routine locates in any direction.
+      !   For example, by setting nuest=8 (the lowest allowable value for nuest), the user can indicate that 
+      !   he wants an approximation which is a simple cubic polynomial in the variable u.
+      !
+      !  other subroutines required:
+      !    fpspgr,fpchec,fpchep,fpknot,fpopsp,fprati,fpgrsp,fpsysy,fpback,fpbacp,fpbspl,fpcyt1,fpcyt2,fpdisc,
+      !      fpgivs,fprota
+      !
+      !  references:
+      !   dierckx p. : fast algorithms for smoothing data over a disc or a sphere using tensor product splines,
+      !                in "algorithms for approximation", ed. j.c.mason and m.g.cox,
+      !                clarendon press oxford, 1987, pp. 51-65
+      !   dierckx p. : fast algorithms for smoothing data over a disc or a sphere using tensor product splines,
+      !                report tw73, dept. computer science,k.u.leuven, 1985.
+      !   dierckx p. : curve and surface fitting with splines, monographs on numerical analysis, oxford 
+      !                university press, 1993.
+      !
+      !  author:
+      !    p.dierckx
+      !    dept. computer science, k.u. leuven
+      !    celestijnenlaan 200a, b-3001 heverlee, belgium.
+      !    e-mail : Paul.Dierckx@cs.kuleuven.ac.be
+      !
+      !  creation date : july 1985
+      !  latest update : march 1989
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: r0,r1,s
+      real(FP_REAL), intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: mu,mv,nuest,nvest,lwrk,kwrk
+      integer(FP_SIZE), intent(inout) :: nu,nv
+      integer(FP_FLAG), intent(out)   :: ier
+
+      !  ..array arguments..
+      integer(FP_SIZE), intent(in)    :: iopt(3),ider(4)
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      real(FP_REAL), intent(in)    :: u(mu),v(mv),r(mu*mv)
+      real(FP_REAL), intent(inout) :: c((nuest-4)*(nvest-4)),tu(nuest),tv(nvest),wrk(lwrk)
+
+      !  ..local scalars..
+      real(FP_REAL) :: uu,ve,rmax,rmin,rb,re,rn
+      integer(FP_SIZE) :: i,jwrk,kndu,kndv,knru,knrv,kwest,l,ldr,lfpu,lfpv,lwest,lww,m,mumin,muu,nc,mv1
+
+      !  set constants
+      real(FP_REAL), parameter :: per = pi2
+      real(FP_REAL), parameter :: tol = smallnum03
+      integer(FP_SIZE), parameter :: maxit = 20
+
+      ve    = v(1)+per
+      mumin = 4
+      m     = mu*mv
+      nc    = (nuest-4)*(nvest-4)
+      lwest = 12+nuest*(mv+nvest+3)+24*nvest+4*mu+8*mv+max(nuest,mv+nvest)
+      kwest = 5+mu+mv+nuest+nvest
+
+      !  before starting computations, a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+
+      if (iopt(1)<(-1) .or. iopt(1)>1) return
+      if (iopt(2)<0 .or.    iopt(2)>1) return
+      if (iopt(3)<0 .or.    iopt(3)>1) return
+      if (ider(1)<(-1) .or. ider(1)>1) return
+      if (ider(2)<0 .or. ider(2)>1)    return
+      if (ider(2)==1 .and. iopt(2)==0) return
+      if (ider(3)<(-1) .or. ider(3)>1) return
+      if (ider(4)<0 .or. ider(4)>1)    return
+      if (ider(4)==1 .and. iopt(3)==0) return
+
+
+      if (ider(1)>=0) mumin = mumin-1
+      if (iopt(2)==1 .and. ider(2)==1) mumin = mumin-1
+      if (ider(3)>=0) mumin = mumin-1
+      if (iopt(3)==1 .and. ider(4)==1) mumin = mumin-1
+      if (mumin==0) mumin = 1
+      if (mu<mumin .or. mv<4)          return
+      if (nuest<8 .or. nvest<8)        return
+      if (lwrk<lwest .or. kwrk<kwest)  return
+      if (u(1)<=zero .or. u(mu)>=pi)     return
+      if (mu>1 .and. any(u(1:mu-1)>=u(2:mu))) return
+      if (v(1)< (-pi) .or. v(1)>=pi ) return
+      if (v(mv)>=v(1)+per)             return
+      if (any(v(1:mv-1)>=v(2:mv)))     return
+
+
+      if (iopt(1)<=0) then
+
+          rn = one/mv
+
+          !  if not given, we compute an estimate for r0.
+          if (ider(1)>=0) then
+             rb = r0
+          else
+             rb = sum(r(1:mv))*rn
+          endif
+
+          !  if not given, we compute an estimate for r1.
+          if (ider(3)>=0) then
+              re = r1
+          else
+              re = sum(r(m-mv+1:m))*rn
+          endif
+
+          ! we determine the range of r-values.
+          rmin = min(rb,minval(r(:m)))
+          rmax = max(re,maxval(r(:m)))
+
+          wrk(5)  = rb
+          wrk(6)  = zero
+          wrk(7)  = zero
+          wrk(8)  = re
+          wrk(9)  = zero
+          wrk(10) = zero
+          wrk(11) = rmax -rmin
+          wrk(12) = wrk(11)
+          iwrk(4) = mu
+          iwrk(5) = mu
+
+      endif
+
+      if (iopt(1)<0) then
+
+          if (nu<8 .or. nu>nuest) return
+          if (nv<11 .or. nv>nvest) return
+
+          ! Init tu: use wrk(13:) as working space
+          tu(1:4)     = zero
+          tu(nu-3:nu) = pi
+
+          l = 13
+          wrk(l) = zero
+          if (iopt(2)/=0) then
+              l      = l+1
+              uu     = min(u(1), tu(5))
+              wrk(l) = uu*half
+          endif
+
+          do i=1,mu
+            l = l+1
+            wrk(l) = u(i)
+          end do
+
+          if (iopt(3)/=0) then
+              l = l+1
+              uu = max(u(mu), tu(nu-4))
+              wrk(l) = uu+(pi-uu)*half
+          endif
+          l      = l+1
+          wrk(l) = pi
+          muu    = l-12
+          ier    = fpchec(wrk(13),muu,tu,nu,DEGREE_3); if (ier/=FITPACK_OK) return
+
+          ! Init tv: use wrk(13:) as working space
+          tv(1:4)       = [tv(nv-6:nv-4)-per, v(1)]
+          tv(nv-3:nv)   = [ve, tv(5:7)+per]
+          wrk(13:13+mv) = [v, ve]
+          mv1 = mv+1
+          ier = fpchep(wrk(13),mv1,tv,nv,DEGREE_3); if (ier/=FITPACK_OK) return
+
+      else
+
+          if (s<zero) return
+          if (equal(s,zero) .and. (nuest<(mu+6+iopt(2)+iopt(3)) .or. nvest<(mv+7)) ) return
+
+      endif
+
+      ! we partition the working space and determine the spline approximation
+      ldr  = 5
+      lfpu = 13
+      lfpv = lfpu+nuest
+      lww  = lfpv+nvest
+      jwrk = lwrk-12-nuest-nvest
+      knru = 6
+      knrv = knru+mu
+      kndu = knrv+mv
+      kndv = kndu+nuest
+      call fpspgr(iopt,ider,u,mu,v,mv,r,m,rb,re,s,nuest,nvest,tol,maxit, &
+                  nc,nu,tu,nv,tv,c,fp,wrk(1),wrk(2),wrk(3),wrk(4),wrk(lfpu), &
+                  wrk(lfpv),wrk(ldr),wrk(11),iwrk(1),iwrk(2),iwrk(3),iwrk(4), &
+                  iwrk(5),iwrk(knru),iwrk(knrv),iwrk(kndu),iwrk(kndv),wrk(lww), &
+                  jwrk,ier)
+      return
+      end subroutine spgrid
+
+
+      !> @brief Fit a smooth bicubic spherical spline to scattered data on a sphere.
+      !!
+      !! Given weighted data points \f$ (\theta_i, \phi_i, r_i, w_i) \f$, \f$ i=1,\ldots,m \f$, with
+      !! \f$ 0 \le \theta \le \pi \f$ (colatitude) and \f$ 0 \le \phi \le 2\pi \f$ (longitude),
+      !! determines a bicubic spline \f$ s(\theta, \phi) \f$ satisfying:
+      !!
+      !! - Pole constraints: \f$ s(0,\phi) \f$ and \f$ s(\pi,\phi) \f$ are constant.
+      !! - Periodicity in \f$ \phi \f$: derivatives match at \f$ \phi = 0 \f$ and \f$ \phi = 2\pi \f$.
+      !! - Gradient constraints at poles for smooth angular dependence.
+      !!
+      !! The smoothing factor \f$ s \ge 0 \f$ controls the trade-off:
+      !! \f[
+      !!     \sum_{i=1}^{m} \bigl[w_i\,(r_i - s(\theta_i, \phi_i))\bigr]^2 \le s.
+      !! \f]
+      !!
+      !! @param[in]     iopt  Computation mode: `-1` = least-squares with user knots;
+      !!                      `0` = smoothing, fresh start; `1` = smoothing, continue.
+      !! @param[in]     m     Number of data points, \f$ m \ge 2 \f$.
+      !! @param[in]     teta  Colatitudes \f$ \theta_i \in [0, \pi] \f$ (length \f$ m \f$).
+      !! @param[in]     phi   Longitudes \f$ \phi_i \in [0, 2\pi] \f$ (length \f$ m \f$).
+      !! @param[in]     r     Data values (length \f$ m \f$).
+      !! @param[in]     w     Positive weights (length \f$ m \f$).
+      !! @param[in]     s     Smoothing factor, \f$ s \ge 0 \f$ (ignored when `iopt=-1`).
+      !! @param[in]     ntest Upper bound for \f$ n_\theta \f$, \f$ \ge 8 \f$.
+      !! @param[in]     npest Upper bound for \f$ n_\phi \f$, \f$ \ge 8 \f$.
+      !! @param[in]     eps   Rank-deficiency threshold, \f$ 0 < \varepsilon < 1 \f$.
+      !! @param[in,out] nt    Total number of knots in \f$ \theta \f$.
+      !! @param[in,out] tt    Knot positions in \f$ \theta \f$ (length `ntest`).
+      !! @param[in,out] np    Total number of knots in \f$ \phi \f$.
+      !! @param[in,out] tp    Knot positions in \f$ \phi \f$ (length `npest`).
+      !! @param[out]    c     B-spline coefficients, length \f$ (n_\theta{-}4)(n_\phi{-}4) \f$.
+      !! @param[out]    fp    Weighted sum of squared residuals \f$ F_p \f$.
+      !! @param[in,out] wrk1  Real workspace (length `lwrk1`).
+      !! @param[in]     lwrk1 Declared dimension of `wrk1`.
+      !! @param[in,out] wrk2  Secondary workspace for rank-deficient systems (length `lwrk2`).
+      !! @param[in]     lwrk2 Declared dimension of `wrk2`.
+      !! @param[in,out] iwrk  Integer workspace (length `kwrk`).
+      !! @param[in]     kwrk  Declared dimension of `iwrk`.
+      !! @param[out]    ier   Error flag: \f$ \le 0 \f$ = success, `1`–`5` = convergence warnings,
+      !!                      `10` = invalid input, `>10` = `lwrk2` too small.
+      !!
+      !! @see Dierckx, Ch. 11, §11.2 (pp. 254–270); spgrid — gridded spherical variant
+      pure subroutine sphere(iopt,m,teta,phi,r,w,s,ntest,npest, &
+                             eps,nt,tt,np,tp,c,fp,wrk1,lwrk1,wrk2,lwrk2,iwrk,kwrk,ier)
+      !  tt(j),j=1,2,...,nt ; tp(j),j=1,2,...,np are chosen automatically by
+      !  the routine. the smoothness of s(teta,phi) is then achieved by mini-
+      !  malizing the discontinuity jumps of the derivatives of the spline
+      !  at the knots. the amount of smoothness of s(teta,phi) is determined
+      !  by the condition that fp = sum((w(i)*(r(i)-s(teta(i),phi(i))))**2)
+      !  be <= s, with s a given non-negative constant.
+      !  the spherical spline is given in the standard b-spline representation
+      !  of bicubic splines and can be evaluated by means of subroutine bispev
+      !
+      ! calling sequence:
+      !     call sphere(iopt,m,teta,phi,r,w,s,ntest,npest,eps,
+      !    *  nt,tt,np,tp,c,fp,wrk1,lwrk1,wrk2,lwrk2,iwrk,kwrk,ier)
+      !
+      ! parameters:
+      !  iopt  : integer flag. on entry iopt must specify whether a weighted
+      !          least-squares spherical spline (iopt=-1) or a smoothing
+      !          spherical spline (iopt=0 or 1) must be determined.
+      !          if iopt=0 the routine will start with an initial set of knots
+      !          tt(i)=0,tt(i+4)=pi,i=1,...,4;tp(i)=0,tp(i+4)=2*pi,i=1,...,4.
+      !          if iopt=1 the routine will continue with the set of knots
+      !          found at the last call of the routine.
+      !          attention: a call with iopt=1 must always be immediately pre-
+      !                     ceded by another call with iopt=1 or iopt=0.
+      !          unchanged on exit.
+      !  m     : integer. on entry m must specify the number of data points.
+      !          m >= 2. unchanged on exit.
+      !  teta  : real array of dimension at least (m).
+      !  phi   : real array of dimension at least (m).
+      !  r     : real array of dimension at least (m).
+      !          before entry,teta(i),phi(i),r(i) must be set to the spherical
+      !          co-ordinates of the i-th data point, for i=1,...,m.the order
+      !          of the data points is immaterial. unchanged on exit.
+      !  w     : real array of dimension at least (m). before entry, w(i) must
+      !          be set to the i-th value in the set of weights. the w(i) must
+      !          be strictly positive. unchanged on exit.
+      !  s     : real. on entry (in case iopt>=0) s must specify the smoothing
+      !          factor. s >=0. unchanged on exit.
+      !          for advice on the choice of s see further comments
+      !  ntest : integer. unchanged on exit.
+      !  npest : integer. unchanged on exit.
+      !          on entry, ntest and npest must specify an upper bound for the
+      !          number of knots required in the teta- and phi-directions.
+      !          these numbers will also determine the storage space needed by
+      !          the routine. ntest >= 8, npest >= 8.
+      !          in most practical situation ntest = npest = 8+sqrt(m/2) will
+      !          be sufficient. see also further comments.
+      !  eps   : real.
+      !          on entry, eps must specify a threshold for determining the
+      !          effective rank of an over-determined linear system of equat-
+      !          ions. 0 < eps < 1.  if the number of decimal digits in the
+      !          computer representation of a real number is q, then 10**(-q)
+      !          is a suitable value for eps in most practical applications.
+      !          unchanged on exit.
+      !  nt    : integer.
+      !          unless ier=10 (in case iopt >=0), nt will contain the total
+      !          number of knots with respect to the teta-variable, of the
+      !          spline approximation returned. if the computation mode iopt=1
+      !          is used, the value of nt should be left unchanged between
+      !          subsequent calls.
+      !          in case iopt=-1, the value of nt should be specified on entry
+      !  tt    : real array of dimension at least ntest.
+      !          on successful exit, this array will contain the knots of the
+      !          spline with respect to the teta-variable, i.e. the position
+      !          of the interior knots tt(5),...,tt(nt-4) as well as the
+      !          position of the additional knots tt(1)=...=tt(4)=0 and
+      !          tt(nt-3)=...=tt(nt)=pi needed for the b-spline representation
+      !          if the computation mode iopt=1 is used, the values of tt(1),
+      !          ...,tt(nt) should be left unchanged between subsequent calls.
+      !          if the computation mode iopt=-1 is used, the values tt(5),
+      !          ...tt(nt-4) must be supplied by the user, before entry.
+      !          see also the restrictions (ier=10).
+      !  np    : integer.
+      !          unless ier=10 (in case iopt >=0), np will contain the total
+      !          number of knots with respect to the phi-variable, of the
+      !          spline approximation returned. if the computation mode iopt=1
+      !          is used, the value of np should be left unchanged between
+      !          subsequent calls.
+      !          in case iopt=-1, the value of np (>=9) should be specified
+      !          on entry.
+      !  tp    : real array of dimension at least npest.
+      !          on successful exit, this array will contain the knots of the
+      !          spline with respect to the phi-variable, i.e. the position of
+      !          the interior knots tp(5),...,tp(np-4) as well as the position
+      !          of the additional knots tp(1),...,tp(4) and tp(np-3),...,
+      !          tp(np) needed for the b-spline representation.
+      !          if the computation mode iopt=1 is used, the values of tp(1),
+      !          ...,tp(np) should be left unchanged between subsequent calls.
+      !          if the computation mode iopt=-1 is used, the values tp(5),
+      !          ...tp(np-4) must be supplied by the user, before entry.
+      !          see also the restrictions (ier=10).
+      !  c     : real array of dimension at least (ntest-4)*(npest-4).
+      !          on successful exit, c contains the coefficients of the spline
+      !          approximation s(teta,phi).
+      !  fp    : real. unless ier=10, fp contains the weighted sum of
+      !          squared residuals of the spline approximation returned.
+      !  wrk1  : real array of dimension (lwrk1). used as workspace.
+      !          if the computation mode iopt=1 is used the value of wrk1(1)
+      !          should be left unchanged between subsequent calls.
+      !          on exit wrk1(2),wrk1(3),...,wrk1(1+ncof) will contain the
+      !          values d(i)/max(d(i)),i=1,...,ncof=6+(np-7)*(nt-8)
+      !          with d(i) the i-th diagonal element of the reduced triangular
+      !          matrix for calculating the b-spline coefficients. it includes
+      !          those elements whose square is less than eps,which are treat-
+      !          ed as 0 in the case of presumed rank deficiency (ier<-2).
+      !  lwrk1 : integer. on entry lwrk1 must specify the actual dimension of
+      !          the array wrk1 as declared in the calling (sub)program.
+      !          lwrk1 must not be too small. let
+      !            u = ntest-7, v = npest-7, then
+      !          lwrk1 >= 185+52*v+10*u+14*u*v+8*(u-1)*v**2+8*m
+      !  wrk2  : real array of dimension (lwrk2). used as workspace, but
+      !          only in the case a rank deficient system is encountered.
+      !  lwrk2 : integer. on entry lwrk2 must specify the actual dimension of
+      !          the array wrk2 as declared in the calling (sub)program.
+      !          lwrk2 > 0 . a save upper bound  for lwrk2 = 48+21*v+7*u*v+
+      !          4*(u-1)*v**2 where u,v are as above. if there are enough data
+      !          points, scattered uniformly over the approximation domain
+      !          and if the smoothing factor s is not too small, there is a
+      !          good chance that this extra workspace is not needed. a lot
+      !          of memory might therefore be saved by setting lwrk2=1.
+      !          (see also ier > 10)
+      !  iwrk  : integer array of dimension (kwrk). used as workspace.
+      !  kwrk  : integer. on entry kwrk must specify the actual dimension of
+      !          the array iwrk as declared in the calling (sub)program.
+      !          kwrk >= m+(ntest-7)*(npest-7).
+      !  ier   : integer. unless the routine detects an error, ier contains a
+      !          non-positive value on exit, i.e.
+      !   ier=0  : normal return. the spline returned has a residual sum of
+      !            squares fp such that abs(fp-s)/s <= tol with tol a relat-
+      !            ive tolerance set to 0.001 by the program.
+      !   ier=-1 : normal return. the spline returned is a spherical
+      !            interpolating spline (fp=0).
+      !   ier=-2 : normal return. the spline returned is the weighted least-
+      !            squares constrained polynomial . in this extreme case
+      !            fp gives the upper bound for the smoothing factor s.
+      !   ier<-2 : warning. the coefficients of the spline returned have been
+      !            computed as the minimal norm least-squares solution of a
+      !            (numerically) rank deficient system. (-ier) gives the rank.
+      !            especially if the rank deficiency which can be computed as
+      !            6+(nt-8)*(np-7)+ier, is large the results may be inaccurate
+      !            they could also seriously depend on the value of eps.
+      !   ier=1  : error. the required storage space exceeds the available
+      !            storage space, as specified by the parameters ntest and
+      !            npest.
+      !            probably causes : ntest or npest too small. if these param-
+      !            eters are already large, it may also indicate that s is
+      !            too small
+      !            the approximation returned is the weighted least-squares
+      !            spherical spline according to the current set of knots.
+      !            the parameter fp gives the corresponding weighted sum of
+      !            squared residuals (fp>s).
+      !   ier=2  : error. a theoretically impossible result was found during
+      !            the iteration process for finding a smoothing spline with
+      !            fp = s. probably causes : s too small or badly chosen eps.
+      !            there is an approximation returned but the corresponding
+      !            weighted sum of squared residuals does not satisfy the
+      !            condition abs(fp-s)/s < tol.
+      !   ier=3  : error. the maximal number of iterations maxit (set to 20
+      !            by the program) allowed for finding a smoothing spline
+      !            with fp=s has been reached. probably causes : s too small
+      !            there is an approximation returned but the corresponding
+      !            weighted sum of squared residuals does not satisfy the
+      !            condition abs(fp-s)/s < tol.
+      !   ier=4  : error. no more knots can be added because the dimension
+      !            of the spherical spline 6+(nt-8)*(np-7) already exceeds
+      !            the number of data points m.
+      !            probably causes : either s or m too small.
+      !            the approximation returned is the weighted least-squares
+      !            spherical spline according to the current set of knots.
+      !            the parameter fp gives the corresponding weighted sum of
+      !            squared residuals (fp>s).
+      !   ier=5  : error. no more knots can be added because the additional
+      !            knot would (quasi) coincide with an old one.
+      !            probably causes : s too small or too large a weight to an
+      !            inaccurate data point.
+      !            the approximation returned is the weighted least-squares
+      !            spherical spline according to the current set of knots.
+      !            the parameter fp gives the corresponding weighted sum of
+      !            squared residuals (fp>s).
+      !   ier=10 : error. on entry, the input data are controlled on validity
+      !            the following restrictions must be satisfied.
+      !            -1<=iopt<=1,  m>=2, ntest>=8 ,npest >=8, 0<eps<1,
+      !            0<=teta(i)<=pi, 0<=phi(i)<=2*pi, w(i)>0, i=1,...,m
+      !            lwrk1 >= 185+52*v+10*u+14*u*v+8*(u-1)*v**2+8*m
+      !            kwrk >= m+(ntest-7)*(npest-7)
+      !            if iopt=-1: 8<=nt<=ntest , 9<=np<=npest
+      !                        0<tt(5)<tt(6)<...<tt(nt-4)<pi
+      !                        0<tp(5)<tp(6)<...<tp(np-4)<2*pi
+      !            if iopt>=0: s>=0
+      !            if one of these conditions is found to be violated,control
+      !            is immediately repassed to the calling program. in that
+      !            case there is no approximation returned.
+      !   ier>10 : error. lwrk2 is too small, i.e. there is not enough work-
+      !            space for computing the minimal least-squares solution of
+      !            a rank deficient system of linear equations. ier gives the
+      !            requested value for lwrk2. there is no approximation re-
+      !            turned but, having saved the information contained in nt,
+      !            np,tt,tp,wrk1, and having adjusted the value of lwrk2 and
+      !            the dimension of the array wrk2 accordingly, the user can
+      !            continue at the point the program was left, by calling
+      !            sphere with iopt=1.
+      !
+      ! further comments:
+      !  by means of the parameter s, the user can control the tradeoff
+      !   between closeness of fit and smoothness of fit of the approximation.
+      !   if s is too large, the spline will be too smooth and signal will be
+      !   lost ; if s is too small the spline will pick up too much noise. in
+      !   the extreme cases the program will return an interpolating spline if
+      !   s=0 and the constrained weighted least-squares polynomial if s is
+      !   very large. between these extremes, a properly chosen s will result
+      !   in a good compromise between closeness of fit and smoothness of fit.
+      !   to decide whether an approximation, corresponding to a certain s is
+      !   satisfactory the user is highly recommended to inspect the fits
+      !   graphically.
+      !   recommended values for s depend on the weights w(i). if these are
+      !   taken as 1/d(i) with d(i) an estimate of the standard deviation of
+      !   r(i), a good s-value should be found in the range (m-sqrt(2*m),m+
+      !   sqrt(2*m)). if nothing is known about the statistical error in r(i)
+      !   each w(i) can be set equal to one and s determined by trial and
+      !   error, taking account of the comments above. the best is then to
+      !   start with a very large value of s ( to determine the least-squares
+      !   polynomial and the corresponding upper bound fp0 for s) and then to
+      !   progressively decrease the value of s ( say by a factor 10 in the
+      !   beginning, i.e. s=fp0/10, fp0/100,...and more carefully as the
+      !   approximation shows more detail) to obtain closer fits.
+      !   to choose s very small is strongly discouraged. this considerably
+      !   increases computation time and memory requirements. it may also
+      !   cause rank-deficiency (ier<-2) and endager numerical stability.
+      !   to economize the search for a good s-value the program provides with
+      !   different modes of computation. at the first call of the routine, or
+      !   whenever he wants to restart with the initial set of knots the user
+      !   must set iopt=0.
+      !   if iopt=1 the program will continue with the set of knots found at
+      !   the last call of the routine. this will save a lot of computation
+      !   time if sphere is called repeatedly for different values of s.
+      !   the number of knots of the spline returned and their location will
+      !   depend on the value of s and on the complexity of the shape of the
+      !   function underlying the data. if the computation mode iopt=1
+      !   is used, the knots returned may also depend on the s-values at
+      !   previous calls (if these were smaller). therefore, if after a number
+      !   of trials with different s-values and iopt=1, the user can finally
+      !   accept a fit as satisfactory, it may be worthwhile for him to call
+      !   sphere once more with the selected value for s but now with iopt=0.
+      !   indeed, sphere may then return an approximation of the same quality
+      !   of fit but with fewer knots and therefore better if data reduction
+      !   is also an important objective for the user.
+      !   the number of knots may also depend on the upper bounds ntest and
+      !   npest. indeed, if at a certain stage in sphere the number of knots
+      !   in one direction (say nt) has reached the value of its upper bound
+      !   (ntest), then from that moment on all subsequent knots are added
+      !   in the other (phi) direction. this may indicate that the value of
+      !   ntest is too small. on the other hand, it gives the user the option
+      !   of limiting the number of knots the routine locates in any direction
+      !   for example, by setting ntest=8 (the lowest allowable value for
+      !   ntest), the user can indicate that he wants an approximation which
+      !   is a cubic polynomial in the variable teta.
+      !
+      !  other subroutines required:
+      !    fpback,fpbspl,fpsphe,fpdisc,fpgivs,fprank,fprati,fprota,fporde,
+      !    fprpsp
+      !
+      !  references:
+      !   dierckx p. : algorithms for smoothing data on the sphere with tensor
+      !                product splines, computing 32 (1984) 319-342.
+      !   dierckx p. : algorithms for smoothing data on the sphere with tensor
+      !                product splines, report tw62, dept. computer science,
+      !                k.u.leuven, 1983.
+      !   dierckx p. : curve and surface fitting with splines, monographs on
+      !                numerical analysis, oxford university press, 1993.
+      !
+      !  author:
+      !    p.dierckx
+      !    dept. computer science, k.u. leuven
+      !    celestijnenlaan 200a, b-3001 heverlee, belgium.
+      !    e-mail : Paul.Dierckx@cs.kuleuven.ac.be
+      !
+      !  creation date : july 1983
+      !  latest update : march 1989
+      !
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: s,eps
+      real(FP_REAL), intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,m,ntest,npest,lwrk1,lwrk2,kwrk
+      integer(FP_SIZE), intent(inout) :: nt,np
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: teta(m),phi(m),r(m),w(m)
+      real(FP_REAL), intent(inout) :: tt(ntest),tp(npest),c((ntest-4)*(npest-4)),wrk1(lwrk1),wrk2(lwrk2)
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,ib1,ib3,ki,kn,kwest,la,lbt,lcc,lcs,lro,j,lbp,lco,lf,lff,lfp,lh,lq,lst,lsp,lwest, &
+                 ncest,ncc,ntt,npp,nreg,nrint,ncof,nt4,np4
+
+      ! we set up the parameters tol and maxit.
+      real(FP_REAL), parameter :: tol = smallnum03
+      integer(FP_SIZE),  parameter :: maxit = 20
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid,control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+
+      nt4   = ntest-4
+      np4   = npest-4
+      ncest = nt4*np4
+      ntt   = ntest-7
+      npp   = npest-7
+      ncc   = 6+npp*(ntt-1)
+      nrint = ntt+npp
+      nreg  = ntt*npp
+      ncof  = 6+3*npp
+      ib1   = max(4*npp, ncof)
+      ib3   = max(ib1+3, ncof)
+      lwest = 185+52*npp+10*ntt+14*ntt*npp+8*(m+(ntt-1)*npp**2)
+      kwest = m+nreg
+
+      if (.not.(eps>0 .and. eps<one))      return
+      if (iopt<(-1) .or. iopt>1)           return
+      if (m<2)                             return
+      if (ntest<8 .or. npest<8)            return
+      if (lwrk1<lwest .or. kwrk<kwest)     return
+
+      if (iopt<=0) then
+
+          if (any(w<=zero))                return
+          if (any(teta<zero .or. teta>pi)) return
+          if (any(phi<zero .or. phi>pi2))  return
+
+      endif
+
+      if (iopt<0) then
+
+          ! Check teta knots monotonic
+          ntt = nt-8
+          if (ntt<0 .or. nt>ntest)         return
+
+          if (ntt>0) then
+              tt(4) = zero
+              do i=1,ntt
+                 j = i+4
+                 if(tt(j)<=tt(j-1) .or. tt(j)>=pi) return
+              end do
+          endif
+
+          ! Check phi knots monotonic
+          npp = np-8
+          if (npp<1 .or. np>npest) return
+          tp(4) = zero
+          do i=1,npp
+             j = i+4
+             if(tp(j)<=tp(j-1) .or. tp(j)>=pi2) return
+          end do
+
+      endif
+
+      if (iopt>=0 .and. s<zero) return
+
+      ier = FITPACK_OK
+
+      !  we partition the working space and determine the spline approximation
+      kn = 1
+      ki = kn+m
+      lq = 2
+      la = lq+ncc*ib3
+      lf = la+ncc*ib1
+      lff = lf+ncc
+      lfp = lff+ncest
+      lco = lfp+nrint
+      lh  = lco+nrint
+      lbt = lh+ib3
+      lbp = lbt+5*ntest
+      lro = lbp+5*npest
+      lcc = lro+npest
+      lcs = lcc+npest
+      lst = lcs+npest
+      lsp = lst+m*4
+      call fpsphe(iopt,m,teta,phi,r,w,s,ntest,npest,eps,tol,maxit, &
+                  ib1,ib3,ncest,ncc,nrint,nreg,nt,tt,np,tp,c,fp,wrk1(1),wrk1(lfp), &
+                  wrk1(lco),wrk1(lf),wrk1(lff),wrk1(lro),wrk1(lcc),wrk1(lcs), &
+                  wrk1(la),wrk1(lq),wrk1(lbt),wrk1(lbp),wrk1(lst),wrk1(lsp), &
+                  wrk1(lh),iwrk(ki),iwrk(kn),wrk2,lwrk2,ier)
+      return
+      end subroutine sphere
+
+
+
+      !  subroutine splder evaluates in a number of points x(i),i=1,2,...,m the derivative of order nu
+      !  of a spline s(x) of degree k,given in its b-spline representation.
+      !> @brief Evaluate the \f$ \nu \f$-th derivative of a spline \f$ s(x) \f$ at a set of points.
+      !!
+      !! Given a spline of degree \f$ k \f$ in B-spline representation, evaluates
+      !! \f$ s^{(\nu)}(x_i) \f$ for \f$ i = 1,\ldots,m \f$ using the recurrence scheme of de Boor.
+      !! The derivative of order \f$ \nu \f$ of a degree-\f$ k \f$ spline is a degree-\f$ (k{-}\nu) \f$
+      !! spline whose B-spline coefficients are computed via the de Boor recurrence.
+      !!
+      !! @param[in]     t    Knot positions (length \f$ n \f$).
+      !! @param[in]     n    Total number of knots.
+      !! @param[in]     c    B-spline coefficients (length \f$ n \f$).
+      !! @param[in]     k    Degree of the spline.
+      !! @param[in]     nu   Order of derivative, \f$ \nu \ge 0 \f$. For \f$ \nu > k \f$ the derivative
+      !!   vanishes identically and `y` is returned as zero.
+      !! @param[in]     x    Evaluation points (length \f$ m \f$).
+      !! @param[out]    y    Derivative values \f$ s^{(\nu)}(x_i) \f$ (length \f$ m \f$).
+      !! @param[in]     m    Number of evaluation points, \f$ m \ge 1 \f$.
+      !! @param[in]     e    Extrapolation mode for points outside the support:
+      !!   - `0`: extrapolate from end spans.
+      !!   - `1`: return zero.
+      !!   - `2`: set `ier=1` and return.
+      !! @param[in,out] wrk  Real workspace (length \f$ n \f$). Contains derivative coefficients on exit.
+      !! @param[out]    ier  Error flag: `0` = normal; `1` = out of bounds with `e=2`; `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 1, §1.3; fpbspl — B-spline basis evaluation
+      pure subroutine splder(t,n,c,k,nu,x,y,m,e,wrk,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)  :: n,k,nu,m
+      integer(FP_FLAG), intent(in)  :: e
+      integer(FP_FLAG), intent(out) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in) :: t(n),c(n),x(m)
+      real(FP_REAL), intent(out) :: y(m)
+      real(FP_REAL), intent(inout) :: wrk(n)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,j,k1,k2,k3,l,l1,l2,nk1,nk2,kk
+      real(FP_REAL) :: ak,arg,fac,tb,te
+      !  ..local arrays ..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+      logical(FP_BOOL) :: nonflat
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      if (nu<0) return
+      if (m<1) return
+
+      ier = FITPACK_OK
+
+      !  the nu-th derivative of a degree-k spline vanishes identically for nu>k. Return it
+      !  explicitly: driving the de Boor recursion past its last level reads outside wrk.
+      if (nu>k) then
+         y = zero
+         return
+      end if
+
+      kk  = k-nu
+
+      !  fetch tb and te, the boundaries of the approximation interval.
+      k1 = k+1
+      k3 = k1+1
+      nk1 = n-k1
+      tb = t(k1)
+      te = t(nk1+1)
+
+      !  the derivative of order nu of a spline of degree k is a spline of
+      !  degree k-nu,the b-spline coefficients wrk(i) of which can be found
+      !  using the recurrence scheme of de boor.
+      l  = 1
+      wrk(1:nk1) = c(1:nk1)
+      if (nu/=0) then
+          nk2 = nk1
+          de_boor: do j=1,nu
+             ak  = k1-j
+             nk2 = nk2-1
+             l1  = l
+             do i=1,nk2
+                l1 = l1+1
+                l2 = l1+k1-j
+                fac = t(l2)-t(l1)
+                if (fac>zero) wrk(i) = ak*(wrk(i+1)-wrk(i))/fac
+             end do
+             l = l+1
+          end do de_boor
+      endif
+
+      nonflat = nu==0 .or. k/=nu
+
+      l  = k1
+      l1 = l+1
+      k2 = k1-nu
+      j  = 1
+      !  main loop for the different points.
+      user_points: do i=1,m
+        ! fetch a new x-value arg.
+        arg = x(i)
+        ! check if arg is in the support
+        if (arg < tb .or. arg > te) then
+            select case (e)
+               case (OUTSIDE_EXTRAPOLATE)
+                  ! continue like any other point
+               case (OUTSIDE_ZERO)
+                  y(i) = zero
+                  cycle user_points
+               case (OUTSIDE_NOT_ALLOWED)
+                  ier = FITPACK_INSUFFICIENT_STORAGE
+                  return
+            end select
+        endif
+        ! search for knot interval t(l) <= arg < t(l+1)
+        do while (.not.(arg>=t(l) .or. l1==k3))
+           l1 = l
+           l  = l-1
+           j  = j-1
+        end do
+        ! ++
+        do while (.not.(arg<t(l1) .or. l==nk1))
+           l  = l1
+           l1 = l+1
+           j  = j+1
+        end do
+
+        if (nonflat) then
+           !  evaluate the non-zero b-splines of degree k-nu at arg.
+           h = fpbspl(t,n,kk,arg,l)
+           !  find the value of the derivative at x=arg.
+           y(i) = dot_product(h(1:k2),wrk(l-k:l-nu))
+        else
+           ! if nu=k the derivative is a piecewise constant function
+           y(i) = wrk(j)
+        endif
+      end do user_points
+
+      return
+      end subroutine splder
+
+      ! subroutine splev evaluates in a number of points x(i),i=1,2,...,m a spline s(x) of degree k,
+      ! given in its b-spline representation.
+      !> @brief Evaluate a spline \f$ s(x) \f$ of degree \f$ k \f$ at a set of points.
+      !!
+      !! Given a spline in its B-spline representation (knots \f$ t \f$, coefficients \f$ c \f$,
+      !! degree \f$ k \f$), evaluates \f$ s(x_i) \f$ for \f$ i = 1,\ldots,m \f$.
+      !!
+      !! @param[in]  t    Knot positions (length \f$ n \f$).
+      !! @param[in]  n    Total number of knots.
+      !! @param[in]  c    B-spline coefficients (length \f$ n \f$).
+      !! @param[in]  k    Degree of the spline.
+      !! @param[in]  x    Evaluation points (length \f$ m \f$).
+      !! @param[out] y    Spline values \f$ s(x_i) \f$ (length \f$ m \f$).
+      !! @param[in]  m    Number of evaluation points. Must satisfy \f$ m \ge 1 \f$.
+      !! @param[in]  e    Extrapolation mode for points outside \f$ [t_{k+1}, t_{n-k}] \f$:
+      !!   - `0` (`OUTSIDE_EXTRAPOLATE`): extrapolate from end spans.
+      !!   - `1` (`OUTSIDE_ZERO`): return zero.
+      !!   - `2` (`OUTSIDE_NOT_ALLOWED`): set `ier=1` and return.
+      !!   - `3` (`OUTSIDE_NEAREST_BND`): clamp to nearest boundary value.
+      !! @param[out] ier  Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @see Dierckx, Ch. 1, §1.3 (pp. 4--14); fpbspl — B-spline basis evaluation
+      pure subroutine splev(t,n,c,k,x,y,m,e,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)  :: n, k, m
+      integer(FP_FLAG), intent(in)  :: e
+      integer(FP_FLAG), intent(out) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)  :: t(n), c(n), x(m)
+      real(FP_REAL), intent(out) :: y(m)
+
+      !  ..local scalars..
+      integer(FP_SIZE) :: i, k1, l, l1, nk1,k2
+      real(FP_REAL) :: arg, tb, te
+      !  ..local array..
+      real(FP_REAL) :: h(MAX_ORDER+1)
+      !  ..
+      !  before starting computations a data check is made. if the input data
+      !  are invalid control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      if (m<1) return
+
+      ier = FITPACK_OK
+      !  fetch tb and te, the boundaries of the approximation interval.
+      k1  = k  + 1
+      k2  = k1 + 1
+      nk1 = n - k1
+      tb  = t(k1)
+      te  = t(nk1 + 1)
+      l   = k1
+      l1  = l + 1
+
+      !  main loop for the different points.
+      user_points: do i = 1, m
+
+        ! fetch a new x-value arg.
+        arg = x(i)
+
+        ! check if arg is in the support
+        outside: if (arg<tb .or. arg>te) then
+            select case (e)
+               case (OUTSIDE_EXTRAPOLATE)
+                ! Continue normally
+               case (OUTSIDE_ZERO)
+                  y(i) = zero
+                  cycle user_points
+               case (OUTSIDE_NOT_ALLOWED)
+                  ier = FITPACK_INVALID_RANGE
+                  return
+               case (OUTSIDE_NEAREST_BND)
+                  arg = max(min(arg,te),tb)
+            end select
+        endif outside
+
+        ! search for knot interval t(l) <= arg < t(l+1)
+        do while (arg<t(l) .and. l1/=k2)
+          l1 = l
+          l  = l - 1
+        end do
+        do while (arg>=t(l1) .and. l/=nk1)
+          l  = l1
+          l1 = l + 1
+        end do
+
+        ! evaluate the non-zero b-splines at arg.
+        h = fpbspl(t, n, k, arg, l)
+
+        ! find the value of s(x) at x=arg.
+        y(i) = dot_product(c(l-k:l),h(1:k1))
+      end do user_points
+
+      end subroutine splev
+
+      !> @brief Compute the definite integral of a spline \f$ s(x) \f$ over \f$ [a, b] \f$.
+      !!
+      !! Calculates \f$ \int_a^b s(x)\,dx \f$ for a spline of degree \f$ k \f$ given in B-spline
+      !! representation. The spline is considered identically zero outside its support
+      !! \f$ (t_{k+1}, t_{n-k}) \f$.
+      !!
+      !! Uses the method of Gaffney (1976): first computes the integrals of each normalized
+      !! B-spline \f$ N_{i,k+1}(x) \f$ over \f$ [a, b] \f$, then forms the weighted sum with
+      !! the spline coefficients.
+      !!
+      !! @param[in]     t    Knot positions (length \f$ n \f$).
+      !! @param[in]     n    Total number of knots.
+      !! @param[in]     c    B-spline coefficients (length \f$ n \f$).
+      !! @param[in]     k    Degree of the spline.
+      !! @param[in]     a    Left endpoint of the integration interval.
+      !! @param[in]     b    Right endpoint of the integration interval.
+      !! @param[in,out] wrk  Real workspace (length \f$ n \f$). On exit, contains integrals of
+      !!   normalized B-splines.
+      !! @return The integral \f$ \int_a^b s(x)\,dx \f$.
+      !!
+      !! @see Dierckx, Ch. 1, §1.3.3 (pp. 10--12), Eq. 1.42--1.44; fpintb — B-spline integration
+      real(FP_REAL) function splint(t,n,c,k,a,b,wrk) result(integral)
+
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in) :: a,b
+      integer(FP_SIZE), intent(in) :: n,k
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: t(n),c(n)
+      real(FP_REAL), intent(inout) :: wrk(n)
+
+      !  ..local scalars..
+      integer(FP_SIZE) :: nk1
+
+      nk1 = n-k-1
+
+      !  calculate the integrals wrk(i) of the normalized b-splines ni,k+1(x), i=1,2,...nk1.
+      call fpintb(t,n,wrk,nk1,a,b)
+
+      !  calculate the integral of s(x).
+      integral = dot_product(c(1:nk1),wrk(1:nk1))
+      return
+      end function splint
+
+      !> @brief Find the zeros of a cubic spline \f$ s(x) \f$ given in B-spline representation.
+      !!
+      !! Locates all real roots of a cubic spline (\f$ k = 3 \f$) by reducing the problem
+      !! to finding zeros of the cubic polynomial on each knot interval
+      !! \f$ [t_l, t_{l+1}] \f$. Uses continuity of the spline and its derivative to
+      !! propagate endpoint values across intervals, calling fpcuro for each cubic piece.
+      !!
+      !! @param[in]  t      Knot positions (length \f$ n \f$). Must satisfy \f$ n \ge 8 \f$.
+      !! @param[in]  n      Total number of knots.
+      !! @param[in]  c      B-spline coefficients (length \f$ n \f$).
+      !! @param[out] zeros  Array of zeros found (length `mest`).
+      !! @param[in]  mest   Maximum number of zeros that can be stored.
+      !! @param[out] m      Actual number of zeros found.
+      !! @param[out] ier    Error flag:
+      !!   - `0`: normal return.
+      !!   - `1`: number of zeros exceeds `mest`.
+      !!   - `10`: invalid input data.
+      !!
+      !! @note Only works for cubic splines (\f$ k = 3 \f$).
+      !!
+      !! @see fpcuro — cubic polynomial root finder
+      pure subroutine sproot(t,n,c,zeros,mest,m,ier)
+
+      ! ..
+      ! ..scalar arguments..
+      integer(FP_SIZE), intent(in)  :: n,mest
+      integer(FP_SIZE), intent(out) :: m
+      integer(FP_FLAG), intent(out) :: ier
+      !  ..array arguments..
+      real(FP_REAL), intent(in)  :: t(n),c(n)
+      real(FP_REAL), intent(out) :: zeros(mest)
+      !  ..local scalars..
+      integer(FP_SIZE) :: i,j,l,n4
+      real   (FP_REAL) :: ah,a0,a1,a2,a3,bh,b0,b1,c1,c2,c3,c4,c5,d4,d5,h1,h2,t1,t2,t3,t4,t5
+      logical(FP_BOOL) :: z0,z1,z2,z3,z4,nz0,nz1,nz2,nz3,nz4
+      !  ..local array..
+      real(FP_REAL) :: y(3)
+      !  ..
+      !  before starting computations a data check is made. if the input data
+      !  are invalid, control is immediately repassed to the calling program.
+      n4  = n-4
+      if (n<8) then
+         ier = FITPACK_INSUFFICIENT_KNOTS
+         return
+      else
+         ier = FITPACK_INPUT_ERROR
+      end if
+      j = n
+      do i=1,3
+        if (t(i)>t(i+1)) return
+        if (t(j)<t(j-1)) return
+        j = j-1
+      end do
+      if (any(t(4:n4)>=t(5:n4+1))) return
+
+      !  the problem considered reduces to finding the zeros of the cubic polynomials pl(x) which define
+      !  the cubic spline in each knot interval t(l)<=x<=t(l+1). a zero of pl(x) is also a zero of s(x) on
+      !  the condition that it belongs to the knot interval. the cubic polynomial pl(x) is determined by
+      !  computing s(t(l)), s'(t(l)),s(t(l+1)) and s'(t(l+1)). in fact we only have to compute s(t(l+1))
+      !  and s'(t(l+1)); because of the continuity conditions of splines and their derivatives, the value
+      !  of s(t(l)) and s'(t(l)) is already known from the foregoing knot interval.
+      ier = FITPACK_OK
+
+      !  evaluate some constants for the first knot interval
+      h1 = t(4)-t(3)
+      h2 = t(5)-t(4)
+      t1 = t(4)-t(2)
+      t2 = t(5)-t(3)
+      t3 = t(6)-t(4)
+      t4 = t(5)-t(2)
+      t5 = t(6)-t(3)
+      !  calculate a0 = s(t(4)) and ah = s'(t(4)).
+      c1 = c(1)
+      c2 = c(2)
+      c3 = c(3)
+      c4 = (c2-c1)/t4
+      c5 = (c3-c2)/t5
+      d4 = (h2*c1+t1*c2)/t4
+      d5 = (t3*c2+h1*c3)/t5
+      a0 = (h2*d4+h1*d5)/t2
+      ah = three*(h2*c4+h1*c5)/t2
+
+      z1  = .not.ah<zero
+      nz1 = .not.z1
+
+      m = 0
+      !  main loop for the different knot intervals.
+      knot_intervals: do l=4,n4
+
+      !  evaluate some constants for the knot interval t(l) <= x <= t(l+1).
+        h1 = h2
+        h2 = t(l+2)-t(l+1)
+        t1 = t2
+        t2 = t3
+        t3 = t(l+3)-t(l+1)
+        t4 = t5
+        t5 = t(l+3)-t(l)
+
+        !  find a0 = s(t(l)), ah = s'(t(l)), b0 = s(t(l+1)) and bh = s'(t(l+1)).
+        c1 = c2
+        c2 = c3
+        c3 = c(l)
+        c4 = c5
+        c5 = (c3-c2)/t5
+        d4 = (h2*c1+t1*c2)/t4
+        d5 = (h1*c3+t3*c2)/t5
+        b0 = (h2*d4+h1*d5)/t2
+        bh = three*(h2*c4+h1*c5)/t2
+
+        !  calculate the coefficients a0,a1,a2 and a3 of the cubic polynomial
+        !  pl(x) = ql(y) = a0+a1*y+a2*y**2+a3*y**3 ; y = (x-t(l))/(t(l+1)-t(l)).
+        a1 = ah*h1
+        b1 = bh*h1
+        a2 = three*(b0-a0)-b1-two*a1
+        a3 = two*(a0-b0)+b1+a1
+
+        ! test whether or not pl(x) could have a zero in the range t(l) <= x <= t(l+1).
+        z0  = .not.a0<zero
+        nz0 = .not.z0
+        z2  = .not.a2<zero
+        nz2 = .not.z2
+        z3  = .not.b1<zero
+        nz3 = .not.z3
+        z4  = .not.three*a3+a2<zero
+        nz4 = .not.z4
+
+        ! find the zeros of ql(y).
+        zeroes: if (a0*b0<=zero .or. ((z0.and.(nz1.and.(z3.or.z2.and.nz4).or.nz2.and.z3.and.z4) &
+                                      .or.nz0.and.(z1.and.(nz3.or.nz2.and.z4).or.z2.and.nz3.and.nz4)))) then
+
+           call fpcuro(a3,a2,a1,a0,y,j)
+
+            if (j/=0) then
+                ! find which zeros of pl(x) are zeros of s(x).
+                which_zeros: do i=1,j
+                  if(y(i)<zero .or. y(i)>one) cycle which_zeros
+                  ! test whether the number of zeros of s(x) exceeds mest.
+                  if (m>=mest) then
+                     ier = FITPACK_INSUFFICIENT_STORAGE
+                     return
+                  end if
+                  m = m+1
+                  zeros(m) = t(l)+h1*y(i)
+                end do which_zeros
+            endif
+
+        endif zeroes
+
+        a0 = b0
+        ah = bh
+        z1 = z3
+        nz1 = nz3
+      end do knot_intervals
+
+      !  the zeros of s(x) are arranged in increasing order.
+      if (m<2) return
+      call fitpack_quicksort(zeros(1:m))
+
+      ! Filter duplicates
+      j = m
+      m = 1
+      filter_duplicates: do i=2,j
+        if (equal(zeros(i),zeros(m))) cycle filter_duplicates
+        m = m+1
+        zeros(m) = zeros(i)
+      end do filter_duplicates
+      return
+
+      end subroutine sproot
+
+      !> @brief Evaluate a parametric bicubic spline surface on a grid.
+      !!
+      !! Evaluates an \f$ d \f$-dimensional (\f$ d = \f$ `idim`) bicubic spline surface at the grid
+      !! \f$ (u_i, v_j) \f$, \f$ i=1,\ldots,m_u;\; j=1,\ldots,m_v \f$.
+      !!
+      !! On exit, `f(mu*mv*(l-1)+mv*(i-1)+j)` contains the \f$ l \f$-th coordinate of the surface
+      !! at \f$ (u_i, v_j) \f$, for \f$ l=1,\ldots,d \f$.
+      !!
+      !! @param[in]     idim  Dimension of the surface (\f$ 1 \le d \le 3 \f$).
+      !! @param[in]     tu    Knot positions in \f$ u \f$-direction (length \f$ n_u \f$).
+      !! @param[in]     nu    Total number of knots in \f$ u \f$.
+      !! @param[in]     tv    Knot positions in \f$ v \f$-direction (length \f$ n_v \f$).
+      !! @param[in]     nv    Total number of knots in \f$ v \f$.
+      !! @param[in]     c     B-spline coefficients, length \f$ (n_u{-}4)(n_v{-}4) \cdot d \f$.
+      !! @param[in]     u     Grid \f$ u \f$-coordinates (length \f$ m_u \f$), non-decreasing in
+      !!                      \f$ [t_{u,4}, t_{u,n_u-3}] \f$.
+      !! @param[in]     mu    Number of grid points along \f$ u \f$, \f$ m_u \ge 1 \f$.
+      !! @param[in]     v     Grid \f$ v \f$-coordinates (length \f$ m_v \f$), non-decreasing in
+      !!                      \f$ [t_{v,4}, t_{v,n_v-3}] \f$.
+      !! @param[in]     mv    Number of grid points along \f$ v \f$, \f$ m_v \ge 1 \f$.
+      !! @param[in]     mf    Declared dimension of `f`, \f$ \ge m_u \cdot m_v \cdot d \f$.
+      !! @param[out]    f     Surface values (length `mf`).
+      !! @param[in,out] wrk   Real workspace, length \f$ \ge 4(m_u + m_v) \f$.
+      !! @param[in]     lwrk  Declared dimension of `wrk`.
+      !! @param[in,out] iwrk  Integer workspace (length \f$ \ge m_u + m_v \f$).
+      !! @param[in]     kwrk  Declared dimension of `iwrk`.
+      !! @param[out]    ier   Error flag: `0` = normal return; `10` = invalid input.
+      !!
+      !! @see parsur — parametric surface fitting; bispev — scalar bivariate evaluation on grid
+      pure subroutine surev(idim,tu,nu,tv,nv,c,u,mu,v,mv,f,mf,wrk,lwrk,iwrk,kwrk,ier)
+
+      !  ..scalar arguments..
+      integer(FP_SIZE), intent(in)    :: idim,nu,nv,mu,mv,mf,lwrk,kwrk
+      integer(FP_FLAG), intent(out)   :: ier
+      !  ..array arguments..
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      real(FP_REAL), intent(in)    :: tu(nu),tv(nv),c((nu-4)*(nv-4)*idim),u(mu),v(mv)
+      real(FP_REAL), intent(inout) :: wrk(lwrk)
+      real(FP_REAL), intent(out)   :: f(mf)
+      !  ..local scalars..
+      integer(FP_SIZE) :: muv
+
+      !  ..
+      !  before starting computations a data check is made. if the input data
+      !  are invalid control is immediately repassed to the calling program.
+      ier = FITPACK_INPUT_ERROR
+      muv = mu+mv
+
+      if (mf<mu*mv*idim .or. &
+          lwrk<4*muv    .or. &
+          kwrk<muv      .or. &
+          mu<1          .or. &
+          mv<1)         return
+
+      if (mu>1 .and. any(u(2:mu)<u(1:mu-1))) return
+      if (mv>1 .and. any(v(2:mv)<v(1:mv-1))) return
+
+      ! All checks passed
+      ier = FITPACK_OK
+      call fpsuev(idim,tu,nu,tv,nv,c,u,mu,v,mv,f,wrk(1),wrk(4*mu+1),iwrk(1),iwrk(mu+1))
+
+      end subroutine surev
+
+
+      !> @brief Fit a smoothing bivariate spline to scattered data.
+      !!
+      !! Given weighted data points \f$ (x_i, y_i, z_i, w_i) \f$, \f$ i=1,\ldots,m \f$, determines a
+      !! bivariate spline \f$ s(x,y) \f$ of degrees \f$ k_x, k_y \f$ on the rectangle
+      !! \f$ [x_b, x_e] \times [y_b, y_e] \f$.
+      !!
+      !! The smoothing factor \f$ s \ge 0 \f$ controls the trade-off: the routine minimizes
+      !! discontinuity jumps in the spline derivatives subject to
+      !! \f[
+      !!     \sum_{i=1}^{m} \bigl[w_i\,(z_i - s(x_i, y_i))\bigr]^2 \le s.
+      !! \f]
+      !! Setting \f$ s = 0 \f$ produces an interpolating spline. The result is given in
+      !! tensor-product B-spline representation and can be evaluated with bispev / bispeu.
+      !!
+      !! @param[in]     iopt  Computation mode: `-1` = least-squares with user knots;
+      !!                      `0` = smoothing, fresh start; `1` = smoothing, continue.
+      !! @param[in]     m     Number of data points, \f$ m \ge (k_x{+}1)(k_y{+}1) \f$.
+      !! @param[in,out] x     \f$ x \f$-coordinates of data points (length \f$ m \f$).
+      !! @param[in,out] y     \f$ y \f$-coordinates of data points (length \f$ m \f$).
+      !! @param[in]     z     Data values (length \f$ m \f$).
+      !! @param[in]     w     Positive weights (length \f$ m \f$).
+      !! @param[in]     xb    Lower \f$ x \f$-boundary.
+      !! @param[in]     xe    Upper \f$ x \f$-boundary.
+      !! @param[in]     yb    Lower \f$ y \f$-boundary.
+      !! @param[in]     ye    Upper \f$ y \f$-boundary.
+      !! @param[in]     kx    Degree in \f$ x \f$, \f$ 1 \le k_x \le 5 \f$ (bicubic recommended).
+      !! @param[in]     ky    Degree in \f$ y \f$, \f$ 1 \le k_y \le 5 \f$.
+      !! @param[in]     s     Smoothing factor, \f$ s \ge 0 \f$ (ignored when `iopt=-1`).
+      !! @param[in]     nxest Upper bound for \f$ n_x \f$, \f$ \ge 2(k_x{+}1) \f$.
+      !! @param[in]     nyest Upper bound for \f$ n_y \f$, \f$ \ge 2(k_y{+}1) \f$.
+      !! @param[in]     nmax  Dimension of `tx`/`ty` arrays, \f$ \ge \max(n_x^{\text{est}}, n_y^{\text{est}}) \f$.
+      !! @param[in]     eps   Rank-deficiency threshold, \f$ 0 < \varepsilon < 1 \f$.
+      !! @param[in,out] nx    Total number of knots in \f$ x \f$.
+      !! @param[in,out] tx    Knot positions in \f$ x \f$ (length `nmax`).
+      !! @param[in,out] ny    Total number of knots in \f$ y \f$.
+      !! @param[in,out] ty    Knot positions in \f$ y \f$ (length `nmax`).
+      !! @param[out]    c     B-spline coefficients, length \f$ (n_x{-}k_x{-}1)(n_y{-}k_y{-}1) \f$.
+      !! @param[out]    fp    Weighted sum of squared residuals \f$ F_p \f$.
+      !! @param[in,out] wrk1  Real workspace (length `lwrk1`).
+      !! @param[in]     lwrk1 Declared dimension of `wrk1`.
+      !! @param[in,out] wrk2  Secondary workspace for rank-deficient systems (length `lwrk2`).
+      !! @param[in]     lwrk2 Declared dimension of `wrk2`.
+      !! @param[in,out] iwrk  Integer workspace (length `kwrk`).
+      !! @param[in]     kwrk  Declared dimension of `iwrk`.
+      !! @param[out]    ier   Error flag: \f$ \le 0 \f$ = success, `1`–`5` = convergence warnings,
+      !!                      `10` = invalid input, `>10` = `lwrk2` too small.
+      !!
+      !! @note For gridded data, use regrid instead — it is significantly faster.
+      !!
+      !! @see Dierckx, Ch. 5, §5.3 (pp. 107–117); regrid — gridded variant;
+      !!      bispev — evaluate the result
+      pure subroutine surfit(iopt,m,x,y,z,w,xb,xe,yb,ye,kx,ky,s,nxest,nyest,nmax,eps,nx,tx,ny,ty,&
+                             c,fp,wrk1,lwrk1,wrk2,lwrk2,iwrk,kwrk,ier)
+      !          ty(ny-ky)=...=ty(ny)=ye needed for the b-spline representation. if the computation mode
+      !          iopt=1 is used, the values of ty(1),...,ty(ny) should be left unchanged between subsequent
+      !          calls. if the computation mode iopt=-1 is used, the values ty(ky+2),...ty(ny-ky-1) must be
+      !          supplied by the user, before entry. see also the restrictions (ier=10).
+      !  c     : real array of dimension at least (nxest-kx-1)*(nyest-ky-1).
+      !          on successful exit, c contains the coefficients of the spline approximation s(x,y)
+      !  fp    : real. unless ier=10, fp contains the weighted sum of squared residuals of the spline
+      !          approximation returned.
+      !  wrk1  : real array of dimension (lwrk1). used as workspace.
+      !          if the computation mode iopt=1 is used the value of wrk1(1) should be left unchanged between
+      !          subsequent calls. on exit wrk1(2),wrk1(3),...,wrk1(1+(nx-kx-1)*(ny-ky-1)) will contain the
+      !          values d(i)/max(d(i)),i=1,...,(nx-kx-1)*(ny-ky-1) with d(i) the i-th diagonal element of the
+      !          reduced triangular matrix for calculating the b-spline coefficients. it includes those
+      !          elements whose square is less than eps,which are treated as 0 in the case of presumed rank
+      !          deficiency (ier<-2).
+      !  lwrk1 : integer. on entry lwrk1 must specify the actual dimension of the array wrk1 as declared in
+      !          the calling (sub)program. lwrk1 must not be too small. let
+      !            u = nxest-kx-1, v = nyest-ky-1, km = max(kx,ky)+1,
+      !            ne = max(nxest,nyest), bx = kx*v+ky+1, by = ky*u+kx+1,
+      !            if(bx<=by) b1 = bx, b2 = b1+v-ky
+      !            if(bx >by) b1 = by, b2 = b1+u-kx  then
+      !          lwrk1 >= u*v*(2+b1+b2)+2*(u+v+km*(m+ne)+ne-kx-ky)+b2+1
+      !  wrk2  : real array of dimension (lwrk2). used as workspace, but only in the case a rank deficient
+      !          system is encountered.
+      !  lwrk2 : integer. on entry lwrk2 must specify the actual dimension of the array wrk2 as declared in
+      !          the calling (sub)program. lwrk2 > 0 . a save upper boundfor lwrk2 = u*v*(b2+1)+b2 where u,v
+      !          and b2 are as above. if there are enough data points, scattered uniformly over the
+      !          approximation domain and if the smoothing factor s is not too small, there is a good chance
+      !          that this extra workspace is not needed. a lot of memory might therefore be saved by setting
+      !          lwrk2=1. (see also ier > 10)
+      !  iwrk  : integer array of dimension (kwrk). used as workspace.
+      !  kwrk  : integer. on entry kwrk must specify the actual dimension of the array iwrk as declared in
+      !          the calling (sub)program.  kwrk >= m+(nxest-2*kx-1)*(nyest-2*ky-1).
+      !  ier   : integer. unless the routine detects an error, ier contains a non-positive value on exit, i.e.
+      !   ier=0  : normal return. the spline returned has a residual sum of squares fp such that
+      !            abs(fp-s)/s <= tol with tol a relative tolerance set to 0.001 by the program.
+      !   ier=-1 : normal return. the spline returned is an interpolating spline (fp=0).
+      !   ier=-2 : normal return. the spline returned is the weighted least-squares polynomial of degrees kx
+      !            and ky. in this extreme case fp gives the upper bound for the smoothing factor s.
+      !   ier<-2 : warning. the coefficients of the spline returned have been computed as the minimal norm
+      !            least-squares solution of a (numerically) rank deficient system. (-ier) gives the rank.
+      !            especially if the rank deficiency which can be computed as (nx-kx-1)*(ny-ky-1)+ier, is
+      !            large the results may be inaccurate. they could also seriously depend on the value of eps.
+      !   ier=1  : error. the required storage space exceeds the available storage space, as specified by the
+      !            parameters nxest and nyest.
+      !            probably causes : nxest or nyest too small. if these parameters are already large, it may
+      !            also indicate that s is too small. the approximation returned is the weighted least-squares
+      !            spline according to the current set of knots. parameter fp gives the corresponding weighted
+      !            sum of squared residuals (fp>s).
+      !   ier=2  : error. a theoretically impossible result was found during the iteration process for finding
+      !            a smoothing spline with fp = s. probably causes : s too small or badly chosen eps.
+      !            there is an approximation returned but the corresponding weighted sum of squared residuals
+      !            does not satisfy the condition abs(fp-s)/s < tol.
+      !   ier=3  : error. the maximal number of iterations maxit (set to 20 by the program) allowed for
+	  !            finding a smoothing spline with fp=s has been reached. probably causes : s too small there
+	  !            is an approximation returned but the corresponding weighted sum of squared residuals does
+	  !            not satisfy the condition abs(fp-s)/s < tol.
+      !   ier=4  : error. no more knots can be added because the number of b-spline coefficients
+	  !            (nx-kx-1)*(ny-ky-1) already exceeds the number of data points m. likely causes: either s
+	  !            or m too small. the approximation returned is the weighted least-squares spline according
+	  !            to the current set of knots. the parameter fp gives the corresponding weighted sum of
+      !            squared residuals (fp>s).
+      !   ier=5  : error. no more knots can be added because the additional knot would (quasi) coincide with
+	  !            an old one. likely causes : s too small or too large a weight to an inaccurate data point.
+      !            the approximation returned is the weighted least-squares spline according to the current
+	  !            set of knots. the parameter fp gives the corresponding weighted sum of squared residuals (fp>s).
+      !   ier=10 : error. on entry, the input data are controlled on validity the following restrictions must
+	  !            be satisfied.
+      !            -1<=iopt<=1, 1<=kx,ky<=5, m>=(kx+1)*(ky+1), nxest>=2*kx+2,
+      !            nyest>=2*ky+2, 0<eps<1, nmax>=nxest, nmax>=nyest,
+      !            xb<=x(i)<=xe, yb<=y(i)<=ye, w(i)>0, i=1,...,m
+      !            lwrk1 >= u*v*(2+b1+b2)+2*(u+v+km*(m+ne)+ne-kx-ky)+b2+1
+      !            kwrk >= m+(nxest-2*kx-1)*(nyest-2*ky-1)
+      !            if iopt=-1: 2*kx+2<=nx<=nxest
+      !                        xb<tx(kx+2)<tx(kx+3)<...<tx(nx-kx-1)<xe
+      !                        2*ky+2<=ny<=nyest
+      !                        yb<ty(ky+2)<ty(ky+3)<...<ty(ny-ky-1)<ye
+      !            if iopt>=0: s>=0
+      !            if one of these conditions is found to be violated,control is returned to the calling program.
+	  !            in that case there is no approximation returned.
+      !   ier>10 : error. lwrk2 is too small, i.e. there is not enough work-space for computing the minimal
+	  !            least-squares solution of a rank deficient system of linear equations. ier gives the
+	  !            requested value for lwrk2. there is no approximation returned but, having saved the
+	  !            information contained in nx,ny,tx,ty,wrk1, and having adjusted the value of lwrk2 and
+      !            the dimension of the array wrk2 accordingly, the user cancontinue at the point the program
+	  !            was left, by calling surfit with iopt=1.
+      !
+      ! further comments:
+      !  by means of the parameter s, the user can control the tradeoff between closeness of fit and smoothness
+      !   of fit of the approximation. if s is too large, the spline will be too smooth and signal will be lost;
+      !   if s is too small the spline will pick up too much noise. in the extreme cases the program will return
+	  !   an interpolating spline ifs=0 and the weighted least-squares polynomial (degrees kx,ky)if s is very
+	  !   large. between these extremes, a properly chosen s will result in a good compromise between closeness
+	  !   of fit and smoothness of fit. to decide whether an approximation, corresponding to a certain s is
+      !   satisfactory the user is highly recommended to inspect the fits graphically.
+      !   recommended values for s depend on the weights w(i). if these are taken as 1/d(i) with d(i) an estimate
+	  !   of the standard deviation of z(i), a good s-value should be found in the range (m-sqrt(2*m),m+sqrt(2*m)).
+      !   if nothing is known about the statistical error in z(i) each w(i) can be set equal to one and s
+	  !   determined by trial and error, taking account of the comments above. the best is then to start with a
+	  !   very large value of s ( to determine the least-squares polynomial and the corresponding upper bound fp0
+	  !   for s) and then to progressively decrease the value of s ( say by a factor 10 in the beginning, i.e.
+	  !   s=fp0/10, fp0/100,...and more carefully as the approximation shows more detail) to obtain closer fits.
+      !   to choose s very small is strongly discouraged. this considerably increases computation time and memory
+	  !   requirements. it may also cause rank-deficiency (ier<-2) and endager numerical stability. to economize
+	  !   the search for a good s-value the program provides with different modes of computation. at the first
+	  !   call of the routine, or whenever he wants to restart with the initial set of knots the user must set
+	  !   iopt=0.
+      !   if iopt=1 the program will continue with the set of knots found at the last call of the routine. this
+	  !   will save a lot of computation time if surfit is called repeatedly for different values of s. the number
+	  !   of knots of the spline returned and their location will depend on the value of s and on the complexity
+	  !   of the shape of the function underlying the data. if the computation mode iopt=1 is used, the knots
+	  !   returned may also depend on the s-values at previous calls (if these were smaller). therefore, if after
+	  !   a number of trials with different s-values and iopt=1, the user can finally accept a fit as satisfactory,
+	  !   it may be worthwhile for him to call surfit once more with the selected value for s but now with iopt=0.
+	  !   indeed, surfit may then return an approximation of the same quality of fit but with fewer knots and
+	  !   therefore better if data reduction is also an important objective for the user. the number of knots may
+	  !   also depend on the upper bounds nxest and nyest. indeed, if at a certain stage in surfit the number of
+	  !   knots in one direction (say nx) has reached the value of its upper bound (nxest), then from that moment
+	  !   on all subsequent knots are added in the other (y) direction. this may indicate that the value of nxest
+	  !   is too small. on the other hand, it gives the user the option of limiting the number of knots the
+	  !   routine locates in any direction for example, by setting nxest=2*kx+2 (the lowest allowable value for
+      !   nxest), the user can indicate that he wants an approximation which is a simple polynomial of degree kx
+	  !   in the variable x.
+      !
+      !  references:
+      !   dierckx p. : an algorithm for surface fitting with spline functions
+      !                ima j. numer. anal. 1 (1981) 267-283.
+      !   dierckx p. : an algorithm for surface fitting with spline functions
+      !                report tw50, dept. computer science,k.u.leuven, 1980.
+      !   dierckx p. : curve and surface fitting with splines, monographs on
+      !                numerical analysis, oxford university press, 1993.
+      !
+      !  author:
+      !    p.dierckx
+      !    dept. computer science, k.u. leuven
+      !    celestijnenlaan 200a, b-3001 heverlee, belgium.
+      !    e-mail : Paul.Dierckx@cs.kuleuven.ac.be
+      !
+      !  creation date : may 1979
+      !
+      !  ..
+      !  ..scalar arguments..
+      real(FP_REAL), intent(in)    :: xb,xe,yb,ye,s,eps
+      real(FP_REAL), intent(inout) :: fp
+      integer(FP_SIZE), intent(in)    :: iopt,m,kx,ky,nxest,nyest,nmax,lwrk1,lwrk2,kwrk
+      integer(FP_SIZE), intent(inout) :: nx,ny
+      integer(FP_FLAG), intent(out)   :: ier
+
+      !  ..array arguments..
+      real(FP_REAL), intent(in)    :: z(m),w(m)
+      real(FP_REAL), intent(inout) :: x(m),y(m),tx(nmax),ty(nmax),c((nxest-kx-1)*(nyest-ky-1)),wrk1(lwrk1),&
+                                    wrk2(lwrk2)
+      integer(FP_SIZE), intent(inout) :: iwrk(kwrk)
+      !  ..local scalars..
+      integer(FP_SIZE) :: ib1,ib3,jb1,ki,kmax,km1,km2,kn,kwest,kx1,ky1,la,lbx,lby,lco,lf,lff,lfp,lh,lq,lsx,lsy, &
+                 lwest,ncest,nest,nek,nminx,nminy,nmx,nmy,nreg,nrint,nxk,nyk
+
+      !  we set up the parameters tol and maxit.
+      integer(FP_SIZE), parameter :: maxit = 20
+      real(FP_REAL), parameter :: tol = smallnum03
+
+      ! Size parameters
+      kx1   = kx+1
+      ky1   = ky+1
+      kmax  = max(kx,ky)
+      km1   = kmax+1
+      km2   = km1+1
+      nminx = 2*kx1
+      nminy = 2*ky1
+
+      !  before starting computations a data check is made. if the input data
+      !  are invalid,control is immediately repassed to the calling program.
+      ier   = FITPACK_INPUT_ERROR
+
+      nest  = max(nxest,nyest)
+      nxk   = nxest-kx1
+      nyk   = nyest-ky1
+      ncest = nxk*nyk
+      nmx   = nxest-nminx+1
+      nmy   = nyest-nminy+1
+      nrint = nmx+nmy
+      nreg  = nmx*nmy
+      jb1   = ky*nxk+kx1
+      ib1   = min(kx*nyk+ky1,jb1)
+      ib3   = kx1*nyk+1
+      lwest = ncest*(2+ib1+ib3)+2*(nrint+nest*km2+m*km1)+ib3
+      kwest = m+nreg
+
+      if (.not.(eps>zero .and. eps<one))         return
+      if (.not.(kx>0 .and. kx<=5))               return
+      if (.not.(ky>0 .and. ky<=5))               return
+      if (.not.(iopt>=(-1) .and. iopt<=1))       return
+      if (.not.m>=(kx1*ky1))                     return
+      if (.not.(nxest>=nminx .and. nxest<=nmax)) return
+      if (.not.(nyest>=nminy .and. nyest<=nmax)) return
+      if (.not.(lwrk1>=lwest .and. kwrk>=kwest)) return
+      if (.not.(xb<xe .and. yb<ye))              return
+      if (any(w<=zero))                          return
+      if (any(x<xb .or. x>xe))                   return
+      if (any(y<yb .or. y>ye))                   return
+
+      if (iopt>=0) then
+
+          if (s<zero)                            return
+
+      else
+
+          ! Check that the pre-existing x, y knot locations are monotonic
+          if (nx<nminx .or. nx>nxest)            return
+          nxk       = nx-kx1
+          tx(kx1)   = xb
+          tx(nxk+1) = xe
+          if (any(tx(kx1+1:nxk+1)<=tx(kx1:nxk))) return
+
+          if (ny<nminy .or. ny>nyest)            return
+          nyk       = ny-ky1
+          ty(ky1)   = yb
+          ty(nyk+1) = ye
+          if (any(ty(ky1+1:nyk+1)<=ty(ky1:nyk))) return
+
+      endif
+
+      ! All checks passed
+      ier = FITPACK_OK
+
+      !  we partition the working space and determine the spline approximation
+      kn  = 1
+      ki  = kn+m
+      lq  = 2
+      la  = lq+ncest*ib3
+      lf  = la+ncest*ib1
+      lff = lf+ncest
+      lfp = lff+ncest
+      lco = lfp+nrint
+      lh  = lco+nrint
+      lbx = lh+ib3
+      nek = nest*km2
+      lby = lbx+nek
+      lsx = lby+nek
+      lsy = lsx+m*km1
+
+      call fpsurf(iopt,m,x,y,z,w,xb,xe,yb,ye,kx,ky,s,nxest,nyest, &
+                  eps,tol,maxit,nest,km1,km2,ib1,ib3,ncest,nrint,nreg,nx,tx, &
+                  ny,ty,c,fp,wrk1(1),wrk1(lfp),wrk1(lco),wrk1(lf),wrk1(lff), &
+                  wrk1(la),wrk1(lq),wrk1(lbx),wrk1(lby),wrk1(lsx),wrk1(lsy), &
+                  wrk1(lh),iwrk(ki),iwrk(kn),wrk2,lwrk2,ier)
+      return
+
+      end subroutine surfit
+
+      ! Utilities: argsort
+      ! Return indices of sorted array
+      !> @brief Return the permutation indices that would sort an array.
+      !!
+      !! Returns an index array `ilist` such that `list(ilist)` is in ascending order.
+      !!
+      !! @param[in]  list   Array of values to sort.
+      !! @return     Index permutation (length `size(list)`).
+      pure function fitpack_argsort(list) result(ilist)
+          real(FP_REAL), dimension(:), intent(in) :: list
+          integer(FP_SIZE), dimension(size(list)) :: ilist
+
+          real(FP_REAL), allocatable :: copy(:)
+          integer(FP_SIZE) :: i
+
+          ! Prepare data
+          allocate(copy(size(list)),source=list)
+          forall(i=1:size(list,kind=FP_SIZE)) ilist(i) = i
+
+          ! Perform sort
+          call fitpack_quicksort(copy,ilist)
+
+          deallocate(copy)
+
+      end function fitpack_argsort
+
+      !> @brief In-place quicksort with optional index tracking.
+      !!
+      !! Sorts `list` in ascending order (or descending if `down=.true.`). If `ilist` is present,
+      !! its elements are permuted in parallel to track the original positions.
+      !!
+      !! @param[in,out] list   Array to sort.
+      !! @param[in,out] ilist  Optional index array, permuted alongside `list`.
+      !! @param[in]     down   Optional flag for descending order.
+      pure recursive subroutine fitpack_quicksort(list,ilist,down)
+
+        real(FP_REAL), dimension(:), intent(inout) :: list
+        integer(FP_SIZE), dimension(size(list)), optional, intent(inout) :: ilist
+        logical(FP_BOOL), optional, intent(in) :: down
+
+        integer(FP_SIZE)  :: i, j, n
+        real(FP_REAL)     :: chosen
+        logical(FP_BOOL) :: descending,has_list
+        integer(FP_SIZE), parameter :: SMALL_SIZE = 8
+
+        has_list   = present(ilist)
+        descending = FP_FALSE; if (present(down)) descending = down
+        n = size(list,kind=FP_SIZE)
+
+        choose_sorting_algorithm: if (n <= SMALL_SIZE) then
+
+           ! Use interchange sort for small lists
+           do i = 1, n - 1
+              do j = i + 1, n
+                 if (toBeSwapped(list(i),list(j),FP_FALSE)) then
+                     call fitpack_swap(list(i),list(j))
+                     if (has_list) call fitpack_swap(ilist(i),ilist(j))
+                 end if
+              end do
+           end do
+
+        else
+           ! Use partition (quick) sort if the list is big
+           chosen = list(int(n/2))
+           i = 0
+           j = n + 1
+
+           scan_lists: do
+              ! Scan list from left end
+              ! until element >= chosen is found
+              scan_from_left: do
+                i = i + 1
+                if (toBeSwapped(list(i),chosen,FP_TRUE) .or. i==n) exit scan_from_left
+              end do scan_from_left
+
+              ! Scan list from right end
+              ! until element <= chosen is found
+
+              scan_from_right: do
+                 j = j - 1
+                 if (toBeSwapped(chosen,list(j),FP_TRUE) .or. j==1) exit scan_from_right
+              end do scan_from_right
+
+              swap_element: if (i < j) then
+                  ! Swap two out of place elements
+                  call fitpack_swap(list(i),list(j))
+                  if (has_list) call fitpack_swap(ilist(i),ilist(j))
+              else if (i == j) then
+                  i = i + 1
+                  exit
+              else
+                  exit
+              endif swap_element
+
+           end do scan_lists
+
+           if (has_list) then
+              if (1 < j) call fitpack_quicksort(list(:j),ilist(:j),down)
+              if (i < n) call fitpack_quicksort(list(i:),ilist(i:),down)
+           else
+              if (1 < j) call fitpack_quicksort(list(:j),down=descending)
+              if (i < n) call fitpack_quicksort(list(i:),down=descending)
+           endif
+
+        end if choose_sorting_algorithm ! test for small array
+
+      contains
+
+         elemental logical(FP_BOOL) function toBeSwapped(a,b,orEqual)
+            real(FP_REAL), intent(in) :: a,b
+            logical(FP_BOOL), intent(in) :: orEqual
+
+            toBeSwapped = merge(is_before(a,b),is_after(a,b),descending)
+            if (orEqual .and. equal(a,b)) toBeSwapped = FP_TRUE
+
+         end function toBeSwapped
+
+    end subroutine fitpack_quicksort
+
+    !> @brief Swap two real values in place.
+    elemental subroutine swap_data(a,b)
+      real(FP_REAL), intent(inout) :: a, b
+      real(FP_REAL)                :: tmp
+      tmp = a
+      a   = b
+      b   = tmp
+      return
+    end subroutine swap_data
+
+    !> @brief Swap two integer values in place.
+    elemental subroutine swap_size(a,b)
+      integer(FP_SIZE), intent(inout) :: a, b
+      integer(FP_SIZE)                :: tmp
+      tmp = a
+      a   = b
+      b   = tmp
+      return
+    end subroutine swap_size
+
+    !> @brief Test \f$ a < b \f$ (strict less-than).
+    elemental logical(FP_BOOL) function is_before(a,b)
+       real(FP_REAL), intent(in) :: a,b
+       is_before = a<b
+    end function is_before
+
+    !> @brief Test \f$ a > b \f$ (strict greater-than).
+    elemental logical(FP_BOOL) function is_after(a,b)
+       real(FP_REAL), intent(in) :: a,b
+       is_after = a>b
+    end function is_after
+
+    !> @brief Test \f$ a \ge b \f$.
+    elemental logical(FP_BOOL) function is_ge(a,b)
+       real(FP_REAL), intent(in) :: a,b
+       is_ge = a>=b
+    end function is_ge
+
+    !> @brief Test \f$ a \le b \f$.
+    elemental logical(FP_BOOL) function is_le(a,b)
+       real(FP_REAL), intent(in) :: a,b
+       is_le = a<=b
+    end function is_le
+
+    !> @brief Test whether two reals are equal within machine precision.
+    !!
+    !! Returns `.true.` if \f$ |a - b| < \text{spacing}(\min(|a|,|b|)) \f$.
+    elemental logical(FP_BOOL) function equal(a,b)
+       real(FP_REAL), intent(in) :: a,b
+       equal = abs(a-b)<spacing(merge(a,b,abs(a)<abs(b)))
+    end function equal
+    !> @brief Test whether two reals differ beyond machine precision.
+    elemental logical(FP_BOOL) function not_equal(a,b)
+       real(FP_REAL), intent(in) :: a,b
+       not_equal = .not.equal(a,b)
+    end function not_equal
+
+    ! ==============================================================================================
+    ! PARALLEL COMMUNICATION UTILITIES
+    ! ==============================================================================================
+
+    !> Number of FP_COMM elements required to store nbits of data
+    elemental integer(FP_SIZE) function FP_RCOMMS_PER_BITS(nbits)
+        integer(FP_SIZE), intent(in) :: nbits
+        integer, parameter :: COMM_BITS = storage_size(0.0_FP_COMM)
+        FP_RCOMMS_PER_BITS = nbits / COMM_BITS + merge(IONE, IZERO, mod(nbits, COMM_BITS) > 0)
+    end function FP_RCOMMS_PER_BITS
+
+    !> Calculate storage size for 1D real(FP_REAL) allocatable array
+    !> Header: 1 FP_COMM storing bounds as 2 int32 (or NOT_ALLOC marker)
+    !> Data: raw transfer of array contents
+    pure integer(FP_SIZE) function FP_REAL_COMM_SIZE_1D(array)
+        real(FP_REAL), allocatable, intent(in) :: array(:)
+        integer(FP_SIZE) :: n
+
+        FP_REAL_COMM_SIZE_1D = rank(array)  ! Header
+        if (allocated(array)) then
+            n = size(array, kind=FP_SIZE)
+            FP_REAL_COMM_SIZE_1D = FP_REAL_COMM_SIZE_1D + FP_RCOMMS_PER_BITS(n * storage_size(array))
+        end if
+    end function FP_REAL_COMM_SIZE_1D
+
+    !> Calculate storage size for 2D real(FP_REAL) allocatable array
+    pure integer(FP_SIZE) function FP_REAL_COMM_SIZE_2D(array)
+        real(FP_REAL), allocatable, intent(in) :: array(:,:)
+        integer(FP_SIZE) :: n
+
+        FP_REAL_COMM_SIZE_2D = rank(array)  ! Header (2 dimensions)
+        if (allocated(array)) then
+            n = size(array, kind=FP_SIZE)
+            FP_REAL_COMM_SIZE_2D = FP_REAL_COMM_SIZE_2D + FP_RCOMMS_PER_BITS(n * storage_size(array))
+        end if
+    end function FP_REAL_COMM_SIZE_2D
+
+    !> Calculate storage size for 3D real(FP_REAL) allocatable array
+    pure integer(FP_SIZE) function FP_REAL_COMM_SIZE_3D(array)
+        real(FP_REAL), allocatable, intent(in) :: array(:,:,:)
+        integer(FP_SIZE) :: n
+
+        FP_REAL_COMM_SIZE_3D = rank(array)  ! Header (3 dimensions)
+        if (allocated(array)) then
+            n = size(array, kind=FP_SIZE)
+            FP_REAL_COMM_SIZE_3D = FP_REAL_COMM_SIZE_3D + FP_RCOMMS_PER_BITS(n * storage_size(array))
+        end if
+    end function FP_REAL_COMM_SIZE_3D
+
+    !> Calculate storage size for 1D integer(FP_SIZE) allocatable array
+    pure integer(FP_SIZE) function FP_SIZE_COMM_SIZE_1D(array)
+        integer(FP_SIZE), allocatable, intent(in) :: array(:)
+        integer(FP_SIZE) :: n
+
+        FP_SIZE_COMM_SIZE_1D = rank(array)  ! Header
+        if (allocated(array)) then
+            n = size(array, kind=FP_SIZE)
+            FP_SIZE_COMM_SIZE_1D = FP_SIZE_COMM_SIZE_1D + FP_RCOMMS_PER_BITS(n * storage_size(array))
+        end if
+    end function FP_SIZE_COMM_SIZE_1D
+
+    !> Pack 1D real(FP_REAL) allocatable array into communication buffer
+    pure subroutine FP_REAL_COMM_PACK_1D(array, buffer)
+        real(FP_REAL), allocatable, intent(in) :: array(:)
+        real(FP_COMM), intent(out) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2), ndoubles
+        integer(FP_SIZE), parameter :: header = 1
+
+        if (allocated(array)) then
+            bnd = [lbound(array, 1, FP_SIZE), ubound(array, 1, FP_SIZE)]
+        else
+            bnd = FP_NOT_ALLOC
+        end if
+
+        buffer(1:header) = transfer(bnd, buffer(1:header), int(header))
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            ndoubles = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+            buffer(header+1:header+ndoubles) = transfer(array, buffer(header+1:header+ndoubles), int(ndoubles))
+        end if
+    end subroutine FP_REAL_COMM_PACK_1D
+
+    !> Pack 2D real(FP_REAL) allocatable array into communication buffer
+    pure subroutine FP_REAL_COMM_PACK_2D(array, buffer)
+        real(FP_REAL), allocatable, intent(in) :: array(:,:)
+        real(FP_COMM), intent(out) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2, 2), ndoubles
+        integer(FP_SIZE), parameter :: header = 2
+
+        if (allocated(array)) then
+            bnd(1, 1) = lbound(array, 1, FP_SIZE)
+            bnd(2, 1) = ubound(array, 1, FP_SIZE)
+            bnd(1, 2) = lbound(array, 2, FP_SIZE)
+            bnd(2, 2) = ubound(array, 2, FP_SIZE)
+        else
+            bnd = FP_NOT_ALLOC
+        end if
+
+        buffer(1:header) = transfer(bnd, buffer(1:header), int(header))
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            ndoubles = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+            buffer(header+1:header+ndoubles) = transfer(array, buffer(header+1:header+ndoubles), int(ndoubles))
+        end if
+    end subroutine FP_REAL_COMM_PACK_2D
+
+    !> Pack 3D real(FP_REAL) allocatable array into communication buffer
+    pure subroutine FP_REAL_COMM_PACK_3D(array, buffer)
+        real(FP_REAL), allocatable, intent(in) :: array(:,:,:)
+        real(FP_COMM), intent(out) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2, 3), ndoubles
+        integer(FP_SIZE), parameter :: header = 3
+
+        if (allocated(array)) then
+            bnd(1, 1) = lbound(array, 1, FP_SIZE)
+            bnd(2, 1) = ubound(array, 1, FP_SIZE)
+            bnd(1, 2) = lbound(array, 2, FP_SIZE)
+            bnd(2, 2) = ubound(array, 2, FP_SIZE)
+            bnd(1, 3) = lbound(array, 3, FP_SIZE)
+            bnd(2, 3) = ubound(array, 3, FP_SIZE)
+        else
+            bnd = FP_NOT_ALLOC
+        end if
+
+        buffer(1:header) = transfer(bnd, buffer(1:header), int(header))
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            ndoubles = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+            buffer(header+1:header+ndoubles) = transfer(array, buffer(header+1:header+ndoubles), int(ndoubles))
+        end if
+    end subroutine FP_REAL_COMM_PACK_3D
+
+    !> Pack 1D integer(FP_SIZE) allocatable array into communication buffer
+    pure subroutine FP_SIZE_COMM_PACK_1D(array, buffer)
+        integer(FP_SIZE), allocatable, intent(in) :: array(:)
+        real(FP_COMM), intent(out) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2), ndoubles
+        integer(FP_SIZE), parameter :: header = 1
+
+        if (allocated(array)) then
+            bnd = [lbound(array, 1, FP_SIZE), ubound(array, 1, FP_SIZE)]
+        else
+            bnd = FP_NOT_ALLOC
+        end if
+
+        buffer(1:header) = transfer(bnd, buffer(1:header), int(header))
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            ndoubles = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+            buffer(header+1:header+ndoubles) = transfer(array, buffer(header+1:header+ndoubles), int(ndoubles))
+        end if
+    end subroutine FP_SIZE_COMM_PACK_1D
+
+    !> Expand communication buffer into 1D real(FP_REAL) allocatable array
+    pure subroutine FP_REAL_COMM_EXPAND_1D(array, buffer)
+        real(FP_REAL), allocatable, intent(out) :: array(:)
+        real(FP_COMM), intent(in) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2), n
+        integer(FP_SIZE), parameter :: header = 1
+
+        bnd = transfer(buffer(:header), bnd)
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            allocate(array(bnd(1):bnd(2)))
+            n = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+#if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
+            ! Intel: avoid transfer() — temporary overflows the stack for large arrays.
+            ! FP_REAL == FP_COMM (both c_double), so direct assignment is valid.
+            array(:) = buffer(header+1:header+n)
+#else
+            array = transfer(buffer(header+1:header+n), array)
+#endif
+        end if
+    end subroutine FP_REAL_COMM_EXPAND_1D
+
+    !> Expand communication buffer into 2D real(FP_REAL) allocatable array
+    pure subroutine FP_REAL_COMM_EXPAND_2D(array, buffer)
+        real(FP_REAL), allocatable, intent(out) :: array(:,:)
+        real(FP_COMM), intent(in) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2, 2), n
+        integer(FP_SIZE), parameter :: header = 2
+
+        bnd = reshape(transfer(buffer(:header), bnd), shape(bnd))
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            allocate(array(bnd(1,1):bnd(2,1), bnd(1,2):bnd(2,2)))
+            n = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+#if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
+            ! Intel: avoid transfer() — temporary overflows the stack for large arrays.
+            ! FP_REAL == FP_COMM (both c_double), so reshape buffer directly.
+            array(:,:) = reshape(buffer(header+1:header+n), shape(array))
+#else
+            array = reshape(transfer(buffer(header+1:header+n), array, size(array)), shape(array))
+#endif
+        end if
+    end subroutine FP_REAL_COMM_EXPAND_2D
+
+    !> Expand communication buffer into 3D real(FP_REAL) allocatable array
+    pure subroutine FP_REAL_COMM_EXPAND_3D(array, buffer)
+        real(FP_REAL), allocatable, intent(out) :: array(:,:,:)
+        real(FP_COMM), intent(in) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2, 3), n
+        integer(FP_SIZE), parameter :: header = 3
+
+        bnd = reshape(transfer(buffer(:header), bnd), shape(bnd))
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            allocate(array(bnd(1,1):bnd(2,1), bnd(1,2):bnd(2,2), bnd(1,3):bnd(2,3)))
+            n = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+#if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
+            ! Intel: avoid transfer() — temporary overflows the stack for large arrays.
+            ! FP_REAL == FP_COMM (both c_double), so reshape buffer directly.
+            array(:,:,:) = reshape(buffer(header+1:header+n), shape(array))
+#else
+            array = reshape(transfer(buffer(header+1:header+n), array, size(array)), shape(array))
+#endif
+        end if
+    end subroutine FP_REAL_COMM_EXPAND_3D
+
+    !> Expand communication buffer into 1D integer(FP_SIZE) allocatable array
+    pure subroutine FP_SIZE_COMM_EXPAND_1D(array, buffer)
+        integer(FP_SIZE), allocatable, intent(out) :: array(:)
+        real(FP_COMM), intent(in) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2), ndoubles
+        integer(FP_SIZE), parameter :: header = 1
+
+        bnd = transfer(buffer(:header), bnd)
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            allocate(array(bnd(1):bnd(2)))
+            ndoubles = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+#if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
+            array(:) = transfer(buffer(header+1:header+ndoubles), 0_FP_SIZE, size(array))
+#else
+            array = transfer(buffer(header+1:header+ndoubles), array)
+#endif
+        end if
+    end subroutine FP_SIZE_COMM_EXPAND_1D
+
+    !> Calculate storage size for 1D logical(FP_BOOL) allocatable array
+    pure integer(FP_SIZE) function FP_BOOL_COMM_SIZE_1D(array)
+        logical(FP_BOOL), allocatable, intent(in) :: array(:)
+        integer(FP_SIZE) :: n
+
+        FP_BOOL_COMM_SIZE_1D = rank(array)  ! Header
+        if (allocated(array)) then
+            n = size(array, kind=FP_SIZE)
+            FP_BOOL_COMM_SIZE_1D = FP_BOOL_COMM_SIZE_1D + FP_RCOMMS_PER_BITS(n * storage_size(array))
+        end if
+    end function FP_BOOL_COMM_SIZE_1D
+
+    !> Pack 1D logical(FP_BOOL) allocatable array into communication buffer
+    pure subroutine FP_BOOL_COMM_PACK_1D(array, buffer)
+        logical(FP_BOOL), allocatable, intent(in) :: array(:)
+        real(FP_COMM), intent(out) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2), ndoubles
+        integer(FP_SIZE), parameter :: header = 1
+
+        if (allocated(array)) then
+            bnd = [lbound(array, 1, FP_SIZE), ubound(array, 1, FP_SIZE)]
+        else
+            bnd = FP_NOT_ALLOC
+        end if
+
+        buffer(1:header) = transfer(bnd, buffer(1:header), int(header))
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            ndoubles = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+            buffer(header+1:header+ndoubles) = transfer(array, buffer(header+1:header+ndoubles), int(ndoubles))
+        end if
+    end subroutine FP_BOOL_COMM_PACK_1D
+
+    !> Expand communication buffer into 1D logical(FP_BOOL) allocatable array
+    pure subroutine FP_BOOL_COMM_EXPAND_1D(array, buffer)
+        logical(FP_BOOL), allocatable, intent(out) :: array(:)
+        real(FP_COMM), intent(in) :: buffer(:)
+
+        integer(FP_SIZE) :: bnd(2), ndoubles
+        integer(FP_SIZE), parameter :: header = 1
+
+        bnd = transfer(buffer(:header), bnd)
+
+        if (all(bnd /= FP_NOT_ALLOC)) then
+            allocate(array(bnd(1):bnd(2)))
+            ndoubles = FP_RCOMMS_PER_BITS(size(array, kind=FP_SIZE) * storage_size(array))
+#if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
+            array(:) = transfer(buffer(header+1:header+ndoubles), FP_FALSE, size(array))
+#else
+            array = transfer(buffer(header+1:header+ndoubles), array)
+#endif
+        end if
+    end subroutine FP_BOOL_COMM_EXPAND_1D
+
+end module fitpack_core

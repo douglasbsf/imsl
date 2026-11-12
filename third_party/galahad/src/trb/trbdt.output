@@ -1,0 +1,22 @@
+
+ error exit tests 
+ 3: TRB_solve exit status =     -3
+ 4: TRB_solve exit status =     -4
+ 7: TRB_solve exit status =     -7
+18: TRB_solve exit status =    -18
+19: TRB_solve exit status =    -19
+
+ test of availible options 
+
+ 8:    33 iterations. Optimal objective value =   -0.8 status =      0
+
+ full test of generic problems 
+
+ 1:     1 iterations. Optimal objective value =   17.0 status =      0
+ 2:     1 iterations. Optimal objective value =   17.0 status =      0
+ 3:     1 iterations. Optimal objective value =   17.0 status =      0
+ 4:     1 iterations. Optimal objective value =   17.0 status =      0
+ 5:     1 iterations. Optimal objective value =   17.0 status =      0
+ 6:     1 iterations. Optimal objective value =   17.0 status =      0
+
+ tests completed

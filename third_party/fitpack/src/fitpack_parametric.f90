@@ -1,0 +1,906 @@
+! **************************************************************************************************
+!                                ____________________  ___   ________ __
+!                               / ____/  _/_  __/ __ \/   | / ____/ //_/
+!                              / /_   / /  / / / /_/ / /| |/ /   / ,<
+!                             / __/ _/ /  / / / ____/ ___ / /___/ /| |
+!                            /_/   /___/ /_/ /_/   /_/  |_\____/_/ |_|
+!
+!                                     A Curve Fitting Package
+!
+!   Refactored by Federico Perini, 10/6/2022
+!   Based on the netlib library by Paul Dierckx
+!
+!   References :
+!     - C. De Boor, "On calculating with b-splines", J Approx Theory 6 (1972) 50-62
+!     - M. G. Cox, "The numerical evaluation of b-splines", J Inst Maths Applics 10 (1972) 134-149
+!     - P. Dierckx, "Curve and surface fitting with splines", Monographs on numerical analysis,
+!                    Oxford university press, 1993.
+!
+! **************************************************************************************************
+!> @brief OOP wrappers for parametric curve fitting in \f$ \mathbb{R}^d \f$.
+!!
+!! Provides three types for fitting parametric curves through data points in
+!! \f$ d \f$-dimensional space (\f$ d \geq 1 \f$):
+!! - fitpack_parametric_curve — open parametric spline (parcur)
+!! - fitpack_closed_curve — closed (periodic) parametric spline (clocur)
+!! - fitpack_constrained_curve — parametric spline with derivative constraints at endpoints (concur)
+!!
+!! Each component \f$ s_j(u) \f$ of the curve is represented as a B-spline of degree \f$ k \f$
+!! over a common knot vector, with the parameter \f$ u \f$ either user-supplied or
+!! automatically computed from cumulative chord lengths.
+!!
+!! @see Dierckx, Ch. 9 (pp. 199–228); parcur, clocur, concur
+module fitpack_parametric_curves
+    use fitpack_core
+    use fitpack_fitters
+    implicit none
+    private
+
+    public :: fitpack_parametric_curve
+    public :: fitpack_closed_curve
+    public :: fitpack_constrained_curve
+
+    integer, parameter :: MAX_K = 5
+
+    !> @brief Open parametric curve fitter in \f$ \mathbb{R}^d \f$.
+    !!
+    !! Fits a parametric spline curve \f$ \mathbf{s}(u) = (s_1(u), \ldots, s_d(u)) \f$
+    !! through \f$ m \f$ data points \f$ \mathbf{x}_i \in \mathbb{R}^d \f$ associated with
+    !! strictly increasing parameter values \f$ u_i \f$. If no parameter values are provided,
+    !! they are computed automatically from cumulative chord lengths.
+    !!
+    !! @see Dierckx, Ch. 9, §9.1 (pp. 199–212); parcur
+    type, extends(fitpack_fitter) :: fitpack_parametric_curve
+
+        !> Number of points
+        integer :: m = 0
+
+        !> Number of dimensions
+        integer :: idim = 0
+
+        !> The data points
+        real(FP_REAL), allocatable :: x(:,:) ! [idim x m]
+
+        !> Parameter values: one for each point. They may be optional, in which case, they will
+        !> be internally calculated by fitpack
+        logical :: has_params = .false.
+        real(FP_REAL), allocatable :: u(:)
+
+        !> Spline degree
+        integer :: order = 3
+
+        !> Interval boundaries
+        real(FP_REAL) :: ubegin = zero
+        real(FP_REAL) :: uend   = zero
+
+        ! Node weights
+        real(FP_REAL), allocatable :: sp(:),w(:)
+
+        ! Estimated and actual number of knots and their allocations
+        integer                  :: nest  = 0
+        ! (lwrk/wrk inherited from fitpack_fitter)
+
+        ! Space for derivative evaluation
+        real(FP_REAL), allocatable :: dd(:,:)
+
+        ! Knots
+        integer     :: knots = 0
+        real(FP_REAL), allocatable :: t(:)  ! Knot location
+
+        contains
+
+           !> Clean memory
+           procedure :: destroy
+
+           !> Set new points
+           procedure :: new_points
+           procedure :: set_default_parameters
+
+           !> Generate new fit
+           procedure :: new_fit
+
+           !> Generate/update fitting curve, with optional smoothing
+           procedure :: fit         => curve_fit_automatic_knots
+           procedure :: interpolate   => interpolating_curve
+           procedure :: least_squares => parcur_fit_least_squares
+
+           !> Evaluate curve at given coordinates
+           procedure :: eval_one  => curve_eval_one
+           procedure :: eval_many => curve_eval_many           
+           generic :: eval => eval_one,eval_many
+
+           !> Evaluate derivative at given coordinates
+           procedure, private :: curve_derivative
+           procedure, private :: curve_derivatives
+           procedure, private :: curve_all_derivatives
+           generic   :: dfdx => curve_derivative,curve_derivatives
+           generic   :: dfdx_all => curve_all_derivatives
+
+           !> Parallel communication interface (size/pack/expand)
+           procedure :: comm_size   => parcur_comm_size
+           procedure :: comm_pack   => parcur_comm_pack
+           procedure :: comm_expand => parcur_comm_expand
+
+    end type fitpack_parametric_curve
+
+    !> @brief Closed (periodic) parametric curve fitter.
+    !!
+    !! Extension of fitpack_parametric_curve for curves that close on themselves,
+    !! i.e. \f$ \mathbf{s}(u_1) = \mathbf{s}(u_m) \f$. Uses the clocur core routine
+    !! which enforces periodic boundary conditions on the B-spline representation.
+    !!
+    !! @see Dierckx, Ch. 9, §9.2 (pp. 213–216); clocur
+    type, extends(fitpack_parametric_curve) :: fitpack_closed_curve
+
+    end type fitpack_closed_curve
+
+    !> @brief Parametric curve fitter with derivative constraints at the endpoints.
+    !!
+    !! Extension of fitpack_parametric_curve that enforces prescribed values of
+    !! derivatives at the left and/or right boundaries. For each component
+    !! \f$ s_j(u) \f$, the constraints are:
+    !! \f[
+    !!     s_j^{(\ell)}(u_1) = \text{db}(j, \ell), \quad \ell = 0, \ldots, \text{ib} - 1
+    !! \f]
+    !! \f[
+    !!     s_j^{(\ell)}(u_m) = \text{de}(j, \ell), \quad \ell = 0, \ldots, \text{ie} - 1
+    !! \f]
+    !! Uses the concur core routine.
+    !!
+    !! @see Dierckx, Ch. 9, §9.3 (pp. 217–228); concur
+    type, extends(fitpack_parametric_curve) :: fitpack_constrained_curve
+
+        !> Left boundary derivatives
+        integer                    :: ib = 0 ! Number of boundary constraints: up to (ib-1)-th derivative
+        real(FP_REAL), allocatable :: deriv_begin(:,:) ! 0:ib-1
+        !> Right boundary derivatives
+        integer                    :: ie = 0 ! Number of boundary constraints: up to (ib-1)-th derivative
+        real(FP_REAL), allocatable :: deriv_end(:,:)
+
+        !> On exit xx contains the coordinates of the data points to which a spline curve with zero
+        !> derivative constraints has been determined. if the computation mode iopt =1 is used xx should
+        !> be left unchanged between calls.
+        real(FP_REAL), allocatable :: xx(:,:)
+
+        !> On exit cp contains the b-spline coefficients of a polynomial curve which satisfies the
+        !> boundary constraints. if the computation mode iopt =1 is used cp should be left unchanged
+        !> between calls.
+        real(FP_REAL), allocatable :: cp(:,:)
+
+        contains
+
+           !> Clear memory
+           procedure :: destroy => con_destroy
+
+           !> Curve constraints
+           procedure :: clean_constraints
+           procedure ::   set_constraints
+
+           !> Override comm to include constraint fields
+           procedure :: comm_size   => concur_comm_size
+           procedure :: comm_pack   => concur_comm_pack
+           procedure :: comm_expand => concur_comm_expand
+
+    end type fitpack_constrained_curve
+
+    ! Default constructor
+    interface fitpack_parametric_curve
+       module procedure new_from_points
+    end interface fitpack_parametric_curve
+
+    contains
+
+    !> @brief Construct a parametric curve from data points and perform a default fit.
+    !!
+    !! @param[in]  x     Data points \f$ (d \times m) \f$: each column is a point in \f$ \mathbb{R}^d \f$.
+    !! @param[in]  u     Optional parameter values (must be strictly increasing). If omitted,
+    !!                   computed from cumulative chord lengths.
+    !! @param[in]  w     Optional positive weights, one per data point.
+    !! @param[out] ierr  Optional error flag.
+    !! @return Fitted parametric curve object.
+    !!
+    !! @see parcur
+    type(fitpack_parametric_curve) function new_from_points(x,u,w,ierr) result(this)
+        real(FP_REAL), intent(in) :: x(:,:)
+        real(FP_REAL), optional, intent(in) :: u(size(x,2)) ! parameter values
+        real(FP_REAL), optional, intent(in) :: w(size(x,2)) ! node weights
+        integer, optional, intent(out) :: ierr
+
+        integer :: ierr0
+
+        ierr0 = this%new_fit(x,u,w)
+
+        ! Error handling
+        call fitpack_error_handling(ierr0,ierr,'new curve fit')
+
+    end function new_from_points
+
+    !> @brief Load new data points and perform a fresh fit.
+    !!
+    !! @see parcur, clocur, concur
+    integer function new_fit(this,x,u,w,smoothing,order)
+        class(fitpack_parametric_curve), intent(inout) :: this
+        real   (FP_REAL), intent(in) :: x(:,:)
+        real   (FP_REAL), optional, intent(in) :: u(size(x,2)) ! parameter values
+        real   (FP_REAL), optional, intent(in) :: w(size(x,2)) ! node weights
+        real   (FP_REAL), optional, intent(in) :: smoothing
+        integer(FP_SIZE), optional, intent(in) :: order
+
+        call this%new_points(x,u,w)
+
+        new_fit = this%fit(smoothing,order)
+
+    end function new_fit
+
+    !> @brief Destroy a parametric curve object and release all allocated memory.
+    elemental subroutine destroy(this)
+       class(fitpack_parametric_curve), intent(inout) :: this
+       integer :: ierr
+       call this%destroy_base()
+       this%m    = 0
+       this%idim = 0
+       this%has_params = .false.
+       deallocate(this%x,stat=ierr)
+       deallocate(this%u,stat=ierr)
+       deallocate(this%w,stat=ierr)
+       deallocate(this%sp,stat=ierr)
+       deallocate(this%dd,stat=ierr)
+       deallocate(this%t,stat=ierr)
+       this%ubegin = zero
+       this%uend = zero
+
+       this%order     = 3
+       this%nest      = 0
+       this%knots     = 0
+
+    end subroutine destroy
+
+    !> @brief Destroy a constrained parametric curve, including endpoint constraints.
+    elemental subroutine con_destroy(this)
+       class(fitpack_constrained_curve), intent(inout) :: this
+
+       integer :: ierr
+       call destroy(this)
+       call clean_constraints(this)
+       deallocate(this%xx,stat=ierr)
+       deallocate(this%cp,stat=ierr)
+
+    end subroutine con_destroy
+
+    !> @brief Load new data points into the parametric curve and allocate workspace.
+    !!
+    !! @param[in,out] this  The parametric curve (destroyed and reinitialized).
+    !! @param[in]     x     Data points \f$ (d \times m) \f$: each column is a point.
+    !! @param[in]     u     Optional parameter values. If omitted, computed from chord lengths.
+    !! @param[in]     w     Optional positive weights.
+    !!
+    !! @see parcur, clocur, concur
+    subroutine new_points(this,x,u,w)
+        class(fitpack_parametric_curve), intent(inout) :: this
+        real(FP_REAL), intent(in) :: x(:,:)
+        real(FP_REAL), optional, intent(in) :: u(size(x,2))  ! parameter values
+        real(FP_REAL), optional, intent(in) :: w(size(x,2))  ! node weights
+
+        integer, allocatable :: isort(:)
+        integer, parameter   :: SAFE = 2
+
+        associate(m=>this%m,idim=>this%idim,nest=>this%nest,lwrk=>this%lwrk)
+
+        call this%destroy()
+
+        ! Curve size
+        m    = size(x,2)
+        idim = size(x,1)
+
+        ! set up uniform weights
+        if (present(w)) then
+           allocate(this%w(m),source=w)
+        else
+           allocate(this%w(m),source=one)
+        endif
+        allocate(this%sp(m),source=zero)
+
+        ! Check if parameters were provided, and if so, ensure x's are sorted
+        this%has_params = present(u)
+        if (this%has_params) then
+            isort = fitpack_argsort(u)
+            this%u    = u(isort)
+            this%x    = x(:,isort)
+            this%w(:) = this%w(isort)
+
+            this%ubegin  = minval(u)
+            this%uend    = maxval(u)
+
+        else
+            
+            allocate(this%u(m),source=zero)
+            this%x = x
+
+            call set_default_parameters(this)
+
+        end if
+
+        ! Reset run flag
+        this%iopt = IOPT_NEW_SMOOTHING
+
+        ! Reset estimated knots.
+        ! In most practical situation nest=m/2 will be sufficient.
+        ! always large enough is nest=m+k+1, the number of knots needed for interpolation (s=0).
+        select type (curv => this)
+
+           type is (fitpack_constrained_curve)
+
+              ! on exit cp will contain the b-spline coefficients of a polynomial curve which satisfies
+              ! the boundary constraints. if the computation mode iopt =1 is used cp should be left
+              ! unchanged between calls.
+              allocate(curv%xx(idim,m),&
+                       curv%cp(idim,2*(MAX_ORDER+1)))
+
+              nest = SAFE*(m+MAX_ORDER+1+max(0,MAX_ORDER)+max(0,MAX_ORDER))
+              lwrk = (m*(MAX_ORDER+1)+nest*(6+idim+3*MAX_ORDER))
+
+              ! Ensure constraint arrays are allocated and no constraints set
+              call set_constraints(curv)
+
+           type is (fitpack_closed_curve)
+
+              nest = SAFE*(m+2*MAX_ORDER)
+              lwrk = (m*(MAX_K+1)+nest*(7+idim+5*MAX_K))
+
+           class default
+
+              nest = SAFE*(m+MAX_ORDER+1)
+              lwrk = (m*(MAX_K+1)+nest*(6+idim+3*MAX_K))
+
+        end select
+
+        ! Setup working space.
+        this%liwrk = nest
+        allocate(this%iwrk(nest),this%t(nest),this%c(nest*idim))
+        allocate(this%wrk(lwrk),source=zero)
+
+        ! Setup space for derivative evaluatiuon
+        allocate(this%dd(idim,0:MAX_ORDER),source=zero)
+
+        endassociate
+
+    end subroutine new_points
+
+    !> @brief Remove all endpoint derivative constraints.
+    elemental subroutine clean_constraints(this)
+       class(fitpack_constrained_curve), intent(inout) :: this
+       integer :: ierr
+       deallocate(this%deriv_begin,stat=ierr)
+       deallocate(this%deriv_end,stat=ierr)
+       this%ib = 0
+       this%ie = 0
+    end subroutine clean_constraints
+
+    !> @brief Set or reset endpoint derivative constraints for a constrained parametric curve.
+    !!
+    !! Resets all constraints, then applies the supplied left and/or right boundary conditions.
+    !! Omitting `ddx_begin` or `ddx_end` removes constraints at that endpoint.
+    !!
+    !! @param[in,out] this      The constrained curve object.
+    !! @param[in]     ddx_begin Left endpoint constraints: column 0 = function value,
+    !!                          column \f$ \ell \f$ = \f$ \ell \f$-th derivative (\f$ d \times (ib) \f$).
+    !! @param[in]     ddx_end   Right endpoint constraints (same layout as `ddx_begin`).
+    !! @param[out]    ierr      Error flag (optional).
+    subroutine set_constraints(this,ddx_begin,ddx_end,ierr)
+        class(fitpack_constrained_curve), intent(inout) :: this
+
+        real(FP_REAL), optional, intent(in) :: ddx_begin(:,0:)
+        real(FP_REAL), optional, intent(in) :: ddx_end  (:,0:)
+
+        integer, optional, intent(out) :: ierr
+
+        integer :: ier
+
+        ier = FITPACK_OK
+
+        ! Prepare deallocated space
+        call clean_constraints(this)
+
+        if (present(ddx_begin)) then
+            if (size(ddx_begin,1)/=this%idim .or. .not.size(ddx_begin,2)>0) then
+                ier = FITPACK_INVALID_CONSTRAINT
+                call fitpack_error_handling(ier,ierr,'constrained_curve: begin point constraint')
+                return
+            else
+                this%ib = size(ddx_begin,2)
+                allocate(this%deriv_begin(this%idim,0:ubound(ddx_begin,2)),source=ddx_begin)
+            end if
+        else
+            ! Do not leave array unallocated
+            this%ib = 0
+            allocate(this%deriv_begin(this%idim,1))
+        end if
+
+        if (present(ddx_end)) then
+            if (size(ddx_end,1)/=this%idim .or. .not.size(ddx_end,2)>0) then
+                ier = FITPACK_INVALID_CONSTRAINT
+                call fitpack_error_handling(ier,ierr,'constrained_curve: endpoint constraint')
+                return
+            else
+                this%ie = size(ddx_end,2)
+                allocate(this%deriv_end(this%idim,0:ubound(ddx_end,2)),source=ddx_end)
+            end if
+        else
+            ! Do not leave array unallocated
+            this%ie = 0
+            allocate(this%deriv_end(this%idim,1))
+        end if
+
+        ! Add point constraints
+        call fitpack_error_handling(ier,ierr,'constrained_curve: set_constraints')
+
+    end subroutine set_constraints
+
+    !> @brief Evaluate the parametric curve at a single parameter value.
+    !!
+    !! @param[in,out] this  The fitted parametric curve.
+    !! @param[in]     u     Parameter value.
+    !! @param[out]    ierr  Optional error flag.
+    !! @return Point \f$ \mathbf{s}(u) \in \mathbb{R}^d \f$.
+    !!
+    !! @see curev
+    function curve_eval_one(this,u,ierr) result(y)
+        class(fitpack_parametric_curve), intent(inout)  :: this
+        real(FP_REAL),          intent(in)     :: u      ! Evaluation point
+        integer, optional,    intent(out)    :: ierr   ! Optional error flag
+        real(FP_REAL) :: y(this%idim)
+
+        real(FP_REAL) :: y1(this%idim,1)
+
+        y1 = curve_eval_many(this,[u],ierr)
+        y  = y1(:,1)
+
+    end function curve_eval_one
+
+    !> @brief Evaluate the parametric curve at multiple parameter values.
+    !!
+    !! @param[in,out] this  The fitted parametric curve.
+    !! @param[in]     u     Array of parameter values.
+    !! @param[out]    ierr  Optional error flag.
+    !! @return Points \f$ \mathbf{s}(u_i) \f$ as columns of a \f$ d \times m \f$ array.
+    !!
+    !! @see curev
+    function curve_eval_many(this,u,ierr) result(x)
+        class(fitpack_parametric_curve), intent(inout)  :: this
+        real(FP_REAL),          intent(in)     :: u(:)   ! Evaluation points (parameter value)
+        integer, optional,    intent(out)    :: ierr   ! Optional error flag
+        real(FP_REAL) :: x(this%idim,size(u))
+
+        integer :: npts,ier
+
+        npts = size(u)
+
+        !  subroutine curev evaluates in a number of points u(i),i=1,2,...,m a spline curve s(u)
+        !  of degree k and dimension idim, given in its b-spline representation.
+        !
+        !  input parameters:
+        !    idim : integer, giving the dimension of the spline curve.
+        !    t    : array,length n, which contains the position of the knots.
+        !    n    : integer, giving the total number of knots of s(u).
+        !    c    : array,length nc, which contains the b-spline coefficients.
+        !    nc   : integer, giving the total number of coefficients of s(u).
+        !    k    : integer, giving the degree of s(u).
+        !    u    : array,length m, which contains the points where s(u) must be evaluated.
+        !    m    : integer, giving the number of points where s(u) must be evaluated.
+        !    mx   : integer, giving the dimension of the array x. mx >= m*idim
+
+        call curev(idim=this%idim,&                ! dimension of the spline curve
+                   t=this%t,&                      ! the position of the knots
+                   n=this%knots,&                  ! total number of knots of s(u(x))
+                   c=this%c,&                      ! the b-spline coefficients
+                   nc=size(this%c),&               ! number of coefficients of s(u(x))
+                   k=this%order,&                  ! the degree of s(u(x))
+                   u=u,m=npts,&                    ! the points where s(u) must be evaluated.
+                   x=x,mx=size(x), &               ! the predictions
+                   ier=ier)
+
+        call fitpack_error_handling(ier,ierr,'evaluate 1d spline')
+
+    end function curve_eval_many
+
+    !> @brief Fit an interpolating parametric spline (\f$ s = 0 \f$) through the data points.
+    !!
+    !! @see parcur, clocur, concur
+    integer function interpolating_curve(this,order,reset_knots) result(ierr)
+        class(fitpack_parametric_curve), intent(inout) :: this
+        integer(FP_SIZE), optional, intent(in) :: order
+        logical, optional, intent(in) :: reset_knots
+
+        logical :: do_reset
+
+        do_reset = .true.; if (present(reset_knots)) do_reset = reset_knots
+        if (do_reset) this%iopt = IOPT_NEW_SMOOTHING
+
+        ierr = curve_fit_automatic_knots(this,smoothing=zero,order=order,keep_knots=.not.do_reset)
+
+    end function interpolating_curve
+
+    !> @brief Fit a least-squares parametric spline with fixed knots.
+    !!
+    !! @see parcur, clocur, concur
+    integer function parcur_fit_least_squares(this,smoothing,reset_knots) result(ierr)
+        class(fitpack_parametric_curve), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: smoothing
+        logical, optional, intent(in) :: reset_knots
+
+        logical :: do_reset
+
+        ! Optionally recompute knots via a smoothing fit first
+        do_reset = .false.; if (present(reset_knots)) do_reset = reset_knots
+        if (do_reset) then
+            this%iopt = IOPT_NEW_SMOOTHING
+            ierr = this%fit(smoothing)
+            if (.not.FITPACK_SUCCESS(ierr)) return
+        end if
+
+        this%iopt = IOPT_NEW_LEASTSQUARES
+        ierr = this%fit()
+    end function parcur_fit_least_squares
+
+    !> @brief Fit a smoothing parametric spline with automatic knot placement.
+    !!
+    !! Dispatches to parcur (open), clocur (closed), or concur (constrained) depending
+    !! on the dynamic type.
+    !!
+    !! @see parcur, clocur, concur
+    integer function curve_fit_automatic_knots(this,smoothing,order,keep_knots) result(ierr)
+        class(fitpack_parametric_curve), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: smoothing
+        integer(FP_SIZE), optional, intent(in) :: order
+        logical, optional, intent(in) :: keep_knots
+
+        integer :: loop,nit
+        real(FP_REAL) :: smooth_now(3)
+        logical :: do_guard
+
+        call get_smoothing(this%smoothing,smoothing,nit,smooth_now)
+
+        !> Ensure we start with new knots (unless caller wants to keep them)
+        do_guard = .true.; if (present(keep_knots)) do_guard = .not.keep_knots
+        if (do_guard .and. this%iopt==IOPT_OLD_FIT) this%iopt = IOPT_NEW_SMOOTHING
+
+        ! Set order
+        if (present(order)) this%order = order
+
+        do loop=1,nit
+
+            ! Set current smoothing
+            this%smoothing = smooth_now(loop)
+
+            ! Call fitting function
+            select type (curv => this)
+
+               type is (fitpack_closed_curve)
+
+                  call clocur(curv%iopt,                    &  ! option
+                              merge(1,0,curv%has_params),   &  ! have input parameter values?
+                              curv%idim,curv%m,             &  ! Number of dimensions
+                              curv%u,                       &  ! Parameter array
+                              size(curv%x),                 &  ! Unrolled size of x array
+                              curv%x,curv%w,                &  ! points and weights
+                              curv%order,curv%smoothing,    &  ! spline accuracy
+                              curv%nest,curv%knots,curv%t,  &  ! spline output
+                              size(curv%c),curv%c,curv%fp,  &  ! spline output
+                              curv%wrk,curv%lwrk,curv%iwrk, &  ! memory
+                              ierr)
+
+               type is (fitpack_parametric_curve)
+
+                  call parcur(curv%iopt,                    &  ! option
+                              merge(1,0,curv%has_params),   &  ! have input parameter values?
+                              curv%idim,curv%m,             &  ! Number of dimensions
+                              curv%u,                       &  ! Parameter array
+                              size(curv%x),                 &  ! Unrolled size of x array
+                              curv%x,curv%w,                &  ! points and weights
+                              curv%ubegin,curv%uend,        &  ! Parameter range
+                              curv%order,curv%smoothing,    &  ! spline accuracy
+                              curv%nest,curv%knots,curv%t,  &  ! spline output
+                              size(curv%c),curv%c,curv%fp,  &  ! spline output
+                              curv%wrk,curv%lwrk,curv%iwrk, &  ! memory
+                              ierr)
+
+               type is (fitpack_constrained_curve)
+
+                  call concur(curv%iopt,                    &  ! option
+                              curv%idim,curv%m,             &  ! Number of dimensions
+                              curv%u,                       &  ! Parameter array
+                              size(curv%x),                 &  ! Unrolled size of x array
+                              curv%x,curv%xx,curv%w,        &  ! points and weights
+                              curv%ib,curv%deriv_begin,size(curv%deriv_begin), & ! BEGIN point constraints
+                              curv%ie,curv%deriv_end  ,size(curv%deriv_end),   & ! ENDpoint constraints
+                              curv%order,curv%smoothing,    &  ! spline accuracy
+                              curv%nest,curv%knots,curv%t,  &  ! spline output
+                              size(curv%c),curv%c,          &  ! spline output
+                              size(curv%cp),curv%cp,        &  ! spline output
+                              curv%fp,                      &  ! spline output
+                              curv%wrk,curv%lwrk,curv%iwrk, &  ! memory
+                              ierr)
+
+            end select
+
+            ! After any successful call, parameters have surely been computed.
+            if (FITPACK_SUCCESS(ierr)) then
+                this%has_params = .true.
+                this%iopt       = IOPT_OLD_FIT
+            endif
+
+        end do
+
+    end function curve_fit_automatic_knots
+
+    !> @brief Evaluate the k-th derivative of the parametric curve at a single parameter value.
+    !!
+    !! @param[in,out] this   The fitted parametric curve.
+    !! @param[in]     u      Parameter value.
+    !! @param[in]     order  Derivative order (\f$ 0 \leq \text{order} \leq k \f$).
+    !! @param[out]    ierr   Optional error flag.
+    !! @return Derivative vector \f$ \mathbf{s}^{(\text{order})}(u) \in \mathbb{R}^d \f$.
+    !!
+    !! @see cualde
+    function curve_derivative(this, u, order, ierr) result(ddx)
+       class(fitpack_parametric_curve), intent(inout) :: this
+       real(FP_REAL),          intent(in)    :: u      ! Evaluation points (parameter)
+       integer,              intent(in)    :: order  ! Derivative order. 0=function; 1:k=i-th derivative
+       integer, optional,    intent(out)   :: ierr   ! Optional error flag
+       real(FP_REAL), dimension(this%idim)   :: ddx
+
+       integer :: ddx_order,ierr0
+
+       ! Choose order
+       ddx_order = max(0,order)
+
+       ierr0 = FITPACK_OK
+
+       !  subroutine cualde evaluates at the point u all the derivatives
+       !                (l)
+       !     d(j,l) = sj   (u) ,l=0,1,...,k, j=1,2,...,idim
+       !  of a spline curve s(u) of order k1 (degree k=k1-1) and dimension idim.
+       call cualde(this%idim,    & ! Number of dimensions
+                   this%t,       & ! Position of the knots
+                   this%knots,   & ! Number of knots
+                   this%c,       & ! Spline coefficients
+                   size(this%c), & ! Number of coefficients
+                   this%order+1, & ! k1 = order of s(u) (order = degree+1)
+                   u,            & ! Where the derivatives must be evaluated
+                   this%dd,      & ! Space for derivative evaluation
+                   size(this%dd),& ! Its size
+                   ierr0)          ! Output flag
+
+       ! Derivative order is 0:k <- extract derivative
+       ddx = this%dd(:,ddx_order)
+
+       call fitpack_error_handling(ierr0,ierr,'evaluate derivative')
+
+    end function curve_derivative
+
+    !> @brief Evaluate all derivatives \f$ \mathbf{s}^{(j)}(u) \f$ for \f$ j = 0, \ldots, k \f$.
+    !!
+    !! @param[in,out] this  The fitted parametric curve.
+    !! @param[in]     u     Parameter value.
+    !! @param[out]    ierr  Optional error flag.
+    !! @return Array \f$ (d \times (k+1)) \f$ of derivatives at `u`.
+    !!
+    !! @see cualde
+    function curve_all_derivatives(this, u, ierr) result(ddx)
+       class(fitpack_parametric_curve), intent(inout) :: this
+       real(FP_REAL),          intent(in)    :: u      ! Evaluation points (parameter)
+       integer, optional,    intent(out)   :: ierr   ! Optional error flag
+       real(FP_REAL), dimension(this%idim,0:this%order) :: ddx
+
+       integer :: ierr0
+
+       ierr0 = FITPACK_OK
+
+       !  subroutine cualde evaluates at the point u all the derivatives
+       !                (l)
+       !     d(j,l) = sj   (u) ,l=0,1,...,k, j=1,2,...,idim
+       !  of a spline curve s(u) of order k1 (degree k=k1-1) and dimension idim.
+       call cualde(this%idim,    & ! Number of dimensions
+                   this%t,       & ! Position of the knots
+                   this%knots,   & ! Number of knots
+                   this%c,       & ! Spline coefficients
+                   size(this%c), & ! Number of coefficients
+                   this%order+1, & ! k1 = order of s(u) (order = degree+1)
+                   u,            & ! Where the derivatives must be evaluated
+                   this%dd,      & ! Space for derivative evaluation
+                   size(this%dd),& ! Its size
+                   ierr0)          ! Output flag
+
+       ! Derivative order is 0:k <- extract derivative
+       ddx = this%dd(:,0:this%order)
+
+       call fitpack_error_handling(ierr0,ierr,'evaluate all derivatives')
+
+    end function curve_all_derivatives
+
+    !> @brief Compute default parameter values from cumulative chord lengths.
+    !!
+    !! Sets \f$ u_i \f$ to normalized cumulative Euclidean distances between consecutive
+    !! data points, so that \f$ u_1 = 0 \f$ and \f$ u_m = 1 \f$.
+    subroutine set_default_parameters(this)
+        class(fitpack_parametric_curve), intent(inout) :: this
+
+        integer :: i,m
+
+        associate(u=>this%u,x=>this%x)
+
+        ! Number of points
+        m = size(this%x,dim=2)
+
+        ! Point coordinates are stored in x(:), offset by idim values
+        u(1) = zero
+        do i=2,m
+           u(i) = u(i-1) + norm2(x(:,i)-x(:,i-1))
+        end do
+        if (u(m)>zero) u(2:) = u(2:)/u(m)
+        u(m)  = one
+
+        this%ubegin = u(1)
+        this%uend   = u(m)
+
+        this%has_params = .true.
+
+        endassociate
+
+    end subroutine set_default_parameters
+
+    !> @brief Evaluate the k-th derivative at multiple parameter values.
+    !!
+    !! @param[in,out] this   The fitted parametric curve.
+    !! @param[in]     u      Array of parameter values.
+    !! @param[in]     order  Derivative order.
+    !! @param[out]    ierr   Optional error flag.
+    !! @return Array \f$ (d \times m) \f$ of derivative vectors.
+    !!
+    !! @see cualde
+    function curve_derivatives(this, u, order, ierr) result(ddx)
+       class(fitpack_parametric_curve), intent(inout)  :: this
+       real(FP_REAL),          intent(in)     :: u(:)   ! Evaluation points (parameter)
+       integer,              intent(in)     :: order  ! Derivative order. Default 1
+       integer, optional,    intent(out)    :: ierr   ! Optional error flag
+       real(FP_REAL), dimension(this%idim,size(u)) :: ddx
+
+       integer :: i,ierr0
+
+       do i=1,size(u)
+          ddx(:,i) = curve_derivative(this,u(i),order,ierr0)
+          if (.not.FITPACK_SUCCESS(ierr0)) exit
+       end do
+
+       if (present(ierr)) ierr = ierr0
+
+    end function curve_derivatives
+
+
+    ! =================================================================================================
+    ! PARALLEL COMMUNICATION: fitpack_parametric_curve
+    ! =================================================================================================
+
+    !> @brief Return the communication buffer size for the parametric curve.
+    elemental integer(FP_SIZE) function parcur_comm_size(this)
+        class(fitpack_parametric_curve), intent(in) :: this
+        ! Base fields + parametric-specific scalars:
+        ! m, idim, order, knots, nest, ubegin, uend, has_params (8 values)
+        parcur_comm_size = this%core_comm_size() &
+                         + 8 &
+                         + FP_COMM_SIZE(this%x) &
+                         + FP_COMM_SIZE(this%u) &
+                         + FP_COMM_SIZE(this%sp) &
+                         + FP_COMM_SIZE(this%w) &
+                         + FP_COMM_SIZE(this%t) &
+                         + FP_COMM_SIZE(this%dd)
+    end function parcur_comm_size
+
+    !> @brief Pack parametric curve data into a communication buffer.
+    pure subroutine parcur_comm_pack(this, buffer)
+        class(fitpack_parametric_curve), intent(in) :: this
+        real(FP_COMM), intent(out) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        call this%core_comm_pack(buffer)
+        pos = this%core_comm_size() + 1
+
+        buffer(pos) = real(this%m, FP_COMM);              pos = pos + 1
+        buffer(pos) = real(this%idim, FP_COMM);           pos = pos + 1
+        buffer(pos) = real(this%order, FP_COMM);          pos = pos + 1
+        buffer(pos) = real(this%knots, FP_COMM);          pos = pos + 1
+        buffer(pos) = real(this%nest, FP_COMM);           pos = pos + 1
+        buffer(pos) = this%ubegin;                         pos = pos + 1
+        buffer(pos) = this%uend;                           pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%has_params), FP_COMM); pos = pos + 1
+
+        call FP_COMM_PACK(this%x, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%x)
+        call FP_COMM_PACK(this%u, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%u)
+        call FP_COMM_PACK(this%sp, buffer(pos:));  pos = pos + FP_COMM_SIZE(this%sp)
+        call FP_COMM_PACK(this%w, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%w)
+        call FP_COMM_PACK(this%t, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%t)
+        call FP_COMM_PACK(this%dd, buffer(pos:))
+    end subroutine parcur_comm_pack
+
+    !> @brief Expand parametric curve data from a communication buffer.
+    pure subroutine parcur_comm_expand(this, buffer)
+        class(fitpack_parametric_curve), intent(inout) :: this
+        real(FP_COMM), intent(in) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        call this%core_comm_expand(buffer)
+        pos = this%core_comm_size() + 1
+
+        this%m     = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%idim  = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%order = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%knots = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%nest  = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%ubegin    = buffer(pos);              pos = pos + 1
+        this%uend      = buffer(pos);              pos = pos + 1
+        this%has_params = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+
+        call FP_COMM_EXPAND(this%x, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%x)
+        call FP_COMM_EXPAND(this%u, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%u)
+        call FP_COMM_EXPAND(this%sp, buffer(pos:));  pos = pos + FP_COMM_SIZE(this%sp)
+        call FP_COMM_EXPAND(this%w, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%w)
+        call FP_COMM_EXPAND(this%t, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%t)
+        call FP_COMM_EXPAND(this%dd, buffer(pos:))
+    end subroutine parcur_comm_expand
+
+    ! =================================================================================================
+    ! PARALLEL COMMUNICATION: fitpack_constrained_curve (overrides parametric)
+    ! =================================================================================================
+
+    !> @brief Return the communication buffer size for the constrained curve.
+    elemental integer(FP_SIZE) function concur_comm_size(this)
+        class(fitpack_constrained_curve), intent(in) :: this
+        ! Parent parametric comm + constrained-specific: ib, ie (2 scalars)
+        ! + deriv_begin(:,:), deriv_end(:,:), xx(:,:), cp(:,:) (4 arrays)
+        concur_comm_size = parcur_comm_size(this) &
+                         + 2 &
+                         + FP_COMM_SIZE(this%deriv_begin) &
+                         + FP_COMM_SIZE(this%deriv_end) &
+                         + FP_COMM_SIZE(this%xx) &
+                         + FP_COMM_SIZE(this%cp)
+    end function concur_comm_size
+
+    !> @brief Pack constrained curve data into a communication buffer.
+    pure subroutine concur_comm_pack(this, buffer)
+        class(fitpack_constrained_curve), intent(in) :: this
+        real(FP_COMM), intent(out) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        ! Pack parent fields first
+        call parcur_comm_pack(this, buffer)
+        pos = parcur_comm_size(this) + 1
+
+        buffer(pos) = real(this%ib, FP_COMM); pos = pos + 1
+        buffer(pos) = real(this%ie, FP_COMM); pos = pos + 1
+
+        call FP_COMM_PACK(this%deriv_begin, buffer(pos:)); pos = pos + FP_COMM_SIZE(this%deriv_begin)
+        call FP_COMM_PACK(this%deriv_end, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%deriv_end)
+        call FP_COMM_PACK(this%xx, buffer(pos:));          pos = pos + FP_COMM_SIZE(this%xx)
+        call FP_COMM_PACK(this%cp, buffer(pos:))
+    end subroutine concur_comm_pack
+
+    !> @brief Expand constrained curve data from a communication buffer.
+    pure subroutine concur_comm_expand(this, buffer)
+        class(fitpack_constrained_curve), intent(inout) :: this
+        real(FP_COMM), intent(in) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        ! Expand parent fields first
+        call parcur_comm_expand(this, buffer)
+        pos = parcur_comm_size(this) + 1
+
+        this%ib = nint(buffer(pos), FP_SIZE); pos = pos + 1
+        this%ie = nint(buffer(pos), FP_SIZE); pos = pos + 1
+
+        call FP_COMM_EXPAND(this%deriv_begin, buffer(pos:)); pos = pos + FP_COMM_SIZE(this%deriv_begin)
+        call FP_COMM_EXPAND(this%deriv_end, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%deriv_end)
+        call FP_COMM_EXPAND(this%xx, buffer(pos:));          pos = pos + FP_COMM_SIZE(this%xx)
+        call FP_COMM_EXPAND(this%cp, buffer(pos:))
+    end subroutine concur_comm_expand
+
+end module fitpack_parametric_curves

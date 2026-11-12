@@ -1,0 +1,47 @@
+The Meson build system
+Version: 1.12.1
+Source dir: C:/Users/douglas/Projects/imsl/third_party/galahad
+Build dir: C:/Users/douglas/Projects/imsl/third_party/galahad/build-bnls
+Build type: native build
+Project name: GALAHAD
+Project version: 5.5.3
+Fortran compiler for the host machine: gfortran (gcc 16.2.0 "GNU Fortran (Rev6, Built by MSYS2 project) 16.2.0")
+Fortran linker for the host machine: gfortran ld.bfd 2.47.20260726
+C compiler for the host machine: cc (gcc 16.2.0 "cc (Rev6, Built by MSYS2 project) 16.2.0")
+C linker for the host machine: cc ld.bfd 2.47.20260726
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Program gfortran found: YES (C:\msys64\ucrt64\bin/gfortran.exe)
+Program python3 found: YES (C:/msys64/ucrt64/bin/python.exe)
+Library openblas found: YES
+Library openblas found: YES
+Library hsl_subset found: NO
+Library cutest_single found: NO
+Library cutest_double found: NO
+Library cutest_quadruple found: NO
+Library wsmp found: NO
+Library pardiso found: NO
+Library pastixf found: NO
+Library spmf found: NO
+Library smumps found: NO
+Library dmumps found: NO
+Library asl found: NO
+Library m found: YES
+Library quadmath found: YES
+Build targets in project: 1
+
+GALAHAD 5.5.3
+
+  User defined options
+    binaries       : false
+    ciface         : false
+    default_library: static
+    double         : true
+    examples       : false
+    libblas        : openblas
+    liblapack      : openblas
+    pythoniface    : false
+    single         : false
+    tests          : false
+
+Found ninja-1.13.2 at C:\msys64\ucrt64\bin/ninja.exe

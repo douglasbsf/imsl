@@ -1,0 +1,89 @@
+name: Build and Deploy Documents
+
+on: [push, pull_request]
+
+env:
+  LANG: "en_US.UTF-8"
+  LC_ALL: "en_US.UTF-8"
+  PIP_DISABLE_PIP_VERSION_CHECK: "ON"
+  PIP_NO_CLEAN: "ON"
+  PIP_PREFER_BINARY: "ON"
+  TZ: "UTC"
+
+jobs:
+  Build-Docs:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # tags are needed by git describe
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          pip install -r doc/requirements.txt
+          python --version
+          sphinx-build --version
+          fypp --version
+
+      - name: Build Docs
+        run: |
+          sphinx-build -W -D release="$(git describe --always)" -b html doc doc/_build/html
+
+      - name: Upload Documentation
+        uses: actions/upload-artifact@v7
+        with:
+          name: sphinx-html
+          path: ./doc/_build/html/
+
+  Deploy-Docs:
+    if: github.event_name == 'push' && github.repository == 'fortran-lang/stdlib' && ( startsWith( github.ref, 'refs/tags/' ) || github.ref == 'refs/heads/master' )
+    needs: Build-Docs
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Documentation
+        uses: actions/download-artifact@v8
+        with:
+          name: sphinx-html
+          path: ./doc-html
+
+      - name: Deploy Docs
+        uses: peaceiris/actions-gh-pages@v4.1.0
+        with:
+          deploy_key: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          cname: 'stdlib.fortran-lang.org'
+          external_repository: fortran-lang/stdlib-docs
+          publish_dir: ./doc-html
+          publish_branch: master
+          allow_empty_commit: true
+          force_orphan: false
+          commit_message: "From https://github.com/${{ github.repository }}/commit/${{ github.sha }} ${{ github.ref }}"
+
+  # Opt-in preview on forks: set the repository variable DOCS_PREVIEW to 'true'
+  # to publish every push to the fork's gh-pages branch.
+  Deploy-Docs-Preview:
+    if: github.event_name == 'push' && github.repository != 'fortran-lang/stdlib' && vars.DOCS_PREVIEW == 'true'
+    needs: Build-Docs
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Documentation
+        uses: actions/download-artifact@v8
+        with:
+          name: sphinx-html
+          path: ./doc-html
+
+      - name: Deploy Docs Preview
+        uses: peaceiris/actions-gh-pages@v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./doc-html
+          publish_branch: gh-pages

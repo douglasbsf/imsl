@@ -1,0 +1,573 @@
+! **************************************************************************************************
+!                                ____________________  ___   ________ __
+!                               / ____/  _/_  __/ __ \/   | / ____/ //_/
+!                              / /_   / /  / / / /_/ / /| |/ /   / ,<
+!                             / __/ _/ /  / / / ____/ ___ / /___/ /| |
+!                            /_/   /___/ /_/ /_/   /_/  |_\____/_/ |_|
+!
+!                                     A Curve Fitting Package
+!
+!   Refactored by Federico Perini, 10/6/2022
+!   Based on the netlib library by Paul Dierckx
+!
+!   References :
+!     - C. De Boor, "On calculating with b-splines", J Approx Theory 6 (1972) 50-62
+!     - M. G. Cox, "The numerical evaluation of b-splines", J Inst Maths Applics 10 (1972) 134-149
+!     - P. Dierckx, "Curve and surface fitting with splines", Monographs on numerical analysis,
+!                    Oxford university press, 1993.
+!
+! **************************************************************************************************
+!> @brief OOP wrapper for bivariate spline fitting on the sphere to gridded data.
+!!
+!! Provides fitpack_grid_sphere, a derived type for fitting bicubic splines to data given
+!! on a latitude-longitude grid over the sphere. The colatitude grid
+!! \f$ u_i \in [0, \pi] \f$ (\f$ i = 1, \ldots, m_u \f$) and the \f$ 2\pi \f$-periodic
+!! longitude grid \f$ v_j \f$ (\f$ j = 1, \ldots, m_v \f$) define the sampling.
+!! Boundary conditions at the north (\f$ u = 0 \f$) and south (\f$ u = \pi \f$) poles
+!! can be configured for function value, exactness, continuity order, and gradient
+!! vanishing. Uses the spgrid core routine.
+!!
+!! @see Dierckx, Ch. 11, §11.2 (pp. 263–269); spgrid
+module fitpack_gridded_sphere
+    use fitpack_core
+    use fitpack_fitters
+    implicit none
+    private
+
+    public :: fitpack_grid_sphere
+
+    !> @brief Bicubic spline fitter for data on a latitude-longitude grid.
+    !!
+    !! Stores the colatitude grid \f$ u_i \f$, the \f$ 2\pi \f$-periodic longitude grid
+    !! \f$ v_j \f$, gridded function values \f$ z(j, i) \f$, and the fitted B-spline
+    !! representation. North and south pole boundary conditions (function value,
+    !! continuity order, gradient vanishing) are independently configurable.
+    !!
+    !! @see Dierckx, Ch. 11, §11.2 (pp. 263–269)
+    type, extends(fitpack_fitter) :: fitpack_grid_sphere
+
+        !> Coordinates of the data points in grid coordinates (u,v) and domain size
+        real(FP_REAL), allocatable :: u(:),v(:)
+
+        !> Function values at the data points z(iv,iu) note (v,u) indices
+        real(FP_REAL), allocatable :: z(:,:)
+
+        !> North pole BC (u=0, index=1), South pole BC (u=pi, index=2)
+        real(FP_REAL) :: pole_z0(2)      = zero      ! Function value at north pole
+        logical     :: pole_present(2) = .false.   ! Is pole data provided?
+        logical     :: pole_exct(2)    = .false.   ! Should that be treated as exact
+        integer     :: pole_continuity(2) = 1      ! Continuity at pole BC (C0 or C1)
+        logical     :: pole_zero_grad(2) = .true.  ! Should gradients vanish
+
+        !> Node weights are not allowed
+
+        ! Estimated and actual number of knots and their allocations
+        integer :: nest(2)  = 0
+        integer :: nmax     = 0
+        ! (lwrk/wrk inherited from fitpack_fitter)
+
+        ! Knots
+        integer     :: knots(2) = 0
+        real(FP_REAL), allocatable :: t(:,:) ! Knot locations (:,1)=x; (:,2)=y
+
+
+
+        contains
+
+           !> Clean memory
+           procedure :: destroy       => spgrid_destroy
+
+           !> Set new points
+           procedure :: new_points    => spgrid_new_points
+
+           !> Generate new fit
+           procedure :: new_fit       => spgrid_new_fit
+
+           !> Set pole BCs
+           procedure :: BC_north_pole
+           procedure :: BC_south_pole
+
+           !> Generate/update fitting curve, with optional smoothing
+           procedure :: fit           => spgrid_fit_automatic_knots
+           procedure :: least_squares => spgrid_fit_least_squares
+           procedure :: interpolate   => spgrid_fit_interpolating
+
+           !> Evaluate gridded domain at given x,y coordinates
+           procedure, private :: gridded_eval_one
+           procedure, private :: gridded_eval_many
+           generic :: eval => gridded_eval_one,gridded_eval_many
+
+           !> Parallel communication interface
+           procedure :: comm_size   => gridsphere_comm_size
+           procedure :: comm_pack   => gridsphere_comm_pack
+           procedure :: comm_expand => gridsphere_comm_expand
+
+           !> Write to disk
+           procedure :: write => gridded_to_disk
+
+    end type fitpack_grid_sphere
+
+    interface fitpack_grid_sphere
+       module procedure spgrid_new_from_points
+    end interface fitpack_grid_sphere
+
+    contains
+
+    !> @brief Fit a least-squares gridded spherical surface with fixed knots.
+    !!
+    !! @param[in] smoothing    Optional smoothing factor for the reset pass.
+    !! @param[in] reset_knots  If `.true.`, recompute knots via a smoothing fit first.
+    !! @return Error flag.
+    !!
+    !! @see spgrid
+    integer function spgrid_fit_least_squares(this,smoothing,reset_knots) result(ierr)
+       class(fitpack_grid_sphere), intent(inout) :: this
+       real(FP_REAL), optional, intent(in) :: smoothing
+       logical, optional, intent(in) :: reset_knots
+
+       logical :: do_reset
+
+       ! Optionally recompute knots via a smoothing fit first
+       do_reset = .false.; if (present(reset_knots)) do_reset = reset_knots
+       if (do_reset) then
+           this%iopt = IOPT_NEW_SMOOTHING
+           ierr = this%fit(smoothing)
+           if (.not.FITPACK_SUCCESS(ierr)) return
+       end if
+
+       this%iopt = IOPT_NEW_LEASTSQUARES
+       ierr = this%fit()
+
+    end function spgrid_fit_least_squares
+
+    !> @brief Fit an interpolating gridded spherical surface (\f$ s = 0 \f$).
+    !!
+    !! @param[in] reset_knots  If `.true.` (default), start with fresh knot placement.
+    !! @return Error flag.
+    !!
+    !! @see spgrid
+    integer function spgrid_fit_interpolating(this,reset_knots) result(ierr)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        logical, optional, intent(in) :: reset_knots
+
+        logical :: do_reset
+
+        do_reset = .true.; if (present(reset_knots)) do_reset = reset_knots
+        if (do_reset) this%iopt = IOPT_NEW_SMOOTHING
+        ierr = spgrid_fit_automatic_knots(this,smoothing=zero,keep_knots=.not.do_reset)
+
+    end function spgrid_fit_interpolating
+
+
+    !> @brief Fit a smoothing spherical surface on a lat-lon grid with automatic knot placement.
+    !!
+    !! Iterates over the smoothing schedule, calling the spgrid core routine to fit a
+    !! bicubic spline on the sphere grid. Pole boundary conditions (continuity order,
+    !! gradient vanishing, exact data) are applied as configured.
+    !!
+    !! @param[in] smoothing   Smoothing factor (\f$ s \ge 0 \f$); default uses stored value.
+    !! @param[in] keep_knots  If `.true.`, reuse the current knot set.
+    !! @return Error flag.
+    !!
+    !! @see spgrid
+    integer function spgrid_fit_automatic_knots(this,smoothing,keep_knots) result(ierr)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: smoothing
+        logical, optional, intent(in) :: keep_knots
+
+        integer :: loop,nit,iopt(3),ider(4)
+        real(FP_REAL) :: smooth_now(3)
+        logical :: do_guard
+
+        call get_smoothing(this%smoothing,smoothing,nit,smooth_now)
+
+        !> Ensure we start with new knots (unless caller wants to keep them)
+        do_guard = .true.; if (present(keep_knots)) do_guard = .not.keep_knots
+        if (do_guard .and. this%iopt==IOPT_OLD_FIT) this%iopt = IOPT_NEW_SMOOTHING
+
+        do loop=1,nit
+
+            ! Set current smoothing
+            this%smoothing = smooth_now(loop)
+
+            ! [Continuation, North pole continuity, South pole continuity]
+            iopt = [this%iopt,this%pole_continuity]
+
+            ! [Fit z0 exactly, z0 zero gradient BC]
+            ider([1,3]) = merge(merge(1,0,this%pole_exct),-1,this%pole_present)
+            ider([2,4]) = merge(1,0,this%pole_zero_grad .and. this%pole_continuity>0)
+
+            call spgrid(iopt,                            &  ! Continuation and BCs
+                        ider,                            &  ! Origin point behavior
+                        size(this%u),this%u,             &  ! U grid
+                        size(this%v),this%v,             &  ! V grid
+                        this%z,                          &  ! Sphere radius
+                        this%pole_z0(1),this%pole_z0(2), &  ! Data value at the poles
+                        this%smoothing,                  &  ! Smoothing parameter
+                        this%nest(1),this%nest(2),       &  ! Knot space
+                        this%knots(1),this%t(:,1),       &  ! u(0:pi) knots (out)
+                        this%knots(2),this%t(:,2),       &  ! v(-pi:pi) knots (out)
+                        this%c,this%fp,                  &  ! Spline representation and MSE
+                        this%wrk,this%lwrk,              &  ! memory
+                        this%iwrk,this%liwrk,            &  ! memory
+                        ierr)                            ! Error flag
+
+            ! If fit was successful, set iopt to "old"
+            if (FITPACK_SUCCESS(ierr)) this%iopt = IOPT_OLD_FIT
+
+        end do
+
+    end function spgrid_fit_automatic_knots
+
+    !> @brief Release all allocated memory and reset the gridded sphere fitter to its default state.
+    elemental subroutine spgrid_destroy(this)
+       class(fitpack_grid_sphere), intent(inout) :: this
+       integer :: ierr
+
+       call this%destroy_base()
+
+       this%pole_z0         = zero
+       this%pole_present    = .false.
+       this%pole_exct       = .false.
+       this%pole_continuity = 1
+       this%pole_zero_grad  = .false.
+
+       deallocate(this%u,stat=ierr)
+       deallocate(this%v,stat=ierr)
+       deallocate(this%z,stat=ierr)
+       deallocate(this%t,stat=ierr)
+
+       this%nest      = 0
+       this%nmax      = 0
+       this%knots     = 0
+
+    end subroutine spgrid_destroy
+
+    !> @brief Load new gridded spherical data and allocate working storage.
+    !!
+    !! @param[in] u  Colatitude grid \f$ u_i \in [0, \pi] \f$.
+    !! @param[in] v  Longitude grid \f$ v_j \f$ (\f$ 2\pi \f$-periodic).
+    !! @param[in] z  Function values \f$ z(j, i) \f$, dimensioned `(size(v), size(u))`.
+    subroutine spgrid_new_points(this,u,v,z)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        real(FP_REAL), intent(in) :: u(:),v(:) ! sphere domain
+        real(FP_REAL), intent(in) :: z(size(v),size(u)) ! Gridded values
+
+        integer :: clen,m(2),q
+        integer, parameter :: SAFE = 2
+
+        associate(nest=>this%nest,nmax=>this%nmax)
+
+        call this%destroy()
+
+        m = [size(u),size(v)] ! /= shape(z), == shape(transpose(z))
+
+        ! Copy grid and data
+        allocate(this%u(m(1)),source=u)
+        allocate(this%v(m(2)),source=v)
+        allocate(this%z(m(2),m(1)),source=z)
+
+        ! Reset run flag
+        this%iopt = IOPT_NEW_SMOOTHING
+
+        ! Knot space
+        nest = SAFE*(m + 8)
+        nmax = maxval(nest)
+        allocate(this%t(nmax,2),source=zero)
+
+        ! Spline coefficients
+        clen = product(nest-4) ! nest-order-1, fixed order==3
+        allocate(this%c(clen),source=zero)
+
+        this%fp = zero
+
+        ! Working space
+        this%liwrk = 5+sum(m+nest)
+        allocate(this%iwrk(this%liwrk),source=0)
+
+        ! wrk
+        q = max(m(2)+nest(2),nest(1))
+        this%lwrk = 12+nest(1)*(m(2)+nest(2)+3)+nest(2)*24+4*m(1)+8*m(2)+q
+        allocate(this%wrk(this%lwrk),source=zero)
+
+        endassociate
+
+    end subroutine spgrid_new_points
+
+    !> @brief Construct a fitpack_grid_sphere from gridded data and perform an initial fit.
+    !!
+    !! @param[in]  u     Colatitude grid \f$ u_i \in [0, \pi] \f$.
+    !! @param[in]  v     Longitude grid \f$ v_j \f$ (\f$ 2\pi \f$-periodic).
+    !! @param[in]  z     Function values \f$ z(j, i) \f$, dimensioned `(size(v), size(u))`.
+    !! @param[out] ierr  Optional error flag; if absent, halts on error.
+    !!
+    !! @see spgrid
+    type(fitpack_grid_sphere) function spgrid_new_from_points(u,v,z,ierr) result(this)
+        real(FP_REAL), intent(in) :: u(:),v(:) ! sphere domain
+        real(FP_REAL), intent(in) :: z(size(v),size(u)) ! Gridded values
+        integer, optional, intent(out) :: ierr
+
+        integer :: ierr0
+
+        ierr0 = this%new_fit(u,v,z)
+
+        ! Error handling
+        call fitpack_error_handling(ierr0,ierr,'new gridded surface fit')
+
+    end function spgrid_new_from_points
+
+    !> @brief Load new gridded data and fit a smoothing spherical spline in one call.
+    !!
+    !! @param[in] u          Colatitude grid.
+    !! @param[in] v          Longitude grid.
+    !! @param[in] z          Gridded function values.
+    !! @param[in] smoothing  Optional smoothing factor.
+    !! @return Error flag.
+    !!
+    !! @see spgrid
+    integer function spgrid_new_fit(this,u,v,z,smoothing)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        real(FP_REAL), intent(in) :: u(:),v(:) ! sphere domain
+        real(FP_REAL), intent(in) :: z(size(v),size(u)) ! Gridded values
+        real(FP_REAL), optional, intent(in) :: smoothing
+
+        call this%new_points(u,v,z)
+
+        spgrid_new_fit = this%fit(smoothing)
+
+    end function spgrid_new_fit
+
+    !> @brief Evaluate the gridded spherical spline on a grid of colatitude and longitude values.
+    !!
+    !! Returns \f$ f(j,i) = s(u_i, v_j) \f$ for all combinations of the input vectors
+    !! (tensor-product evaluation).
+    !!
+    !! @param[in]  u     Colatitude evaluation points.
+    !! @param[in]  v     Longitude evaluation points.
+    !! @param[out] ierr  Optional error flag.
+    !! @return Grid of spline values, dimensioned `(size(v), size(u))`.
+    !!
+    !! @see bispev
+    function gridded_eval_many(this,u,v,ierr) result(f)
+        class(fitpack_grid_sphere), intent(inout)  :: this
+        real(FP_REAL), intent(in) :: u(:),v(:)  ! Evaluation grid points (polar coordinates)
+        real(FP_REAL) :: f(size(v),size(u))
+        integer, optional, intent(out) :: ierr ! Optional error flag
+
+        integer :: ier
+
+        !  evaluation of the spline approximation.
+        !  Assume cubic spline in both directions
+
+        ! On successful exit r(j,i) contains the value of s(x,y) at point
+        ! (x(i),y(j)),i=1,...,mx; j=1,...,my.
+        call bispev(tx=this%t(:,1),nx=this%knots(1), &
+                    ty=this%t(:,2),ny=this%knots(2), &
+                    c=this%c, &
+                    kx=3,ky=3, &
+                    x=u,mx=size(u), &
+                    y=v,my=size(v), &
+                    z=f, & ! output in format (j,i)
+                    wrk=this%wrk,lwrk=this%lwrk, &
+                    iwrk=this%iwrk,kwrk=this%liwrk,ier=ier)
+
+        call fitpack_error_handling(ier,ierr,'evaluate gridded surface')
+
+    end function gridded_eval_many
+
+    !> @brief Evaluate the gridded spherical spline at a single point.
+    !!
+    !! @param[in]  u     Colatitude \f$ u \in [0, \pi] \f$.
+    !! @param[in]  v     Longitude \f$ v \f$.
+    !! @param[out] ierr  Optional error flag.
+    !! @return Spline value \f$ s(u, v) \f$.
+    !!
+    !! @see bispev
+    real(FP_REAL) function gridded_eval_one(this,u,v,ierr) result(f)
+        class(fitpack_grid_sphere), intent(inout)  :: this
+        real(FP_REAL),          intent(in)      :: u,v ! Evaluation point (grid polar coordinates)
+        integer, optional,    intent(out)     :: ierr      ! Optional error flag
+        real(FP_REAL) :: f1(1,1)
+
+        f1 = gridded_eval_many(this,[u],[v],ierr)
+        f  = f1(1,1)
+
+    end function gridded_eval_one
+
+    !> @brief Set boundary conditions at one pole of the sphere.
+    !!
+    !! Configures the function value, exactness, differentiability, and gradient vanishing
+    !! constraints at the specified pole (1 = north, 2 = south).
+    !!
+    !! @param[in] pole            Pole index (1 = north \f$ u=0 \f$, 2 = south \f$ u=\pi \f$).
+    !! @param[in] z0              Optional function value at the pole.
+    !! @param[in] exact           Treat z0 as an exact constraint.
+    !! @param[in] differentiable  Require C1 continuity at the pole.
+    !! @param[in] zero_grad       Require vanishing gradient at the pole.
+    subroutine pole_BC(this,pole,z0,exact,differentiable,zero_grad)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        integer, intent(in) :: pole
+        real(FP_REAL), optional, intent(in) :: z0 ! Function value at origin
+        logical, optional, intent(in) :: exact,differentiable,zero_grad
+
+        this%pole_present(pole) = present(z0)
+        if (present(exact)) then
+            this%pole_exct(pole) = exact
+        else
+            this%pole_exct(pole) = .false.
+        endif
+
+        if (present(differentiable)) then
+            this%pole_continuity(pole) = merge(1,0,differentiable)
+        else
+            this%pole_continuity(pole) = 0
+        end if
+
+        if (present(zero_grad)) then
+            this%pole_zero_grad(pole) = zero_grad
+        else
+            this%pole_zero_grad = .true.
+        end if
+
+    end subroutine pole_BC
+
+    !> @brief Set boundary conditions at the north pole (\f$ u = 0 \f$).
+    subroutine BC_north_pole(this,z0,exact,differentiable,zero_grad)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: z0 ! Function value at origin
+        logical, optional, intent(in) :: exact,differentiable,zero_grad
+        call pole_BC(this,1,z0,exact,differentiable,zero_grad)
+    end subroutine BC_north_pole
+
+    !> @brief Set boundary conditions at the south pole (\f$ u = \pi \f$).
+    subroutine BC_south_pole(this,z0,exact,differentiable,zero_grad)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        real(FP_REAL), optional, intent(in) :: z0 ! Function value at origin
+        logical, optional, intent(in) :: exact,differentiable,zero_grad
+        call pole_BC(this,1,z0,exact,differentiable,zero_grad)
+    end subroutine BC_south_pole
+
+    !> @brief Write gridded spherical data to a formatted text file.
+    !!
+    !! Outputs a table with colatitude grid values in rows and longitude grid values
+    !! in columns, suitable for external plotting or inspection.
+    !!
+    !! @param[in] fileName  Output file path.
+    subroutine gridded_to_disk(this,fileName)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        character(*), intent(in) :: fileName
+
+        integer :: iunit,ierr,j,i
+
+        open(newunit=iunit,file=fileName,action='write',form='formatted',iostat=ierr)
+
+        ! Write header
+        write(iunit,1) 'u',(named('v',j)       ,j=1,size(this%v))
+        write(iunit,1) ' ',(numbered(this%v(j)),j=1,size(this%v))
+
+        do i=1,size(this%u)
+            write(iunit,2) this%u(i),this%z(:,i)
+        end do
+
+        close(iunit)
+
+        1 format('!',a12,*(1x,a12))
+        2 format(*(1x,1pe12.5))
+
+        contains
+
+           character(12) function named(name,i)
+              character(*), intent(in) :: name
+              integer, intent(in) :: i
+              write(named,"(a,'_',i0)") name,i
+              named = adjustr(named)
+           end function named
+           character(12) function numbered(v)
+              real(FP_REAL), intent(in) :: v
+              write(numbered,"(1pe12.5)") v
+              numbered = adjustr(numbered)
+           end function numbered
+
+    end subroutine gridded_to_disk
+
+    ! =================================================================================================
+    ! PARALLEL COMMUNICATION
+    ! =================================================================================================
+
+    !> @brief Return the communication buffer size for parallel pack/expand.
+    elemental integer(FP_SIZE) function gridsphere_comm_size(this)
+        class(fitpack_grid_sphere), intent(in) :: this
+        ! Base fields + grid-sphere-specific scalars:
+        ! pole_z0(2), pole_present(2), pole_exct(2), pole_continuity(2), pole_zero_grad(2),
+        ! nest(2), nmax, knots(2) = 15
+        gridsphere_comm_size = this%core_comm_size() &
+                             + 15 &
+                             + FP_COMM_SIZE(this%u) &
+                             + FP_COMM_SIZE(this%v) &
+                             + FP_COMM_SIZE(this%z) &
+                             + FP_COMM_SIZE(this%t)
+    end function gridsphere_comm_size
+
+    !> @brief Pack the gridded sphere fitter state into a communication buffer.
+    pure subroutine gridsphere_comm_pack(this, buffer)
+        class(fitpack_grid_sphere), intent(in) :: this
+        real(FP_COMM), intent(out) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        call this%core_comm_pack(buffer)
+        pos = this%core_comm_size() + 1
+
+        buffer(pos) = this%pole_z0(1);                                      pos = pos + 1
+        buffer(pos) = this%pole_z0(2);                                      pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%pole_present(1)), FP_COMM);       pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%pole_present(2)), FP_COMM);       pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%pole_exct(1)), FP_COMM);          pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%pole_exct(2)), FP_COMM);          pos = pos + 1
+        buffer(pos) = real(this%pole_continuity(1), FP_COMM);               pos = pos + 1
+        buffer(pos) = real(this%pole_continuity(2), FP_COMM);               pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%pole_zero_grad(1)), FP_COMM);     pos = pos + 1
+        buffer(pos) = real(merge(1,0,this%pole_zero_grad(2)), FP_COMM);     pos = pos + 1
+        buffer(pos) = real(this%nest(1), FP_COMM);                          pos = pos + 1
+        buffer(pos) = real(this%nest(2), FP_COMM);                          pos = pos + 1
+        buffer(pos) = real(this%nmax, FP_COMM);                             pos = pos + 1
+        buffer(pos) = real(this%knots(1), FP_COMM);                         pos = pos + 1
+        buffer(pos) = real(this%knots(2), FP_COMM);                         pos = pos + 1
+
+        call FP_COMM_PACK(this%u, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%u)
+        call FP_COMM_PACK(this%v, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%v)
+        call FP_COMM_PACK(this%z, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%z)
+        call FP_COMM_PACK(this%t, buffer(pos:))
+    end subroutine gridsphere_comm_pack
+
+    !> @brief Restore the gridded sphere fitter state from a communication buffer.
+    pure subroutine gridsphere_comm_expand(this, buffer)
+        class(fitpack_grid_sphere), intent(inout) :: this
+        real(FP_COMM), intent(in) :: buffer(:)
+        integer(FP_SIZE) :: pos
+
+        call this%core_comm_expand(buffer)
+        pos = this%core_comm_size() + 1
+
+        this%pole_z0(1)         = buffer(pos);                  pos = pos + 1
+        this%pole_z0(2)         = buffer(pos);                  pos = pos + 1
+        this%pole_present(1)    = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%pole_present(2)    = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%pole_exct(1)       = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%pole_exct(2)       = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%pole_continuity(1) = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%pole_continuity(2) = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%pole_zero_grad(1)  = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%pole_zero_grad(2)  = nint(buffer(pos), FP_SIZE) /= 0; pos = pos + 1
+        this%nest(1)            = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%nest(2)            = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%nmax               = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%knots(1)           = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+        this%knots(2)           = nint(buffer(pos), FP_SIZE);  pos = pos + 1
+
+        call FP_COMM_EXPAND(this%u, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%u)
+        call FP_COMM_EXPAND(this%v, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%v)
+        call FP_COMM_EXPAND(this%z, buffer(pos:));   pos = pos + FP_COMM_SIZE(this%z)
+        call FP_COMM_EXPAND(this%t, buffer(pos:))
+    end subroutine gridsphere_comm_expand
+
+end module fitpack_gridded_sphere

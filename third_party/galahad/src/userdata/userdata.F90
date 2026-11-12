@@ -1,0 +1,64 @@
+! THIS VERSION: GALAHAD 5.5 - 2026-02-19 AT 08:30 GMT.
+
+#include "galahad_modules.h"
+
+!-*-*-*-*-*-*-*- G A L A H A D _ U S E R D A T A   M O D U L E -*-*-*-*-*-*-*-
+
+!  Copyright reserved, Gould/Orban/Toint, for GALAHAD productions
+!  Principal author: Nick Gould
+
+!  History -
+!   originally released as part of NLPT GALAHAD Version 2.0. February 16th 2005
+!   seprated into its own module May 3rd 2021
+
+!  For full documentation, see
+!   http://galahad.rl.ac.uk/galahad-www/specs.html
+
+   MODULE GALAHAD_USERDATA_precision
+
+     USE GALAHAD_KINDS_precision
+     USE, INTRINSIC :: ISO_C_BINDING, ONLY : C_PTR, C_NULL_PTR
+
+     IMPLICIT NONE
+
+     PUBLIC
+     PRIVATE :: C_PTR, C_NULL_PTR
+
+!  ======================================
+!  The GALAHAD_userdata_type derived type
+!  ======================================
+
+!    TYPE, PUBLIC :: GALAHAD_userdata_type
+     TYPE, PUBLIC :: USERDATA_type
+       INTEGER ( KIND = ip_ ), ALLOCATABLE, DIMENSION( : ) :: integer
+       REAL( KIND = rp_ ), ALLOCATABLE, DIMENSION( : ) :: real
+       COMPLEX ( KIND = cp_ ), ALLOCATABLE, DIMENSION( : ) :: complex
+       CHARACTER, ALLOCATABLE, DIMENSION( : ) :: character
+       LOGICAL, ALLOCATABLE, DIMENSION( : ) :: logical
+       INTEGER ( KIND = ip_ ), POINTER,                                        &
+         DIMENSION( : ) :: integer_pointer => NULL( )
+       REAL( KIND = rp_ ), POINTER, DIMENSION( : ) :: real_pointer => NULL( )
+       COMPLEX ( KIND = cp_ ), POINTER,                                        &
+         DIMENSION( : ) :: complex_pointer => NULL( )
+       CHARACTER, POINTER, DIMENSION( : ) :: character_pointer => NULL( )
+       LOGICAL, POINTER, DIMENSION( : ) :: logical_pointer => NULL( )
+
+!  reserved for GALAHAD's C interfaces, which use it to pass the user's C
+!  callbacks and data to their evaluation wrappers (this avoids internal
+!  procedures, whose trampolines would need an executable stack)
+
+       TYPE ( C_PTR ) :: c_context = C_NULL_PTR
+     END TYPE USERDATA_type
+!    END TYPE GALAHAD_userdata_type
+
+!  extends the GALAHAD_userdata_type so that it can be refered to as
+!  the more conventional USERDATA_type
+
+      TYPE, PUBLIC, EXTENDS( USERDATA_type ) :: GALAHAD_userdata_type
+      END TYPE GALAHAD_userdata_type
+!     TYPE, PUBLIC, EXTENDS( GALAHAD_userdata_type ) :: USERDATA_type
+!     END TYPE USERDATA_type
+
+!  End of module GALAHAD_USERDATA
+
+   END MODULE GALAHAD_USERDATA_precision

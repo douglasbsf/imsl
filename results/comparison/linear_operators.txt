@@ -1,0 +1,6 @@
+case=linear_operators
+status=PASS
+max_abs_error=  0.0000000000000000E+00
+max_rel_error=  0.0000000000000000E+00
+abs_tolerance=  1.0000000000000000E-10
+rel_tolerance=  1.0000000000000000E-10

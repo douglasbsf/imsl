@@ -1,0 +1,6 @@
+case=bclsf
+status=PASS
+max_abs_error=  5.5215720884405073E-11
+max_rel_error=  2.2086288353261443E-10
+abs_tolerance=  1.0000000000000000E-08
+rel_tolerance=  1.0000000000000000E-08

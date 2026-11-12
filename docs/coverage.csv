@@ -1,20 +1,20 @@
-architecture_entry,category,proprietary_example,opensource_fortran_example,notes
-EVCRG,eigensystem,imsl/evcrg.f90,LAPACK DGEEV,Eigenvalue and eigenvector residual
-EVCCG,eigensystem,imsl/evccg.f90,LAPACK ZGEEV,Complex eigensystem
-EVLCG,eigensystem,imsl/evlcg.f90,LAPACK ZGEEV,Complex eigenvalues only
-GVCRG,generalized eigenproblem,imsl/gvcrg.f90,LAPACK DGGEV,Generalized eigenvalues
-MRRRR,matrix product,imsl/mrrrr.f90,BLAS DGEMM,Real matrix product
-MCRCR,matrix product,imsl/mcrcr.f90,BLAS ZGEMM,Complex matrix product
-MUCRV,matrix-vector,imsl/mucrv.f90,BLAS ZGEMV,Complex matrix-vector
-linear_operators,operator interface,imsl/linear_operators.f90,LAPACK DGESV,Real matrix solve
-LSLCG,complex linear solve,imsl/lslcg.f90,LAPACK ZGESV,Complex matrix solve
-LIN_SOL_GEN,general linear solve,imsl/lin_sol_gen.f90,LAPACK DGESV,Dense solve
-RCURV,polynomial regression,imsl/rcurv.f90,LAPACK DGELS,Polynomial fit
-CSIEZ,cubic spline,imsl/csiez.f90,Fortran plus LAPACK DGESV,Not-a-knot spline
-BCLSF,bounded least squares,imsl/bclsf.f90,Fortran projected LM plus LAPACK DGESV,Illustrative only not production replacement
-UNLSF,nonlinear least squares,imsl/unlsf.f90,Fortran damped Gauss Newton plus LAPACK DGESV,Illustrative only consider MINPACK in production
-U4LSF,optimizer configuration,imsl/u4lsf.f90,Fortran tolerance configuration plus LAPACK,Illustrative only
-IVPRK,ODE solver,imsl/ivprk.f90,Fortran RK4,Demonstrates same ODE not same Runge Kutta method
-SVIGN,integer sorting,imsl/svign.f90,Fortran insertion sort,Example integers
-UMACH,I-O utility,imsl/umach.f90,ISO_FORTRAN_ENV,Functional stdout
-IFNLS,Intel Windows locale (not IMSL),imsl/ifnls.f90,Fortran numeric formatting,Specific es-ES example only
+architecture_entry,category,proprietary_example,opensource_fortran_example,status,notes
+EVCRG,eigensystem,examples/imsl_evcrg.f90,LAPACK DGEEV,PASS,Eigenvalues sorted by real part
+EVCCG,eigensystem,examples/imsl_evccg.f90,LAPACK ZGEEV,PASS,Complex eigensystem
+EVLCG,eigensystem,examples/imsl_evlcg.f90,LAPACK ZGEEV,PASS,Eigenvalues only
+GVCRG,generalized eigenproblem,examples/imsl_gvcrg.f90,LAPACK DGGEV,PASS,Generalized eigenvalues
+MRRRR,matrix product,examples/imsl_mrrrr.f90,BLAS DGEMM,PASS,Real matrix product
+MCRCR,matrix product,examples/imsl_mcrcr.f90,BLAS ZGEMM,PASS,Complex matrix product
+MUCRV,matrix-vector,examples/imsl_mucrv.f90,BLAS ZGEMV,PASS,Complex matrix-vector
+linear_operators,operator interface,examples/imsl_linear_operators.f90,LAPACK DGESV,PASS,IMSL .ix. operator
+LSLCG,complex linear solve,examples/imsl_lslcg.f90,LAPACK ZGESV,PASS,Complex dense solve
+LIN_SOL_GEN,general linear solve,examples/imsl_lin_sol_gen.f90,LAPACK DGESV,PASS,Dense solve
+RCURV,polynomial regression,examples/imsl_rcurv.f90,LAPACK DGELS,PASS,Quadratic fit
+CSIEZ,cubic spline,examples/imsl_csiez.f90,FITPACK curfit/splev,PASS,third_party/fitpack
+BCLSF,bounded least squares,examples/imsl_bclsf.f90,GALAHAD BNLS,PASS,libgalahad_double.a + OpenMP; E_abs~5.5e-11
+UNLSF,nonlinear least squares,examples/imsl_unlsf.f90,MINPACK LMDIF,PASS,third_party/minpack
+U4LSF,optimizer configuration,examples/imsl_u4lsf.f90,MINPACK tolerance config,PASS,U4LSF sets RPARAM then UNLSF/MINPACK
+IVPRK,ODE solver,examples/imsl_ivprk.f90,DOP853,PASS,third_party/dop853; y'=-y
+SVIGN,integer sorting,examples/imsl_svign.f90,stdlib SORT introsort,PASS,stdlib_sort_generated int32
+UMACH,I-O utility,examples/imsl_umach.f90,ISO_FORTRAN_ENV output_unit,PASS,Functional stdout unit
+IFNLS,Intel Windows locale (not IMSL),examples/imsl_ifnls.f90,Fortran formatting,PASS,String 1.234,50; not an IMSL routine

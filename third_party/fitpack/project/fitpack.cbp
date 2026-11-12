@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<CodeBlocks_project_file>
+	<FileVersion major="1" minor="6" />
+	<Project>
+		<Option title="fitpack" />
+		<Option pch_mode="2" />
+		<Option compiler="gcc" />
+		<Build>
+			<Target title="Debug">
+				<Option output="bin/Debug/fitpack" prefix_auto="1" extension_auto="1" />
+				<Option object_output="obj/Debug/" />
+				<Option type="1" />
+				<Option compiler="gcc" />
+				<Compiler>
+					<Add option="-g" />
+					<Add option="-fcheck=bounds,mem" />
+					<Add option="-Jobj/Debug" />
+					<Add option="-Wpedantic" />
+					<Add option="-Wcompare-reals" />
+				</Compiler>
+			</Target>
+			<Target title="Debug_Apple">
+				<Option platforms="Mac;" />
+				<Option output="../build/debug/fitpack" prefix_auto="1" extension_auto="1" />
+				<Option working_dir="" />
+				<Option object_output="../build/debug/fitpack/" />
+				<Option type="2" />
+				<Option compiler="gcc" />
+				<Option createDefFile="1" />
+				<Compiler>
+					<Add option="-g" />
+					<Add option="-fcheck=bounds,mem" />
+					<Add option="-J../build/debug/fitpack" />
+					<Add option="-Wpedantic" />
+					<Add option="-Wcompare-reals" />
+				</Compiler>
+			</Target>
+			<Target title="Release">
+				<Option output="bin/Release/fitpack" prefix_auto="1" extension_auto="1" />
+				<Option object_output="obj/Release/" />
+				<Option type="1" />
+				<Option compiler="gcc" />
+				<Compiler>
+					<Add option="-O2" />
+					<Add option="-Jobj/Release" />
+					<Add option="-fcheck=all" />
+				</Compiler>
+				<Linker>
+					<Add option="-s" />
+					<LinkerExe value="CppCompiler" />
+				</Linker>
+			</Target>
+			<Target title="Library_Apple">
+				<Option platforms="Mac;" />
+				<Option output="fitpack" imp_lib="$(TARGET_OUTPUT_DIR)$(TARGET_OUTPUT_BASENAME).a" def_file="$(TARGET_OUTPUT_DIR)$(TARGET_OUTPUT_BASENAME).def" prefix_auto="1" extension_auto="1" />
+				<Option type="3" />
+				<Option compiler="gcc" />
+				<Option createDefFile="1" />
+				<Option createStaticLib="1" />
+				<Compiler>
+					<Add option="-static" />
+				</Compiler>
+				<Linker>
+					<Add library="gfortran" />
+				</Linker>
+			</Target>
+			<Target title="Library_Static">
+				<Option output="fitpack" prefix_auto="1" extension_auto="1" />
+				<Option working_dir="" />
+				<Option type="2" />
+				<Option compiler="gcc" />
+				<Option createDefFile="1" />
+				<Compiler>
+					<Add option="-static" />
+				</Compiler>
+				<Linker>
+					<Add library="gfortran" />
+				</Linker>
+			</Target>
+		</Build>
+		<Compiler>
+			<Add option="-Wall" />
+		</Compiler>
+		<Linker>
+			<Add library="gfortran" />
+			<Add library="quadmath" />
+		</Linker>
+		<Unit filename="../include/fitpack.hpp" />
+		<Unit filename="../include/fitpack_capi_export.h" />
+		<Unit filename="../include/fitpack_closed_curve_c.h" />
+		<Unit filename="../include/fitpack_config.h" />
+		<Unit filename="../include/fitpack_constrained_curve_c.h" />
+		<Unit filename="../include/fitpack_convex_curve_c.h" />
+		<Unit filename="../include/fitpack_convex_curves_c_types.h" />
+		<Unit filename="../include/fitpack_core_c.h" />
+		<Unit filename="../include/fitpack_curve_c.h" />
+		<Unit filename="../include/fitpack_curves_c_types.h" />
+		<Unit filename="../include/fitpack_fitter_c.h" />
+		<Unit filename="../include/fitpack_fitters_c_types.h" />
+		<Unit filename="../include/fitpack_grid_polar_c.h" />
+		<Unit filename="../include/fitpack_grid_sphere_c.h" />
+		<Unit filename="../include/fitpack_grid_surface_c.h" />
+		<Unit filename="../include/fitpack_gridded_polar_c_types.h" />
+		<Unit filename="../include/fitpack_gridded_sphere_c_types.h" />
+		<Unit filename="../include/fitpack_gridded_spline_c.h" />
+		<Unit filename="../include/fitpack_gridded_splines_c_types.h" />
+		<Unit filename="../include/fitpack_gridded_surfaces_c_types.h" />
+		<Unit filename="../include/fitpack_parametric_curve_c.h" />
+		<Unit filename="../include/fitpack_parametric_curves_c_types.h" />
+		<Unit filename="../include/fitpack_parametric_surface_c.h" />
+		<Unit filename="../include/fitpack_parametric_surfaces_c_types.h" />
+		<Unit filename="../include/fitpack_periodic_curve_c.h" />
+		<Unit filename="../include/fitpack_polar_c.h" />
+		<Unit filename="../include/fitpack_polar_domains_c_types.h" />
+		<Unit filename="../include/fitpack_sphere_c.h" />
+		<Unit filename="../include/fitpack_sphere_domains_c_types.h" />
+		<Unit filename="../include/fitpack_surface_c.h" />
+		<Unit filename="../include/fitpack_surfaces_c_types.h" />
+		<Unit filename="../include/fpClosedCurve.hpp" />
+		<Unit filename="../include/fpConstrainedCurve.hpp" />
+		<Unit filename="../include/fpConvexCurve.hpp" />
+		<Unit filename="../include/fpCurve.hpp" />
+		<Unit filename="../include/fpFitter.hpp" />
+		<Unit filename="../include/fpFitter_subtypes.hpp" />
+		<Unit filename="../include/fpGridPolar.hpp" />
+		<Unit filename="../include/fpGridSphere.hpp" />
+		<Unit filename="../include/fpGridSpline.hpp" />
+		<Unit filename="../include/fpGridSurface.hpp" />
+		<Unit filename="../include/fpParametricCurve.hpp" />
+		<Unit filename="../include/fpParametricSurface.hpp" />
+		<Unit filename="../include/fpPeriodicCurve.hpp" />
+		<Unit filename="../include/fpPoint.hpp" />
+		<Unit filename="../include/fpPolar.hpp" />
+		<Unit filename="../include/fpSphere.hpp" />
+		<Unit filename="../include/fpSurface.hpp" />
+		<Unit filename="../src/capi/fitpack_convex_curves_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_convex_curves_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_core_c.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_curves_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_curves_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_fitters_c.f90">
+			<Option weight="3" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_fitters_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_fx_status.f90">
+			<Option weight="0" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_gridded_polar_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_gridded_polar_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_gridded_sphere_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_gridded_sphere_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_gridded_splines_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_gridded_splines_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_gridded_surfaces_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_gridded_surfaces_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_parametric_curves_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_parametric_curves_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_parametric_surfaces_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_parametric_surfaces_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_polar_domains_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_polar_domains_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_sphere_domains_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_sphere_domains_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_surfaces_c.f90">
+			<Option weight="4" />
+		</Unit>
+		<Unit filename="../src/capi/fitpack_surfaces_c_types.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/fitpack.f90">
+			<Option weight="5" />
+		</Unit>
+		<Unit filename="../src/fitpack_convex_curves.f90">
+			<Option weight="3" />
+		</Unit>
+		<Unit filename="../src/fitpack_core.F90">
+			<Option weight="0" />
+		</Unit>
+		<Unit filename="../src/fitpack_curves.f90">
+			<Option weight="2" />
+		</Unit>
+		<Unit filename="../src/fitpack_fitters.f90">
+			<Option weight="1" />
+		</Unit>
+		<Unit filename="../src/fitpack_gridded_polar.f90">
+			<Option weight="2" />
+		</Unit>
+		<Unit filename="../src/fitpack_gridded_sphere.f90">
+			<Option weight="2" />
+		</Unit>
+		<Unit filename="../src/fitpack_gridded_splines.f90">
+			<Option weight="2" />
+		</Unit>
+		<Unit filename="../src/fitpack_gridded_surfaces.f90">
+			<Option weight="3" />
+		</Unit>
+		<Unit filename="../src/fitpack_parametric.f90">
+			<Option weight="2" />
+		</Unit>
+		<Unit filename="../src/fitpack_parametric_surfaces.f90">
+			<Option weight="2" />
+		</Unit>
+		<Unit filename="../src/fitpack_polar.f90">
+			<Option weight="2" />
+		</Unit>
+		<Unit filename="../src/fitpack_spheres.f90">
+			<Option weight="2" />
+		</Unit>
+		<Unit filename="../src/fitpack_surfaces.f90">
+			<Option weight="3" />
+		</Unit>
+		<Unit filename="../test/fitpack_cpp_tests.f90">
+			<Option weight="6" />
+		</Unit>
+		<Unit filename="../test/fitpack_curve_tests.f90">
+			<Option weight="7" />
+		</Unit>
+		<Unit filename="../test/fitpack_grid_nd_tests.f90">
+			<Option weight="7" />
+		</Unit>
+		<Unit filename="../test/fitpack_test_data.f90">
+			<Option weight="6" />
+		</Unit>
+		<Unit filename="../test/fitpack_tests.f90">
+			<Option weight="7" />
+		</Unit>
+		<Unit filename="../test/test.f90">
+			<Option weight="8" />
+		</Unit>
+		<Unit filename="../test/test_curve.cpp">
+			<Option weight="6" />
+		</Unit>
+		<Extensions />
+	</Project>
+</CodeBlocks_project_file>

@@ -1,0 +1,17 @@
+*.o
+*.mod
+*.depend
+*.layout
+build/*
+project/bin/*
+project/obj/*
+docs/book
+docs/papers
+exact_grid
+loop_1
+loop_2
+loop_3
+polar_grid.dat
+project/fitpack.dylib
+project/doxygen/html/
+project/libfitpack.a

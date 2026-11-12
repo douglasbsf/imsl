@@ -1,0 +1,553 @@
+[1/536] Generating 'libgalahad_double.a.p/double_common.f90'
+[2/536] Generating 'libgalahad_double.a.p/double_clock.f90'
+[3/536] Generating 'libgalahad_double.a.p/double_copyright.f90'
+[4/536] Generating 'libgalahad_double.a.p/double_mpi.f90'
+[5/536] Generating 'libgalahad_double.a.p/double_hsl_kinds.f90'
+[6/536] Generating 'libgalahad_double.a.p/double_hsl_inter.f90'
+[7/536] Generating 'libgalahad_double.a.p/double_hsl_kinds_real.f90'
+[8/536] Generating 'libgalahad_double.a.p/double_hsl_ad02r.f90'
+[9/536] Generating 'libgalahad_double.a.p/double_hsl_kb22l.f90'
+[10/536] Generating 'libgalahad_double.a.p/double_hsl_ma48r.f90'
+[11/536] Generating 'libgalahad_double.a.p/double_hsl_ma54r.f90'
+[12/536] Generating 'libgalahad_double.a.p/double_hsl_ma57r.f90'
+[13/536] Generating 'libgalahad_double.a.p/double_hsl_ma64r.f90'
+[14/536] Generating 'libgalahad_double.a.p/double_hsl_ma77r.f90'
+[15/536] Generating 'libgalahad_double.a.p/double_hsl_ma86r.f90'
+[16/536] Generating 'libgalahad_double.a.p/double_hsl_ma87r.f90'
+[17/536] Generating 'libgalahad_double.a.p/double_hsl_ma97r.f90'
+[18/536] Generating 'libgalahad_double.a.p/double_hsl_mc34r.f90'
+[19/536] Generating 'libgalahad_double.a.p/double_hsl_mc64r.f90'
+[20/536] Generating 'libgalahad_double.a.p/double_hsl_mc65r.f90'
+[21/536] Generating 'libgalahad_double.a.p/double_hsl_mc68i.f90'
+[22/536] Generating 'libgalahad_double.a.p/double_hsl_mc69r.f90'
+[23/536] Generating 'libgalahad_double.a.p/double_hsl_mc78i.f90'
+[24/536] Generating 'libgalahad_double.a.p/double_hsl_mc80r.f90'
+[25/536] Generating 'libgalahad_double.a.p/double_hsl_mi20r.f90'
+[26/536] Generating 'libgalahad_double.a.p/double_hsl_mi28r.f90'
+[27/536] Generating 'libgalahad_double.a.p/double_hsl_mi32r.f90'
+[28/536] Generating 'libgalahad_double.a.p/double_hsl_mi35r.f90'
+[29/536] Generating 'libgalahad_double.a.p/double_hsl_of01i.f90'
+[30/536] Generating 'libgalahad_double.a.p/double_hsl_of01r.f90'
+[31/536] Generating 'libgalahad_double.a.p/double_hsl_zb01i.f90'
+[32/536] Generating 'libgalahad_double.a.p/double_hsl_zb01r.f90'
+[33/536] Generating 'libgalahad_double.a.p/double_hsl_zd11r.f90'
+[34/536] Generating 'libgalahad_double.a.p/double_mkl_pardiso_interface.f90'
+[35/536] Generating 'libgalahad_double.a.p/double_mumps_types.f90'
+[36/536] Generating 'libgalahad_double.a.p/double_spmf_interfaces.f90'
+[37/536] Generating 'libgalahad_double.a.p/double_pastixf_interfaces.f90'
+[38/536] Generating 'libgalahad_double.a.p/double_kinds.f90'
+[39/536] Generating 'libgalahad_double.a.p/double_kinds_real.f90'
+[40/536] Generating 'libgalahad_double.a.p/double_smt.f90'
+[41/536] Generating 'libgalahad_double.a.p/double_sort.f90'
+[42/536] Generating 'libgalahad_double.a.p/double_specfile.f90'
+[43/536] Generating 'libgalahad_double.a.p/double_space.f90'
+[44/536] Generating 'libgalahad_double.a.p/double_string.f90'
+[45/536] Generating 'libgalahad_double.a.p/double_symbols.f90'
+[46/536] Generating 'libgalahad_double.a.p/double_amd.f90'
+[47/536] Generating 'libgalahad_double.a.p/double_band.f90'
+[48/536] Generating 'libgalahad_double.a.p/double_arc.f90'
+[49/536] Generating 'libgalahad_double.a.p/double_bgo.f90'
+[50/536] Generating 'libgalahad_double.a.p/double_blls.f90'
+[51/536] Generating 'libgalahad_double.a.p/double_bllsb.f90'
+[52/536] Generating 'libgalahad_double.a.p/double_bnls.f90'
+[53/536] Generating 'libgalahad_double.a.p/double_bqp.f90'
+[54/536] Generating 'libgalahad_double.a.p/double_bqpb.f90'
+[55/536] Generating 'libgalahad_double.a.p/double_bsc.f90'
+[56/536] Generating 'libgalahad_double.a.p/double_ccqp.f90'
+[57/536] Generating 'libgalahad_double.a.p/double_cdqp.f90'
+[58/536] Generating 'libgalahad_double.a.p/double_check.f90'
+[59/536] Generating 'libgalahad_double.a.p/double_checkpoint.f90'
+[60/536] Generating 'libgalahad_double.a.p/double_clls.f90'
+[61/536] Generating 'libgalahad_double.a.p/double_convert.f90'
+[62/536] Generating 'libgalahad_double.a.p/double_cqp.f90'
+[63/536] Generating 'libgalahad_double.a.p/double_cro.f90'
+[64/536] Generating 'libgalahad_double.a.p/double_demo.f90'
+[65/536] Generating 'libgalahad_double.a.p/double_dgo.f90'
+[66/536] Generating 'libgalahad_double.a.p/double_dlp.f90'
+[67/536] Generating 'libgalahad_double.a.p/double_dps.f90'
+[68/536] Generating 'libgalahad_double.a.p/double_dqp.f90'
+[69/536] Generating 'libgalahad_double.a.p/double_eqp.f90'
+[70/536] Generating 'libgalahad_double.a.p/double_extend.f90'
+[71/536] Generating 'libgalahad_double.a.p/double_fdc.f90'
+[72/536] Generating 'libgalahad_double.a.p/double_fdh.f90'
+[73/536] Generating 'libgalahad_double.a.p/double_filter.f90'
+[74/536] Generating 'libgalahad_double.a.p/double_filtrane.f90'
+[75/536] Generating 'libgalahad_double.a.p/double_fit.f90'
+[76/536] Generating 'libgalahad_double.a.p/double_expo.f90'
+[77/536] Generating 'libgalahad_double.a.p/double_glrt.f90'
+[78/536] Generating 'libgalahad_double.a.p/double_gls.f90'
+[79/536] Generating 'libgalahad_double.a.p/double_gltr.f90'
+[80/536] Generating 'libgalahad_double.a.p/double_hash.f90'
+[81/536] Generating 'libgalahad_double.a.p/double_icfs.f90'
+[82/536] Generating 'libgalahad_double.a.p/double_ir.f90'
+[83/536] Generating 'libgalahad_double.a.p/double_l1qp.f90'
+[84/536] Generating 'libgalahad_double.a.p/double_l2rt.f90'
+[85/536] Generating 'libgalahad_double.a.p/double_asmbl.f90'
+[86/536] Generating 'libgalahad_double.a.p/double_cauchy.f90'
+[87/536] Generating 'libgalahad_double.a.p/double_cg.f90'
+[88/536] Generating 'libgalahad_double.a.p/double_drche.f90'
+[89/536] Generating 'libgalahad_double.a.p/double_drchg.f90'
+[90/536] Generating 'libgalahad_double.a.p/double_frntl.f90'
+[91/536] Generating 'libgalahad_double.a.p/double_hslint.f90'
+[92/536] Generating 'libgalahad_double.a.p/double_hsprd.f90'
+[93/536] Generating 'libgalahad_double.a.p/double_initw.f90'
+[94/536] Generating 'libgalahad_double.a.p/double_lancelot.f90'
+[95/536] Generating 'libgalahad_double.a.p/double_lancelot_steering.f90'
+[96/536] Generating 'libgalahad_double.a.p/double_lancelot_types.f90'
+[97/536] Generating 'libgalahad_double.a.p/double_mdchl.f90'
+[98/536] Generating 'libgalahad_double.a.p/double_others.f90'
+[99/536] Generating 'libgalahad_double.a.p/double_precn.f90'
+[100/536] Generating 'libgalahad_double.a.p/double_scaln.f90'
+[101/536] Generating 'libgalahad_double.a.p/double_strutr.f90'
+[102/536] Generating 'libgalahad_double.a.p/double_lancelot_simple.f90'
+[103/536] Generating 'libgalahad_double.a.p/double_blas_inter.f90'
+[104/536] Generating 'libgalahad_double.a.p/double_lapack_inter.f90'
+[105/536] Generating 'libgalahad_double.a.p/double_lhs.f90'
+[106/536] Generating 'libgalahad_double.a.p/double_lls.f90'
+[107/536] Generating 'libgalahad_double.a.p/double_llsr.f90'
+[108/536] Generating 'libgalahad_double.a.p/double_lms.f90'
+[109/536] Generating 'libgalahad_double.a.p/double_llst.f90'
+[110/536] Generating 'libgalahad_double.a.p/double_lmt.f90'
+[111/536] Generating 'libgalahad_double.a.p/double_lpa.f90'
+[112/536] Generating 'libgalahad_double.a.p/double_lpb.f90'
+[113/536] Generating 'libgalahad_double.a.p/double_lpqp.f90'
+[114/536] Generating 'libgalahad_double.a.p/double_lqr.f90'
+[115/536] Generating 'libgalahad_double.a.p/double_lqt.f90'
+[116/536] Generating 'libgalahad_double.a.p/double_lsp.f90'
+[117/536] Generating 'libgalahad_double.a.p/double_lsqp.f90'
+[118/536] Generating 'libgalahad_double.a.p/double_lsrt.f90'
+[119/536] Generating 'libgalahad_double.a.p/double_lstr.f90'
+[120/536] Generating 'libgalahad_double.a.p/double_miqr.f90'
+[121/536] Generating 'libgalahad_double.a.p/double_mo.f90'
+[122/536] Generating 'libgalahad_double.a.p/double_mop.f90'
+[123/536] Generating 'libgalahad_double.a.p/double_ms.f90'
+[124/536] Generating 'libgalahad_double.a.p/double_mu.f90'
+[125/536] Generating 'libgalahad_double.a.p/double_nlpt.f90'
+[126/536] Generating 'libgalahad_double.a.p/double_nls.f90'
+[127/536] Generating 'libgalahad_double.a.p/double_nodend.f90'
+[128/536] Generating 'libgalahad_double.a.p/double_norms.f90'
+[129/536] Generating 'libgalahad_double.a.p/double_nrek.f90'
+[130/536] Generating 'libgalahad_double.a.p/double_opt.f90'
+[131/536] Generating 'libgalahad_double.a.p/double_presolve.f90'
+[132/536] Generating 'libgalahad_double.a.p/double_problem.f90'
+[133/536] Generating 'libgalahad_double.a.p/double_psls.f90'
+[134/536] Generating 'libgalahad_double.a.p/double_qp.f90'
+[135/536] Generating 'libgalahad_double.a.p/double_qpa.f90'
+[136/536] Generating 'libgalahad_double.a.p/double_qpb.f90'
+[137/536] Generating 'libgalahad_double.a.p/double_qpc.f90'
+[138/536] Generating 'libgalahad_double.a.p/double_qpd.f90'
+[139/536] Generating 'libgalahad_double.a.p/double_qpp.f90'
+[140/536] Generating 'libgalahad_double.a.p/double_qpt.f90'
+[141/536] Generating 'libgalahad_double.a.p/double_rand.f90'
+[142/536] Generating 'libgalahad_double.a.p/double_reverse.f90'
+[143/536] Generating 'libgalahad_double.a.p/double_rb.f90'
+[144/536] Generating 'libgalahad_double.a.p/double_roots.f90'
+[145/536] Generating 'libgalahad_double.a.p/double_rpd.f90'
+[146/536] Generating 'libgalahad_double.a.p/double_rqs.f90'
+[147/536] Generating 'libgalahad_double.a.p/double_sbls.f90'
+[148/536] Generating 'libgalahad_double.a.p/double_scale.f90'
+[149/536] Generating 'libgalahad_double.a.p/double_scu.f90'
+[150/536] Generating 'libgalahad_double.a.p/double_sec.f90'
+[151/536] Generating 'libgalahad_double.a.p/double_sha.f90'
+[152/536] Generating 'libgalahad_double.a.p/double_sils.f90'
+[153/536] Generating 'libgalahad_double.a.p/double_slblt.f90'
+[154/536] Generating 'libgalahad_double.a.p/double_contrib_iface.f90'
+[155/536] Generating 'libgalahad_double.a.p/double_types.f90'
+[156/536] Generating 'libgalahad_double.a.p/double_subtree.f90'
+[157/536] Generating 'libgalahad_double.a.p/double_slblt_factor.f90'
+[158/536] Generating 'libgalahad_double.a.p/double_numeric_subtree.f90'
+[159/536] Generating 'libgalahad_double.a.p/double_sllsb.f90'
+[160/536] Generating 'libgalahad_double.a.p/double_slls.f90'
+[161/536] Generating 'libgalahad_double.a.p/double_snls.f90'
+[162/536] Generating 'libgalahad_double.a.p/double_sls.f90'
+[163/536] Generating 'libgalahad_double.a.p/double_ssls.f90'
+[164/536] Generating 'libgalahad_double.a.p/double_svt.f90'
+[165/536] Generating 'libgalahad_double.a.p/double_tools.f90'
+[166/536] Generating 'libgalahad_double.a.p/double_topology.f90'
+[167/536] Generating 'libgalahad_double.a.p/double_trans.f90'
+[168/536] Generating 'libgalahad_double.a.p/double_trb.f90'
+[169/536] Generating 'libgalahad_double.a.p/double_trek.f90'
+[170/536] Generating 'libgalahad_double.a.p/double_trs.f90'
+[171/536] Generating 'libgalahad_double.a.p/double_tru.f90'
+[172/536] Generating 'libgalahad_double.a.p/double_ugo.f90'
+[173/536] Generating 'libgalahad_double.a.p/double_uls.f90'
+[174/536] Generating 'libgalahad_double.a.p/double_userdata.f90'
+[175/536] Generating 'libgalahad_double.a.p/double_version.f90'
+[176/536] Generating 'libgalahad_double.a.p/double_wcp.f90'
+[177/536] Generating 'libgalahad_double.a.p/double_wsmp.f90'
+[178/536] Generating 'libgalahad_double.a.p/double_pardiso.f90'
+[179/536] Generating 'libgalahad_double.a.p/double_spmf_enums.f90'
+[180/536] Generating 'libgalahad_double.a.p/double_pastixf_enums.f90'
+[181/536] Generating 'libgalahad_double.a.p/double_spmf.f90'
+[182/536] Generating 'libgalahad_double.a.p/double_pastixf.f90'
+[183/536] Generating 'libgalahad_double.a.p/double_mumps.f90'
+[184/536] Generating 'libgalahad_double.a.p/double_mkl_pardiso.f90'
+[185/536] Generating 'libgalahad_double.a.p/double_cutest_dummy.f90'
+[186/536] Generating 'libgalahad_double.a.p/double_fa14r.f'
+[187/536] Generating 'libgalahad_double.a.p/double_fd15r.f'
+[188/536] Generating 'libgalahad_double.a.p/double_kb07i.f'
+[189/536] Generating 'libgalahad_double.a.p/double_kb07r.f'
+[190/536] Generating 'libgalahad_double.a.p/double_la04r.f'
+[191/536] Generating 'libgalahad_double.a.p/double_la15r.f'
+[192/536] Generating 'libgalahad_double.a.p/double_ma27r.f'
+[193/536] Generating 'libgalahad_double.a.p/double_ma28r.f'
+[194/536] Generating 'libgalahad_double.a.p/double_ma30r.f'
+[195/536] Generating 'libgalahad_double.a.p/double_ma33r.f'
+[196/536] Generating 'libgalahad_double.a.p/double_ma57r.f'
+[197/536] Generating 'libgalahad_double.a.p/double_ma61r.f'
+[198/536] Generating 'libgalahad_double.a.p/double_mc13r.f'
+[199/536] Generating 'libgalahad_double.a.p/double_mc19r.f'
+[200/536] Generating 'libgalahad_double.a.p/double_mc20r.f'
+[201/536] Generating 'libgalahad_double.a.p/double_mc21r.f'
+[202/536] Generating 'libgalahad_double.a.p/double_mc22r.f'
+[203/536] Generating 'libgalahad_double.a.p/double_mc23r.f'
+[204/536] Generating 'libgalahad_double.a.p/double_mc24r.f'
+[205/536] Generating 'libgalahad_double.a.p/double_mc29r.f'
+[206/536] Generating 'libgalahad_double.a.p/double_mc30r.f'
+[207/536] Generating 'libgalahad_double.a.p/double_mc47r.f'
+[208/536] Generating 'libgalahad_double.a.p/double_mc34r.f'
+[209/536] Generating 'libgalahad_double.a.p/double_mc59r.f'
+[210/536] Generating 'libgalahad_double.a.p/double_mc60r.f'
+[211/536] Generating 'libgalahad_double.a.p/double_mc64r.f'
+[212/536] Generating 'libgalahad_double.a.p/double_mc61r.f'
+[213/536] Generating 'libgalahad_double.a.p/double_mc77r.f'
+[214/536] Generating 'libgalahad_double.a.p/double_mc71r.f'
+[215/536] Generating 'libgalahad_double.a.p/double_mi21r.f'
+[216/536] Generating 'libgalahad_double.a.p/double_mi24r.f'
+[217/536] Generating 'libgalahad_double.a.p/double_mi26r.f'
+[218/536] Compiling C object libgalahad_double.a.p/src_external_metis4_balance.c.obj
+[219/536] Compiling C object libgalahad_double.a.p/src_external_metis4_bucketsort.c.obj
+[220/536] Compiling C object libgalahad_double.a.p/src_external_metis4_ccgraph.c.obj
+[221/536] Compiling C object libgalahad_double.a.p/src_external_metis4_coarsen.c.obj
+[222/536] Compiling C object libgalahad_double.a.p/src_external_metis4_compress.c.obj
+[223/536] Compiling C object libgalahad_double.a.p/src_external_metis4_debug.c.obj
+[224/536] Compiling C object libgalahad_double.a.p/src_external_metis4_fm.c.obj
+[225/536] Compiling C object libgalahad_double.a.p/src_external_metis4_fortran.c.obj
+[226/536] Compiling C object libgalahad_double.a.p/src_external_metis4_graph.c.obj
+[227/536] Compiling C object libgalahad_double.a.p/src_external_metis4_initpart.c.obj
+[228/536] Scanning target "galahad_double" for modules
+[229/536] Compiling C object libgalahad_double.a.p/src_external_metis4_io.c.obj
+[230/536] Compiling C object libgalahad_double.a.p/src_external_metis4_match.c.obj
+[231/536] Generating dynamic dependency information for target "galahad_double"
+[232/536] Compiling C object libgalahad_double.a.p/src_external_metis4_memory.c.obj
+[233/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_common.f90.obj
+[234/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_kinds.f90.obj
+[235/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_kb22l.f90.obj
+[236/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_kinds_real.f90.obj
+[237/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ma54r.f90.obj
+[238/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ad02r.f90.obj
+[239/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ma64r.f90.obj
+[240/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mc34r.f90.obj
+[241/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mc65r.f90.obj
+[242/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mc69r.f90.obj
+[243/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mc78i.f90.obj
+[244/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mc80r.f90.obj
+[245/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mi32r.f90.obj
+[246/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_of01i.f90.obj
+[247/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_of01r.f90.obj
+[248/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_zb01i.f90.obj
+[249/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_zb01r.f90.obj
+[250/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_kinds.f90.obj
+[251/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_zd11r.f90.obj
+[252/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_clock.f90.obj
+[253/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mkl_pardiso_interface.f90.obj
+[254/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mumps_types.f90.obj
+[255/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_kinds_real.f90.obj
+[256/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_smt.f90.obj
+[257/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_copyright.f90.obj
+[258/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mpi.f90.obj
+[259/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_inter.f90.obj
+[260/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_sort.f90.obj
+[261/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_string.f90.obj
+[262/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_symbols.f90.obj
+[263/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_band.f90.obj
+[264/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ma48r.f90.obj
+[265/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ma57r.f90.obj
+[266/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ma77r.f90.obj
+[267/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ma86r.f90.obj
+[268/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ma87r.f90.obj
+[269/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_ma97r.f90.obj
+[270/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mc64r.f90.obj
+[271/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mc68i.f90.obj
+[272/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mi28r.f90.obj
+[273/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mi20r.f90.obj
+[274/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsl_mi35r.f90.obj
+[275/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_specfile.f90.obj
+[276/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_amd.f90.obj
+[277/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_checkpoint.f90.obj
+[278/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_extend.f90.obj
+[279/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_filter.f90.obj
+[280/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_space.f90.obj
+[281/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_gls.f90.obj
+[282/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_convert.f90.obj
+[283/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_demo.f90.obj
+[284/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_fit.f90.obj
+[285/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hash.f90.obj
+[286/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_icfs.f90.obj
+[287/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_asmbl.f90.obj
+[288/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_cauchy.f90.obj
+[289/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hslint.f90.obj
+[290/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_cg.f90.obj
+[291/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_hsprd.f90.obj
+[292/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_strutr.f90.obj
+[293/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_blas_inter.f90.obj
+[294/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lapack_inter.f90.obj
+[295/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_others.f90.obj
+[296/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lmt.f90.obj
+[297/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_initw.f90.obj
+[298/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lms.f90.obj
+[299/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mu.f90.obj
+[300/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ms.f90.obj
+[301/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mop.f90.obj
+[302/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_norms.f90.obj
+[303/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lhs.f90.obj
+[304/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_nodend.f90.obj
+[305/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mo.f90.obj
+[306/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_opt.f90.obj
+[307/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_miqr.f90.obj
+[308/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_rand.f90.obj
+[309/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_reverse.f90.obj
+[310/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_rb.f90.obj
+[311/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_roots.f90.obj
+[312/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_qpt.f90.obj
+[313/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_gltr.f90.obj
+[314/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_bsc.f90.obj
+[315/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_glrt.f90.obj
+[316/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lpqp.f90.obj
+[317/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lqr.f90.obj
+[318/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lqt.f90.obj
+[319/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lstr.f90.obj
+[320/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_l2rt.f90.obj
+[321/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lsp.f90.obj
+[322/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lsrt.f90.obj
+[323/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_qpp.f90.obj
+[324/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_rpd.f90.obj
+[325/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_scu.f90.obj
+[326/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_sec.f90.obj
+[327/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_sha.f90.obj
+[328/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_sils.f90.obj
+[329/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_presolve.f90.obj
+[330/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_types.f90.obj
+[331/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_subtree.f90.obj
+[332/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mdchl.f90.obj
+[333/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_frntl.f90.obj
+[334/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_precn.f90.obj
+[335/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_slblt_factor.f90.obj
+[336/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lancelot_types.f90.obj
+[337/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_drche.f90.obj
+[338/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_numeric_subtree.f90.obj
+[339/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_drchg.f90.obj
+[340/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lancelot.f90.obj
+[341/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_scaln.f90.obj
+[342/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lancelot_simple.f90.obj
+[343/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_contrib_iface.f90.obj
+[344/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_svt.f90.obj
+[345/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_tools.f90.obj
+[346/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_topology.f90.obj
+[347/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lancelot_steering.f90.obj
+[348/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_trans.f90.obj
+[349/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_slblt.f90.obj
+[350/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_uls.f90.obj
+[351/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_userdata.f90.obj
+[352/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_fdh.f90.obj
+[353/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_scale.f90.obj
+[354/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_problem.f90.obj
+[355/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_nlpt.f90.obj
+[356/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ugo.f90.obj
+[357/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_check.f90.obj
+[358/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_version.f90.obj
+[359/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_wsmp.f90.obj
+[360/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_pardiso.f90.obj
+[361/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_spmf_enums.f90.obj
+[362/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_spmf_interfaces.f90.obj
+[363/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_pastixf_enums.f90.obj
+[364/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_pastixf_interfaces.f90.obj
+[365/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_filtrane.f90.obj
+[366/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_spmf.f90.obj
+[367/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_pastixf.f90.obj
+[368/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mumps.f90.obj
+[369/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mkl_pardiso.f90.obj
+[370/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_cutest_dummy.f90.obj
+[371/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_fa14r.f.obj
+[372/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_fd15r.f.obj
+[373/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_kb07i.f.obj
+[374/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_kb07r.f.obj
+[375/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_la04r.f.obj
+[376/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_la15r.f.obj
+[377/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ma27r.f.obj
+[378/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ma28r.f.obj
+[379/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ma30r.f.obj
+[380/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ma33r.f.obj
+[381/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ma57r.f.obj
+[382/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ma61r.f.obj
+[383/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc13r.f.obj
+[384/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc19r.f.obj
+[385/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc20r.f.obj
+[386/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc21r.f.obj
+[387/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc22r.f.obj
+[388/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc23r.f.obj
+[389/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc24r.f.obj
+[390/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc29r.f.obj
+[391/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc30r.f.obj
+[392/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc34r.f.obj
+[393/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc47r.f.obj
+[394/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc59r.f.obj
+[395/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc60r.f.obj
+[396/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc61r.f.obj
+[397/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc64r.f.obj
+[398/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc71r.f.obj
+[399/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mc77r.f.obj
+[400/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mi21r.f.obj
+[401/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mi24r.f.obj
+[402/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_mi26r.f.obj
+[403/536] Compiling C object libgalahad_double.a.p/src_external_metis4_mincover.c.obj
+[404/536] Compiling C object libgalahad_double.a.p/src_external_metis4_mmd.c.obj
+[405/536] Compiling C object libgalahad_double.a.p/src_external_metis4_myqsort.c.obj
+[406/536] Compiling C object libgalahad_double.a.p/src_external_metis4_ometis.c.obj
+[407/536] Compiling C object libgalahad_double.a.p/src_external_metis4_pmetis.c.obj
+[408/536] Compiling C object libgalahad_double.a.p/src_external_metis4_pqueue.c.obj
+[409/536] Compiling C object libgalahad_double.a.p/src_external_metis4_refine.c.obj
+[410/536] Compiling C object libgalahad_double.a.p/src_external_metis4_separator.c.obj
+[411/536] Compiling C object libgalahad_double.a.p/src_external_metis4_sfm.c.obj
+[412/536] Compiling C object libgalahad_double.a.p/src_external_metis4_srefine.c.obj
+[413/536] Compiling C object libgalahad_double.a.p/src_external_metis4_timing.c.obj
+[414/536] Compiling C object libgalahad_double.a.p/src_external_metis4_util.c.obj
+[415/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_auxapi.c.obj
+[416/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_balance.c.obj
+[417/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_bucketsort.c.obj
+[418/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_checkgraph.c.obj
+[419/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_coarsen.c.obj
+[420/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_compress.c.obj
+[421/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_contig.c.obj
+[422/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_debug.c.obj
+[423/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_error.c.obj
+[424/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_fm.c.obj
+[425/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_fortran.c.obj
+[426/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_fs.c.obj
+[427/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_gklib.c.obj
+[428/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_graph.c.obj
+[429/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_initpart.c.obj
+[430/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_io.c.obj
+[431/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_kwayfm.c.obj
+[432/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_sls.f90.obj
+[433/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_kwayrefine.c.obj
+[434/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ir.f90.obj
+[435/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_psls.f90.obj
+[436/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_fdc.f90.obj
+[437/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_rqs.f90.obj
+[438/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_sbls.f90.obj
+[439/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_cro.f90.obj
+[440/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_nls.f90.obj
+[441/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lls.f90.obj
+[442/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_llsr.f90.obj
+[443/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_llst.f90.obj
+[444/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_nrek.f90.obj
+[445/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ssls.f90.obj
+[446/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_trs.f90.obj
+[447/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_dps.f90.obj
+[448/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_arc.f90.obj
+[449/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_trb.f90.obj
+[450/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_qpd.f90.obj
+[451/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_bgo.f90.obj
+[452/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_blls.f90.obj
+[453/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_bqp.f90.obj
+[454/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_dgo.f90.obj
+[455/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_cqp.f90.obj
+[456/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_dqp.f90.obj
+[457/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_bqpb.f90.obj
+[458/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_cdqp.f90.obj
+[459/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_ccqp.f90.obj
+[460/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_dlp.f90.obj
+[461/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_clls.f90.obj
+[462/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_eqp.f90.obj
+[463/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_l1qp.f90.obj
+[464/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lpa.f90.obj
+[465/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_bllsb.f90.obj
+[466/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lpb.f90.obj
+[467/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_lsqp.f90.obj
+[468/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_qpa.f90.obj
+[469/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_bnls.f90.obj
+[470/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_slls.f90.obj
+[471/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_qpb.f90.obj
+[472/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_qpc.f90.obj
+[473/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_sllsb.f90.obj
+[474/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_qp.f90.obj
+[475/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_trek.f90.obj
+[476/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_tru.f90.obj
+[477/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_expo.f90.obj
+[478/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_wcp.f90.obj
+[479/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_mcore.c.obj
+[480/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_mcutil.c.obj
+[481/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_memory.c.obj
+[482/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_minconn.c.obj
+[483/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_mincover.c.obj
+[484/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_mmd.c.obj
+[485/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_ometis.c.obj
+[486/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_options.c.obj
+[487/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_random.c.obj
+[488/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_refine.c.obj
+[489/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_separator.c.obj
+[490/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_sfm.c.obj
+[491/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_srefine.c.obj
+[492/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_string.c.obj
+[493/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_timers.c.obj
+[494/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_timing.c.obj
+[495/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_util.c.obj
+[496/536] Compiling C object libgalahad_double.a.p/src_nodend_metis51_wspace.c.obj
+[497/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_auxapi.c.obj
+[498/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_balance.c.obj
+[499/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_bucketsort.c.obj
+[500/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_checkgraph.c.obj
+[501/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_coarsen.c.obj
+[502/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_compress.c.obj
+[503/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_contig.c.obj
+[504/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_debug.c.obj
+[505/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_error.c.obj
+[506/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_fm.c.obj
+[507/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_fortran.c.obj
+[508/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_fs.c.obj
+[509/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_gklib.c.obj
+[510/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_gkregex.c.obj
+../src/nodend/metis52/gkregex.c:492:10: warning: 'alloca' redefined
+  492 | # define alloca(size)   __builtin_alloca (size)
+      |          ^~~~~~
+In file included from C:/msys64/ucrt64/include/stdlib.h:584,
+                 from ../src/nodend/metis52/include/GKlib_52.h:29,
+                 from ../src/nodend/metis52/gkregex.c:59:
+C:/msys64/ucrt64/include/malloc.h:152:9: note: this is the location of the previous definition
+  152 | #define alloca(x) __builtin_alloca((x))
+      |         ^~~~~~
+../src/nodend/metis52/gkregex.c: In function 'parse_dup_op':
+../src/nodend/metis52/gkregex.c:5093:39: warning: cast to pointer from integer of different size [-Wint-to-pointer-cast]
+ 5093 |     postorder (elem, mark_opt_subexp, (void *) (long) elem->token.opr.idx);
+      |                                       ^
+../src/nodend/metis52/gkregex.c: In function 'mark_opt_subexp':
+../src/nodend/metis52/gkregex.c:6305:19: warning: cast from pointer to integer of different size [-Wpointer-to-int-cast]
+ 6305 |   int idx = (int) (long) extra;
+      |                   ^
+[511/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_graph.c.obj
+[512/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_initpart.c.obj
+[513/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_io.c.obj
+[514/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_kwayfm.c.obj
+[515/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_kwayrefine.c.obj
+[516/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_mcore.c.obj
+[517/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_mcutil.c.obj
+[518/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_memory.c.obj
+[519/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_minconn.c.obj
+[520/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_mincover.c.obj
+[521/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_mmd.c.obj
+[522/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_ometis.c.obj
+[523/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_options.c.obj
+[524/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_random.c.obj
+[525/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_refine.c.obj
+[526/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_separator.c.obj
+[527/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_sfm.c.obj
+[528/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_srefine.c.obj
+[529/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_string.c.obj
+[530/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_timers.c.obj
+[531/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_timing.c.obj
+[532/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_util.c.obj
+[533/536] Compiling C object libgalahad_double.a.p/src_nodend_metis52_wspace.c.obj
+[534/536] Compiling C object libgalahad_double.a.p/src_nodend_adapter_nodend.c.obj
+[535/536] Compiling Fortran object libgalahad_double.a.p/meson-generated_double_snls.f90.obj
+[536/536] Linking static target libgalahad_double.a
